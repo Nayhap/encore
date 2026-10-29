@@ -161,6 +161,14 @@
           <button class="pill" disabled={!!busy} onclick={signOut}>Sign out</button>
         </div>
       </div>
+    {:else if st.state === "choosingChannel"}
+      <div class="row">
+        <div>
+          <b>Choose a channel</b>
+          <p>{st.channels.length ? "Pick the channel Encore should use below." : "YouTube Music didn't list a channel for this session; it's probably signed out. Sign out here, then sign in again or import from a browser where you're signed in."}</p>
+        </div>
+        <button class="pill" disabled={!!busy} onclick={signOut}>{st.channels.length ? "Cancel" : "Sign out"}</button>
+      </div>
     {:else if st.state === "anonymous"}
       <div class="row">
         <div>
