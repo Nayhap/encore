@@ -103,7 +103,7 @@
     display: flex;
     justify-content: flex-end;
     align-items: center;
-    padding: 0 18px;
+    padding: 0 calc(18px + var(--wc-w)) 0 18px;
     z-index: 2;
   }
   .close {

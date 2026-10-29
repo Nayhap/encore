@@ -4,6 +4,7 @@
   import { artistLine, fmt, kindLabel } from "$lib/data";
   import { nav, playArtist, player, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
   // One box for finding music and for doing things. Enter plays or opens,
@@ -42,7 +43,7 @@
     { key: "a-shuffle", group: "Actions", icon: "shuffle", title: player.shuffle ? "Turn shuffle off" : "Turn shuffle on", sub: "Playback", hint: "S", run: () => player.toggleShuffle() },
     { key: "a-repeat", group: "Actions", icon: "repeat", title: "Change repeat mode", sub: "Off, queue, or this song", hint: "R", run: () => player.cycleRepeat() },
     { key: "a-lyrics", group: "Actions", icon: "lyrics", title: "Open full-screen lyrics", sub: "Playback", hint: "F", run: () => (ui.theater = true) },
-    { key: "a-stage", group: "Actions", icon: "stage", title: ui.stageOpen ? "Hide now playing panel" : "Show now playing panel", sub: "Layout", hint: "⌘\\", run: () => (ui.stageOpen = !ui.stageOpen) },
+    { key: "a-stage", group: "Actions", icon: "stage", title: ui.stageOpen ? "Hide now playing panel" : "Show now playing panel", sub: "Layout", hint: mod("\\"), run: () => (ui.stageOpen = !ui.stageOpen) },
     { key: "a-theme", group: "Actions", icon: "moon", title: "Change theme", sub: "System, dark or light", run: () => nav.go({ name: "settings" }) },
     { key: "a-lib", group: "Go to", icon: "library", title: "Library", sub: "Playlists, albums, artists", run: () => nav.go({ name: "library" }) },
     { key: "a-exp", group: "Go to", icon: "compass", title: "Explore", sub: "New releases, charts, moods", run: () => nav.go({ name: "explore" }) },
@@ -198,7 +199,7 @@
     <footer>
       <span><kbd>↑</kbd><kbd>↓</kbd> Move</span>
       <span><kbd>↵</kbd> Play or open</span>
-      <span><kbd>⇧</kbd><kbd>↵</kbd> Play next</span>
+      <span><kbd>{shift}</kbd><kbd>↵</kbd> Play next</span>
     </footer>
   </div>
 </div>

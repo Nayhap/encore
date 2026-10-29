@@ -7,6 +7,8 @@
   import "./styles/global.css";
 
   import { onMount } from "svelte";
+  import { isTauri } from "./backend";
+  import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
   import { account, connect, nav, player, ui } from "./state.svelte";
   import Deck from "./components/Deck.svelte";
@@ -16,6 +18,7 @@
   import Stage from "./components/Stage.svelte";
   import Theater from "./components/Theater.svelte";
   import TopBar from "./components/TopBar.svelte";
+  import WindowControls from "./components/WindowControls.svelte";
   import Artist from "./views/Artist.svelte";
   import Collection from "./views/Collection.svelte";
   import Explore from "./views/Explore.svelte";
@@ -63,6 +66,15 @@
     apply();
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
+  });
+
+  // Windows and Linux: Encore's own window buttons, or the OS title bar.
+  const customChrome = $derived(!isMac && !ui.systemTitlebar);
+  $effect(() => {
+    document.documentElement.dataset.chrome = customChrome ? "custom" : "native";
+    if (isMac) return;
+    localStorage.setItem("titlebar", ui.systemTitlebar ? "system" : "encore");
+    if (isTauri) import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setDecorations(ui.systemTitlebar)).catch(() => {});
   });
 
   $effect(() => {
@@ -221,6 +233,7 @@
 {#if ui.theater && player.current}<Theater />{/if}
 {#if ui.palette}<Palette />{/if}
 <Overlays />
+{#if customChrome}<WindowControls />{/if}
 
 <style>
   .app {

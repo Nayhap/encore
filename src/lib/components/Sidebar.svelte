@@ -4,6 +4,7 @@
   import { kindLabel } from "$lib/data";
   import { account, collectionMenu, nav, player, ui, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import { isMac, mod } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
   const items: { label: string; icon: string; view: View }[] = [
@@ -33,12 +34,14 @@
 </script>
 
 <nav class="side" aria-label="Main">
-  <div class="drag" data-tauri-drag-region></div>
+  <div class="drag" data-tauri-drag-region>
+    {#if !isMac}<span class="brand" data-tauri-drag-region><img src="/icon.png" alt="" data-tauri-drag-region /><span data-tauri-drag-region>Encore</span></span>{/if}
+  </div>
 
   <button class="search" onclick={() => (ui.palette = true)}>
     <Icon name="search" size={16} />
     <span>Search</span>
-    <kbd>⌘K</kbd>
+    <kbd>{mod("K")}</kbd>
   </button>
 
   <ul class="primary">
@@ -111,6 +114,25 @@
   .drag {
     height: var(--top-h);
     flex: none;
+    display: flex;
+    align-items: center;
+  }
+  /* Windows and Linux have no traffic lights here; show the app's name. */
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding-left: 8px;
+    font-family: var(--font-display);
+    font-weight: 650;
+    font-size: 15px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+  .brand img {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
   }
 
   .search {
@@ -296,6 +318,7 @@
     .side {
       align-items: center;
     }
+    .brand span,
     .search span,
     .search kbd,
     .nav span,

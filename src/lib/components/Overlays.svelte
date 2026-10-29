@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ui } from "$lib/state.svelte";
+  import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
   let menuEl = $state<HTMLDivElement>();
@@ -29,17 +30,17 @@
 
   const shortcuts: [string, string][] = [
     ["Space", "Play or pause"],
-    ["← →", "Seek 5 seconds (with ⇧, 15)"],
-    ["⌘← ⌘→", "Previous or next song"],
+    ["← →", `Seek 5 seconds (with ${shift}, 15)`],
+    [`${mod("←")} ${mod("→")}`, "Previous or next song"],
     ["[ ]", "Previous or next lyric line"],
     ["S", "Shuffle"],
     ["R", "Change repeat mode"],
     ["L", "Like the current song"],
     ["F", "Full-screen lyrics"],
     ["↑ ↓", "Volume"],
-    ["⌘K", "Search and commands"],
-    ["⌘\\", "Show or hide now playing panel"],
-    ["⌘[ ⌘]", "Back or forward"],
+    [mod("K"), "Search and commands"],
+    [mod("\\"), "Show or hide now playing panel"],
+    [`${mod("[")} ${mod("]")}`, "Back or forward"],
   ];
 </script>
 

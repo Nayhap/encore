@@ -1,4 +1,5 @@
 // Tauri implementation of the backend facade over the generated bindings.
+import { protocolUrl } from "$lib/platform";
 import { commands, events } from "./bindings";
 import { BackendError, type Api, type Handlers } from "./index";
 
@@ -74,5 +75,5 @@ export const tauriApi: Api = {
   signOut: () => u(commands.signOut()) as any,
   beginSignin: () => u(commands.beginSignin()) as any,
   cancelSignin: () => u(commands.cancelSignin()) as any,
-  artUrl: (key, size) => `art://localhost/${key}?s=${size}`,
+  artUrl: (key, size) => protocolUrl("art", `${key}?s=${size}`),
 };
