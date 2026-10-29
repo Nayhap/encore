@@ -3,6 +3,7 @@
   import { call, isTauri, type AccountChannel, type BrowserProfile, type CacheInfo, type ResolverStatus } from "$lib/backend";
   import { account, openExternal, player, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import { commands } from "$lib/backend/bindings";
   import { isMac, os, secretStore } from "$lib/platform";
 
   // What browser import can and can't do on this OS (D8).
@@ -95,6 +96,11 @@
       await call((a) => a.cacheClear(w));
       cache = await call((a) => a.cacheInfo());
     });
+  function setTitlebar(on: boolean) {
+    ui.systemTitlebar = on;
+    localStorage.setItem("titlebar", on ? "system" : "encore");
+    if (isTauri) commands.setSystemTitlebar(on, true).catch((e: any) => ui.say(`Could not change the title bar: ${e?.message ?? e}`));
+  }
   const mb = (b: number) => `${(b / 1048576).toFixed(b > 1048576 * 10 ? 0 : 1)} MB`;
   const stageText: Record<string, string> = {
     opened: "Sign in in the window that opened. Encore waits until you are back on YouTube Music.",
@@ -205,9 +211,9 @@
       <label class="row">
         <div>
           <b>Use the system title bar</b>
-          <p>Show your desktop's own title bar and window buttons instead of Encore's.</p>
+          <p>Show your desktop's own title bar and window buttons instead of Encore's.{os === "linux" ? " Encore restarts to apply it." : ""}</p>
         </div>
-        <input type="checkbox" role="switch" bind:checked={ui.systemTitlebar} />
+        <input type="checkbox" role="switch" checked={ui.systemTitlebar} onchange={(e) => setTitlebar(e.currentTarget.checked)} />
       </label>
     {/if}
   </section>

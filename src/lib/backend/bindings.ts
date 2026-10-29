@@ -85,6 +85,11 @@ export const commands = {
 	 *  the pointer has rested on its maximise button while the window is focused.
 	 */
 	snapLayouts: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("snap_layouts")),
+	/**
+	 *  Saves the title bar choice. Windows applies it at once; Linux restarts
+	 *  Encore so the window is created with it.
+	 */
+	setSystemTitlebar: (on: boolean, apply: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("set_system_titlebar", { on, apply })),
 };
 
 /** Events */

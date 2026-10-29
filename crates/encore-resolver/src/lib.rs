@@ -143,11 +143,37 @@ pub fn find_js_runtime() -> Option<(String, PathBuf)> {
     None
 }
 
-/// No console window for helper processes on Windows.
+/// No console window for helper processes on Windows, and an environment the
+/// system Python can start in. The AppImage launcher points PYTHONHOME,
+/// PYTHONPATH and LD_LIBRARY_PATH into the AppImage; a system interpreter
+/// that inherits them can't find its standard library and aborts.
 fn quiet(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    for k in ["PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "PYTHONUSERBASE", "PYTHONSAFEPATH"] {
+        cmd.env_remove(k);
+    }
+    if let Some(ld) = host_library_path() {
+        match ld {
+            Some(v) => cmd.env("LD_LIBRARY_PATH", v),
+            None => cmd.env_remove("LD_LIBRARY_PATH"),
+        };
+    }
     cmd
+}
+
+/// `LD_LIBRARY_PATH` with the AppImage's own directories removed, when
+/// running from an AppImage: `Some(None)` to unset it, `Some(Some(v))` to
+/// replace it, `None` to leave it alone.
+fn host_library_path() -> Option<Option<std::ffi::OsString>> {
+    let appdir = std::env::var_os("APPDIR")?;
+    let appdir = PathBuf::from(appdir);
+    let cur = std::env::var_os("LD_LIBRARY_PATH")?;
+    let kept: Vec<PathBuf> = std::env::split_paths(&cur).filter(|p| !p.as_os_str().is_empty() && !p.starts_with(&appdir)).collect();
+    if kept.is_empty() {
+        return Some(None);
+    }
+    Some(std::env::join_paths(kept).ok())
 }
 
 /// `major.minor` if `p` runs a Python 3.10 or newer. `args` go before `-I`
@@ -361,10 +387,12 @@ impl YtDlpResolver {
             let (sys_py, ver) = find_python().await.ok_or(missing_python_message())?;
             self.status.lock().python = Some(ver);
             if !py.is_file() {
-                let out = quiet(Command::new(&sys_py).args(["-m", "venv", "--clear"]).arg(&venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
+                let out = quiet(Command::new(&sys_py).args(["-I", "-m", "venv", "--clear"]).arg(&venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
                 if !out.status.success() {
                     let err = String::from_utf8_lossy(&out.stderr);
-                    let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    // The first line says what went wrong; the last is often
+                    // just a traceback footer such as "<no Python frame>".
+                    let last = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
                     // Debian and Ubuntu ship venv separately.
                     if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
                         return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());

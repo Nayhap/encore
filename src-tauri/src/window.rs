@@ -4,6 +4,59 @@
 
 use encore_core::error::Result;
 
+/// Marker file for "Use the system title bar". Read before the window is
+/// first shown: on Linux, GTK under Wayland ignores decorations switched on
+/// after the window is mapped, so the choice has to be made up front.
+fn titlebar_marker() -> std::path::PathBuf {
+    crate::core::Paths::new().data.join("system-titlebar")
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn system_titlebar() -> bool {
+    titlebar_marker().exists()
+}
+
+/// Off macOS the window starts hidden (see tauri.*.conf.json); give it the
+/// chosen chrome, then show it.
+#[cfg(not(target_os = "macos"))]
+pub fn show_with_chrome(window: &tauri::WebviewWindow) {
+    if system_titlebar() {
+        let _ = window.set_decorations(true);
+    }
+    let _ = window.show();
+}
+
+/// Saves the title bar choice. Windows applies it at once; Linux restarts
+/// Encore so the window is created with it.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_system_titlebar(app: tauri::AppHandle, window: tauri::WebviewWindow, on: bool, apply: bool) -> Result<()> {
+    let m = titlebar_marker();
+    if on {
+        if let Some(d) = m.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::fs::write(&m, b"1").map_err(|e| encore_core::error::AppError::new(encore_core::ErrorCode::Unsupported, format!("could not save the setting: {}", e.kind())))?;
+    } else if m.exists() {
+        std::fs::remove_file(&m).map_err(|e| encore_core::error::AppError::new(encore_core::ErrorCode::Unsupported, format!("could not save the setting: {}", e.kind())))?;
+    }
+    if !apply {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        app.restart();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        let _ = window.set_decorations(on);
+    }
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
 /// Windows 11 snap layouts: the flyout normally appears when the pointer
 /// rests on the native maximise button, which Encore doesn't have. Pressing
 /// Win+Z opens the same flyout for the active window. The UI calls this after

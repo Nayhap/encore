@@ -86,6 +86,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             begin_signin,
             cancel_signin,
             window::snap_layouts,
+            window::set_system_titlebar,
         ])
         .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent])
 }
@@ -249,6 +250,10 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(w) = app.get_webview_window("main") {
                 window::round_corners(&w);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(w) = app.get_webview_window("main") {
+                window::show_with_chrome(&w);
             }
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {

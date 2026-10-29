@@ -10,14 +10,20 @@
         "minHeight": 600,
         "decorations": false,
         "shadow": true,
-        "backgroundColor": "#0e1014"
+        "backgroundColor": "#0e1014",
+        "visible": false
       }
     ]
   },
   "bundle": {
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "windows": {
-      "nsis": { "installMode": "currentUser" }
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }
