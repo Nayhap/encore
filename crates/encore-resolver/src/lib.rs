@@ -295,6 +295,53 @@ async fn find_python() -> Option<(PathBuf, String)> {
     None
 }
 
+/// (Re)create the venv with `python`, replacing whatever is there.
+async fn create_venv(python: &Path, venv: &Path) -> Result<(), String> {
+    let out = quiet(Command::new(python).args(["-I", "-m", "venv", "--clear"]).arg(venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    // The first line says what went wrong; the last is often just a
+    // traceback footer such as "<no Python frame>".
+    let first = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    // Debian and Ubuntu ship venv separately.
+    if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
+        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
+    }
+    Err(format!("creating the resolver venv failed: {first}"))
+}
+
+struct PipError {
+    text: String,
+    /// pip couldn't reach the package index.
+    offline: bool,
+}
+
+async fn pip_install(py: &Path) -> Result<(), PipError> {
+    let out = quiet(&mut Command::new(py))
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-q", "--upgrade", "--retries", "2", "--timeout", "20"])
+        .arg(format!("yt-dlp=={YT_DLP_VERSION}"))
+        .arg(format!("yt-dlp-ejs=={YT_DLP_EJS_VERSION}"))
+        .env("PIP_NO_INPUT", "1")
+        .output()
+        .await
+        .map_err(|e| PipError { text: format!("could not run pip: {}", e.kind()), offline: false })?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(PipError { text: err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("pip error").trim().to_string(), offline: pip_offline(&err) })
+}
+
+/// pip's output when the package index can't be reached.
+fn pip_offline(stderr: &str) -> bool {
+    let e = stderr.to_ascii_lowercase();
+    ["newconnectionerror", "connection refused", "temporary failure in name resolution", "name or service not known", "nodename nor servname", "getaddrinfo failed", "network is unreachable", "read timed out", "connecttimeouterror", "max retries exceeded"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
 /// The venv interpreter (`Scripts/python.exe` on Windows).
 pub fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(windows) { venv.join("Scripts").join("python.exe") } else { venv.join("bin").join("python3") }
@@ -321,8 +368,17 @@ pub fn missing_js_message() -> &'static str {
     }
 }
 
+/// What the venv must have installed. The helper script isn't part of it: it
+/// is rewritten whenever it changes, without reinstalling anything (so an
+/// update that only changes the helper works offline).
 fn marker() -> String {
-    format!("yt-dlp=={YT_DLP_VERSION} yt-dlp-ejs=={YT_DLP_EJS_VERSION} helper={:x}", fxhash(HELPER_SRC))
+    format!("yt-dlp=={YT_DLP_VERSION} yt-dlp-ejs=={YT_DLP_EJS_VERSION}")
+}
+
+/// Whether a `.encore-ready` marker (this version's, or an older one that
+/// also recorded a helper hash) says the right packages are installed.
+fn marker_ok(found: &str) -> bool {
+    found.split(" helper=").next() == Some(marker().as_str())
 }
 
 fn fxhash(s: &str) -> u64 {
@@ -410,35 +466,30 @@ impl YtDlpResolver {
         let mark = venv.join(".encore-ready");
         let want = marker();
         let helper = root.join("encore_resolver.py");
-        let ready = py.is_file() && std::fs::read_to_string(&mark).ok().as_deref() == Some(want.as_str());
+        let ready = py.is_file() && std::fs::read_to_string(&mark).is_ok_and(|m| marker_ok(&m));
         if !ready {
             let (sys_py, ver) = find_python().await.ok_or(missing_python_message())?;
             self.status.lock().python = Some(ver);
             if !py.is_file() {
-                let out = quiet(Command::new(&sys_py).args(["-I", "-m", "venv", "--clear"]).arg(&venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
-                if !out.status.success() {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    // The first line says what went wrong; the last is often
-                    // just a traceback footer such as "<no Python frame>".
-                    let last = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-                    // Debian and Ubuntu ship venv separately.
-                    if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
-                        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
-                    }
-                    return Err(format!("creating the resolver venv failed: {last}"));
+                create_venv(&sys_py, &venv).await?;
+            }
+            // A venv left half-made (Encore quit during setup, a Python that
+            // was upgraded or removed) may have no working pip: start it
+            // again from scratch once before giving up.
+            let mut pip = pip_install(&py).await;
+            if let Err(e) = &pip {
+                if !e.offline {
+                    tracing::warn!(error = %e.text, "yt-dlp install failed; recreating the venv");
+                    create_venv(&sys_py, &venv).await?;
+                    pip = pip_install(&py).await;
                 }
             }
-            let out = quiet(&mut Command::new(&py))
-                .args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-q", "--upgrade"])
-                .arg(format!("yt-dlp=={YT_DLP_VERSION}"))
-                .arg(format!("yt-dlp-ejs=={YT_DLP_EJS_VERSION}"))
-                .env("PIP_NO_INPUT", "1")
-                .output()
-                .await
-                .map_err(|e| format!("could not run pip: {}", e.kind()))?;
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(format!("installing yt-dlp failed: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("pip error")));
+            if let Err(e) = pip {
+                return Err(if e.offline {
+                    "Encore couldn't download yt-dlp, which it needs to play songs. Check your internet connection; Encore tries again when you press play.".to_string()
+                } else {
+                    format!("Installing yt-dlp failed: {}", e.text)
+                });
             }
             std::fs::write(&helper, HELPER_SRC).map_err(|e| format!("cannot write helper: {}", e.kind()))?;
             std::fs::write(&mark, &want).map_err(|e| format!("cannot write marker: {}", e.kind()))?;

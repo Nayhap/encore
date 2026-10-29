@@ -1575,6 +1575,7 @@ dependencies = [
  "serde_json",
  "specta",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
