@@ -176,6 +176,10 @@
   .theater .line:not(.on) {
     filter: blur(0.6px);
   }
+  /* A filter per line is costly in WebKitGTK; dimming alone reads the same. */
+  :global(:root[data-os="linux"]) .theater .line:not(.on) {
+    filter: none;
+  }
   .theater .line.on {
     transform: scale(1.02);
     filter: none;

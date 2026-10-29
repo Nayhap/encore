@@ -26,7 +26,7 @@ export function mod(keys: string): string {
 export const shift = isMac ? "⇧" : "Shift";
 
 /** Where the session is kept (D9). */
-export const secretStore = isMac ? "the macOS Keychain" : os === "windows" ? "Windows Credential Manager" : "the Secret Service (GNOME Keyring or KWallet)";
+export const secretStore = isMac ? "the macOS Keychain" : os === "windows" ? "Windows Credential Manager" : "your keyring (Secret Service)";
 
 /** Tauri serves custom protocols as `http://<scheme>.localhost` on Windows. */
 export function protocolUrl(scheme: string, path: string): string {

@@ -97,6 +97,18 @@
       transform: translate(8vmax, 6vmax) scale(1.1);
     }
   }
+  /* WebKitGTK redraws large blurs on the CPU every frame: on Linux the same
+     glow comes from plain gradients that hold still. */
+  :global(:root[data-os="linux"]) .blob {
+    filter: none;
+    animation: none;
+  }
+  :global(:root[data-os="linux"]) .blob.a {
+    background: radial-gradient(closest-side, var(--tint-a), transparent);
+  }
+  :global(:root[data-os="linux"]) .blob.b {
+    background: radial-gradient(closest-side, var(--tint-b), transparent);
+  }
   .bar {
     position: relative;
     height: var(--top-h);

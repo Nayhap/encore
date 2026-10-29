@@ -40,6 +40,12 @@
     -webkit-backdrop-filter: blur(18px) saturate(1.4);
     box-shadow: 0 1px 0 var(--line);
   }
+  /* No backdrop blur under WebKitGTK while scrolling; a solid bar instead. */
+  :global(:root[data-os="linux"]) .top.scrolled {
+    background: color-mix(in srgb, var(--ink) 96%, transparent);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
   .hist {
     display: flex;
     gap: 2px;
