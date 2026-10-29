@@ -90,7 +90,28 @@
       ui.say(`Could not change that: ${e.message}`);
     });
   }
-  const setupResolver = () => run("resolver", async () => (resolver = await call((a) => a.resolverSetup())));
+  // Errors from setting up playback belong on the resolver's own row, not
+  // in the account section at the top (where `run` puts them).
+  async function setupResolver() {
+    busy = "resolver";
+    try {
+      resolver = await call((a) => a.resolverSetup());
+    } catch {
+      await refreshResolver();
+    } finally {
+      busy = null;
+    }
+  }
+  async function refreshResolver() {
+    resolver = (await call((a) => a.bootstrap()).catch(() => null))?.resolver ?? resolver;
+  }
+  // Playback may get set up while Settings is open (pressing play retries
+  // it), so don't keep showing an old error.
+  $effect(() => {
+    if (resolver?.ready) return;
+    const t = setInterval(refreshResolver, 4000);
+    return () => clearInterval(t);
+  });
   const clear = (w: "audio" | "art" | "lyrics") =>
     run("cache", async () => {
       await call((a) => a.cacheClear(w));
