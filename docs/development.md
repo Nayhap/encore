@@ -2,11 +2,47 @@
 
 ## Requirements
 
-- macOS on Apple silicon or Intel
+On every system:
+
 - [Rust](https://rustup.rs) 1.95 or newer
 - [Bun](https://bun.sh)
-- `cmake` (`brew install cmake`), used to build the bundled Opus decoder
+- `cmake`, used to build the bundled Opus decoder
 - Python 3.10+ and Node.js, Deno or Bun, used at runtime to resolve streams
+
+### macOS
+
+Apple silicon or Intel, with the Xcode Command Line Tools.
+
+```sh
+brew install cmake python node
+```
+
+### Windows
+
+Windows 10 or 11 with the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+("Desktop development with C++") and the WebView2 runtime, which Windows 11
+already has. Install Rust with the `x86_64-pc-windows-msvc` toolchain.
+
+```powershell
+winget install Kitware.CMake Python.Python.3.13 OpenJS.NodeJS.LTS Oven-sh.Bun
+```
+
+Smart App Control blocks unsigned programs, and that includes Cargo's build
+scripts, so it has to be off to build Encore.
+
+### Linux
+
+Debian or Ubuntu 24.04 and later (other distributions need the same
+libraries):
+
+```sh
+sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+  libasound2-dev libdbus-1-dev patchelf python3 python3-venv nodejs
+```
+
+A Secret Service (GNOME Keyring or KWallet) is needed to stay signed in.
 
 ## Run
 
@@ -18,13 +54,19 @@ bun run dev                          # the UI alone in a browser, on mock data
 
 `bun run dev` serves the UI at <http://localhost:1420> with a mock backend, so
 you can work on the design without a YouTube session. Add `?signedin` to the
-URL to start with a signed-in mock library.
+URL to start with a signed-in mock library, and `?os=windows` or `?os=linux` to
+see the window buttons and key labels of the other systems.
 
 ## Build
 
 ```sh
-bun run tauri build --bundles app    # target/release/bundle/macos/Encore.app
+bun run tauri build --bundles app           # macOS: bundle/macos/Encore.app
+bun run tauri build --bundles nsis,msi      # Windows: bundle/nsis/*-setup.exe, bundle/msi/*.msi
+bun run tauri build --bundles deb,appimage  # Linux: bundle/deb/*.deb, bundle/appimage/*.AppImage
 ```
+
+Bundles land in `target/release/bundle/`. CI builds all three on every pull
+request.
 
 ## Test
 
@@ -60,24 +102,41 @@ $C whoami && $C liked && $C playlists
 
 ## Where Encore keeps things
 
-| What | Where |
-|---|---|
-| Session | Keychain item `app.encore.desktop` / `youtube-music-session` |
-| Library cache, settings, queue, lyrics cache | `~/Library/Application Support/app.encore.desktop/` |
-| yt-dlp environment | same folder, `resolver/` |
-| Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` |
-| Log | `~/Library/Logs/app.encore.desktop/encore.log` |
+| What | macOS | Windows | Linux |
+|---|---|---|---|
+| Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
+| Library cache, settings, queue, lyrics cache, yt-dlp (`resolver/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
+| Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
 URLs must never reach it; `cargo test` includes a check for this.
 
 ## Known issues
 
+All systems:
+
 - The first play of a song takes 5 to 8 seconds without an account, because
   YouTube delays stream links for signed-out listeners. The next song in the
   queue is prepared in the background to hide this.
+
+macOS:
+
 - Started from Finder, Encore may not see your browser profiles. Give it Full
   Disk Access, or start it from a terminal.
 - Each unsigned build asks once for access to the saved session in the
   Keychain.
 - Switching audio output (for example to AirPods) causes a short gap.
+
+Windows:
+
+- Builds are not code-signed, so SmartScreen warns once and Smart App Control
+  blocks them.
+- Browser import works for Firefox only (see the README).
+- Closing the window quits Encore; there is no tray icon yet.
+
+Linux:
+
+- Without a Secret Service, Encore can't keep a session and says so when you
+  sign in.
+- Closing the window quits Encore.
