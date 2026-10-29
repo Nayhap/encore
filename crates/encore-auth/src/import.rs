@@ -814,7 +814,7 @@ mod tests {
         )
         .unwrap();
         for (host, name, enc) in rows {
-            c.execute("INSERT INTO cookies VALUES (?1, ?2, '', ?3, '/', 13400000000000000, 1, 0)", rusqlite::params![host, name, enc]).unwrap();
+            c.execute("INSERT INTO cookies VALUES (?1, ?2, '', ?3, '/', 13600000000000000, 1, 0)", rusqlite::params![host, name, enc]).unwrap();
         }
         dir
     }
