@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>Encore social card source</title>
+<!-- Source for assets/og.png (1200x630). Rendered with a headless browser; not linked from the site. -->
+<link rel="stylesheet" href="assets/site.css">
+<style>
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body { position: relative; isolation: isolate; padding: 64px 72px; box-sizing: border-box; }
+  body::before { content: ""; position: absolute; inset: 0; z-index: -1; background: radial-gradient(55% 75% at 8% 10%, var(--tint-a), transparent 70%), radial-gradient(50% 70% at 100% 100%, var(--tint-b), transparent 70%); }
+  .brand { font-size: 30px; gap: 14px; }
+  .brand img { width: 44px; height: 44px; }
+  h1 { margin-top: 70px; font-size: 128px; }
+  p { margin-top: 26px; font-size: 27px; color: var(--mute); }
+  .map { position: absolute; left: 72px; right: 72px; bottom: 64px; height: 48px; --hv: 8px; --hh: 17px; --hc: 28px; --stage: var(--ink); }
+</style>
+</head>
+<body>
+  <div class="brand"><img src="assets/icon-192.png" alt=""><span>Encore</span></div>
+  <h1>See the chorus coming.</h1>
+  <p>YouTube Music for macOS, Windows and Linux. Free and open source.</p>
+  <div class="map" id="m"></div>
+  <script>
+    // Daybreak Signal's song map, played to the second chorus.
+    const t = [14,18.5,23,27.5,32,34.5,39,43.5,48,52.5,57,61.5,76,80.5,85,89.5,94,96.5,101,105.5,110,114.5,119,123.5,142,147,152,156,160,164.5,169,173.5,178,186,192];
+    const tier = [0,0,0,0,1,1,1,2,2,2,2,2,0,0,0,0,1,1,1,2,2,2,2,2,0,0,1,1,2,2,2,2,2,0,0];
+    const dur = 218, pos = 108, m = document.getElementById('m');
+    m.innerHTML = '<div class="rail"></div>';
+    t.forEach((s, i) => {
+      const next = t[i + 1] ?? dur, end = Math.min(next - .35, s + 4.2);
+      const d = document.createElement('div');
+      d.className = 'seg ' + ['verse', 'hook', 'chorus'][tier[i]];
+      d.style.left = (s / dur * 100) + '%'; d.style.width = ((end - s) / dur * 100) + '%';
+      d.innerHTML = '<i style="transform:scaleX(' + Math.min(Math.max((pos - s) / (end - s), 0), 1) + ')"></i>';
+      m.append(d);
+    });
+    m.insertAdjacentHTML('beforeend', '<div class="played" style="width:' + (pos / dur * 100) + '%"></div><div class="head" style="left:' + (pos / dur * 100) + '%"></div>');
+  </script>
+</body>
+</html>

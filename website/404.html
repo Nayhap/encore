@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Not found · Encore</title>
+  <meta name="robots" content="noindex">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="stylesheet" href="/assets/site.css">
+  <script>
+    try { var t = localStorage.getItem("encore-theme"); } catch (e) {}
+    document.documentElement.dataset.theme = t === "light" || t === "dark" ? t : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  </script>
+  <style>
+    body { min-height: 100vh; display: grid; place-items: center; }
+    .nf { width: min(720px, 100% - 40px); padding: 48px 0; }
+    .nf .brand { margin-bottom: 64px; }
+    .nf h1 { font-size: clamp(56px, 12vw, 120px); margin-top: 14px; }
+    .nf p.sub { margin-top: 20px; }
+    .nf .map { margin-top: 48px; height: 40px; --hv: 6px; --hh: 13px; --hc: 22px; }
+    .nf .map .seg i { transform: scaleX(1); }
+    .nf .map .played { width: 100%; }
+    .nf .map .head { left: 100%; }
+    .nf .times { margin-top: 8px; }
+    .nf .cta { margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <main class="nf">
+    <a class="brand" href="/"><img src="/assets/icon-64.png" width="28" height="28" alt=""><span>Encore</span></a>
+    <p class="eyebrow"><span class="tc">4:04</span> Not found</p>
+    <h1>This page isn’t in the queue.</h1>
+    <p class="sub">The song ended and there was nothing next. The link may be old, or mistyped.</p>
+    <div class="map" aria-hidden="true">
+      <div class="rail"></div>
+      <div class="seg verse" style="left:6%;width:5%"><i></i></div>
+      <div class="seg verse" style="left:12.5%;width:6%"><i></i></div>
+      <div class="seg hook" style="left:20%;width:5%"><i></i></div>
+      <div class="seg chorus" style="left:27%;width:4%"><i></i></div>
+      <div class="seg chorus" style="left:32%;width:5%"><i></i></div>
+      <div class="seg verse" style="left:44%;width:6%"><i></i></div>
+      <div class="seg hook" style="left:51.5%;width:5%"><i></i></div>
+      <div class="seg chorus" style="left:58%;width:4%"><i></i></div>
+      <div class="seg chorus" style="left:63%;width:5%"><i></i></div>
+      <div class="seg verse" style="left:76%;width:5%"><i></i></div>
+      <div class="seg chorus" style="left:83%;width:4%"><i></i></div>
+      <div class="seg chorus" style="left:88%;width:5%"><i></i></div>
+      <div class="played"></div>
+      <div class="head"></div>
+    </div>
+    <div class="times"><span>4:04</span><span>3:38</span></div>
+    <div class="cta">
+      <a class="btn primary" href="/">Back to the start</a>
+      <a class="btn ghost" href="https://github.com/Nayhap/encore">Encore on GitHub</a>
+    </div>
+  </main>
+</body>
+</html>
