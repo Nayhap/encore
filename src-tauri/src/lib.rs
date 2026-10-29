@@ -239,12 +239,28 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let acc = c3.accounts.clone();
                 let r = tokio::task::spawn_blocking(move || acc.restore()).await;
-                if let Ok(Ok(st)) = r {
-                    if !matches!(st, encore_core::model::AuthState::Anonymous) {
-                        c3.player.stop();
-                        c3.switch_queue();
+                match r {
+                    Ok(Ok(st)) => {
+                        if !matches!(st, encore_core::model::AuthState::Anonymous) {
+                            c3.player.stop();
+                            c3.switch_queue();
+                        }
+                        let _ = AuthEvent(st).emit(&h3);
                     }
-                    let _ = AuthEvent(st).emit(&h3);
+                    Ok(Err(e)) => {
+                        // Access denied at the Keychain prompt, a locked keyring:
+                        // say why the account is gone instead of silently
+                        // starting signed out. (No Secret Service at all just
+                        // means there is nothing saved.)
+                        tracing::warn!(error = %e.message, "could not restore the session");
+                        if !e.message.starts_with("No Secret Service") {
+                            let text = format!("Encore couldn't read your saved sign-in: {} You're signed out for now. Restart Encore and allow access, or sign in again from Settings.", e.message);
+                            if let Some(text) = c3.startup_notice(text) {
+                                let _ = NoticeEvent { text, level: "error".into(), action: None }.emit(&h3);
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
             });
             forward_player_events(handle.clone(), core.clone());

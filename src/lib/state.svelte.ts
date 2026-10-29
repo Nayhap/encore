@@ -677,6 +677,7 @@ export async function connect() {
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  if (b.notice) ui.say(b.notice, "error");
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);
   // Lyrics for a restored track.

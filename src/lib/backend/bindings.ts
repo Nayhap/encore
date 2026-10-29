@@ -267,6 +267,8 @@ export type Bootstrap_Deserialize = {
 	resolver: ResolverStatus_Deserialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Something from startup the user should know (shown once). */
+	notice?: string | null,
 };
 
 export type Bootstrap_Serialize = {
@@ -277,6 +279,8 @@ export type Bootstrap_Serialize = {
 	resolver: ResolverStatus_Serialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Something from startup the user should know (shown once). */
+	notice: string | null,
 };
 
 export type BrowserProfile = {

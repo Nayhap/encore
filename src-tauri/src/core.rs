@@ -62,6 +62,9 @@ pub struct Core {
     pub art: Arc<crate::art::ArtCache>,
     #[allow(dead_code)]
     pub paths: Paths,
+    /// A message from startup for the UI, and whether the UI is listening
+    /// yet (events sent before it subscribes are lost).
+    pub startup_notice: parking_lot::Mutex<(bool, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,8 +103,25 @@ impl Core {
         player.set_reporting(store.get::<bool>(SETTINGS, REPORT_HISTORY).ok().flatten().unwrap_or(true));
         let lyrics = Arc::new(LyricsService::new(ytm.clone(), Some(store.clone())));
         let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone()));
-        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths });
+        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths, startup_notice: parking_lot::Mutex::new((false, None)) });
         Ok(core)
+    }
+
+    /// Show `text` once the UI is up (now, if it already is). Returns the
+    /// text when it should be sent as an event right away.
+    pub fn startup_notice(&self, text: String) -> Option<String> {
+        let mut n = self.startup_notice.lock();
+        if n.0 { Some(text) } else {
+            n.1 = Some(text);
+            None
+        }
+    }
+
+    /// The UI is listening: hand over any notice saved for it.
+    pub fn take_startup_notice(&self) -> Option<String> {
+        let mut n = self.startup_notice.lock();
+        n.0 = true;
+        n.1.take()
     }
 
     pub fn service(&self) -> Arc<dyn MusicService> {

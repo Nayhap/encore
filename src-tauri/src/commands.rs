@@ -28,6 +28,8 @@ pub struct Bootstrap {
     pub resolver: ResolverStatus,
     /// Settings → Playback → "Send plays to YouTube history".
     pub report_history: bool,
+    /// Something from startup the user should know (shown once).
+    pub notice: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -67,6 +69,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
         queue: core.player.queue_snapshot(),
         resolver: core.resolver.status(),
         report_history: core.player.reporting(),
+        notice: core.take_startup_notice(),
     })
 }
 

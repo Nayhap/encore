@@ -265,6 +265,7 @@ export const mockApi: Api = {
     return delay({
       version: "mock",
       reportHistory,
+      notice: null,
       auth,
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
