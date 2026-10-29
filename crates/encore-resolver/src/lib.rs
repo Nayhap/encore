@@ -656,7 +656,7 @@ impl YtDlpResolver {
             }
             Err(_) => {
                 *guard = None; // kill on drop
-                Err(fail(PlayFailureKind::Network, "resolving the stream timed out"))
+                Err(fail(PlayFailureKind::Network, "Getting the song from YouTube took too long. Check your internet connection and try again."))
             }
         }
     }
@@ -733,7 +733,7 @@ impl YtDlpResolver {
             }
             rb.send()
         };
-        let r = get("bytes=0-1023".into()).await.map_err(|e| fail(PlayFailureKind::Network, if e.is_timeout() { "media server timed out" } else { "could not reach the media server" }))?;
+        let r = get("bytes=0-1023".into()).await.map_err(|e| fail(PlayFailureKind::Network, if e.is_timeout() { "YouTube's media server didn't answer in time. Check your internet connection." } else { "Couldn't reach YouTube's media server. Check your internet connection." }))?;
         let st = r.status().as_u16();
         if st == 403 || st == 410 {
             return Err(fail(PlayFailureKind::Challenged, format!("the media server refused the stream ({st})")));

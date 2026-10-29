@@ -446,7 +446,10 @@ impl Player {
             st.phase = Phase::Error;
             st.loaded = None;
             let title = st.queue.current().map(|c| c.track.title.clone()).unwrap_or_default();
-            let autoskip = matches!(f.kind, PlayFailureKind::Unavailable | PlayFailureKind::Unknown | PlayFailureKind::Challenged | PlayFailureKind::Network) && st.skips < MAX_AUTO_SKIPS;
+            // Only skip what is about this song. With no connection, or
+            // YouTube asking for a bot check, the next songs fail the same
+            // way: skipping took a minute or more and lost the user's place.
+            let autoskip = matches!(f.kind, PlayFailureKind::Unavailable | PlayFailureKind::Unknown) && st.skips < MAX_AUTO_SKIPS;
             if autoskip {
                 st.skips += 1;
             }
@@ -456,7 +459,7 @@ impl Player {
             let _ = self.tx.send(PlayerEvent::SessionExpired);
         }
         self.publish(false);
-        if f.kind == PlayFailureKind::Setup {
+        if matches!(f.kind, PlayFailureKind::Setup | PlayFailureKind::Network | PlayFailureKind::Challenged) {
             let _ = self.tx.send(PlayerEvent::Notice(f.message.clone()));
         } else if autoskip {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Skipped “{title}”: {}", f.message)));
