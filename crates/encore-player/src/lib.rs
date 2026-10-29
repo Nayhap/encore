@@ -25,6 +25,9 @@ pub const PRELOAD_LEAD: f64 = 20.0;
 const MAX_AUTO_SKIPS: u32 = 3;
 const RADIO_LOW_WATER: usize = 3;
 const SHUFFLE_ENUM_LIMIT: usize = 10_000;
+/// How long a newly chosen song must stay chosen before its stream is
+/// resolved (see `play_current`).
+const SKIP_SETTLE: Duration = Duration::from_millis(400);
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
 
@@ -370,6 +373,16 @@ impl Player {
             let t0 = Instant::now();
             // A fully cached file plays at once, without resolving a URL.
             let cached = me.cache.as_ref().and_then(|c| c.find_video(&vid));
+            // Pressing Next several times in a row used to resolve every song
+            // passed over, one after another (seconds each, two at a time),
+            // so the song the user stopped on started last. Wait a moment
+            // and give up if another song was chosen meanwhile.
+            if cached.is_none() && promoted.is_none() {
+                tokio::time::sleep(SKIP_SETTLE).await;
+                if me.st.lock().track_gen != my_gen {
+                    return;
+                }
+            }
             let res = match cached {
                 Some((path, itag)) => Ok(ResolvedStream {
                     video_id: vid.clone(),
