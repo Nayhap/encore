@@ -28,6 +28,27 @@
     e.stopPropagation();
   }
 
+  // The confirm sheet: focus the safe choice, Escape cancels, Tab stays inside.
+  let confirmEl = $state<HTMLDivElement>();
+  $effect(() => {
+    if (!ui.confirm || !confirmEl) return;
+    const back = document.activeElement as HTMLElement | null;
+    confirmEl.querySelector<HTMLElement>("button")?.focus();
+    return () => back?.isConnected && back.focus();
+  });
+  function confirmKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.confirm = null;
+    } else if (e.key === "Tab") {
+      const b = [...confirmEl!.querySelectorAll<HTMLElement>("button")];
+      const i = b.indexOf(document.activeElement as HTMLElement);
+      b[(i + (e.shiftKey ? b.length - 1 : 1)) % b.length]?.focus();
+      e.preventDefault();
+    }
+  }
+
   const shortcuts: [string, string][] = [
     ["Space", "Play or pause"],
     ["← →", `Seek 5 seconds (with ${shift}, 15)`],
@@ -48,7 +69,7 @@
   <div class="catch" role="presentation" onmousedown={() => (ui.menu = null)} oncontextmenu={(e) => { e.preventDefault(); ui.menu = null; }}></div>
   <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{pos.x}px" style:top="{pos.y}px" onkeydown={menuKey}>
     {#each ui.menu.items as it}
-      <button role="menuitem" onclick={() => { ui.menu = null; it.run(); }}>
+      <button role="menuitem" class:danger={it.danger} onclick={() => { ui.menu = null; it.run(); }}>
         {#if it.icon}<Icon name={it.icon} size={16} />{/if}
         <span>{it.label}</span>
       </button>
@@ -66,6 +87,20 @@
           <dd>{v}</dd>
         {/each}
       </dl>
+    </div>
+  </div>
+{/if}
+
+{#if ui.confirm}
+  {@const c = ui.confirm}
+  <div class="scrim" role="presentation" onmousedown={(e) => e.target === e.currentTarget && (ui.confirm = null)}>
+    <div class="sheet confirm" role="alertdialog" aria-modal="true" aria-labelledby="cf-title" aria-describedby="cf-text" tabindex="-1" bind:this={confirmEl} onkeydown={confirmKey}>
+      <h2 id="cf-title">{c.title}</h2>
+      <p id="cf-text">{c.text}</p>
+      <div class="btns">
+        <button class="pill" onclick={() => (ui.confirm = null)}>Cancel</button>
+        <button class="pill" class:primary={!c.danger} class:danger={c.danger} onclick={() => { const run = c.run; ui.confirm = null; run(); }}>{c.confirm}</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -114,11 +149,40 @@
     background: var(--accent-soft);
     outline: none;
   }
+  .menu button.danger,
+  .menu button.danger :global(svg) {
+    color: hsl(0 72% 64%);
+  }
+  :global([data-theme="light"]) .menu button.danger,
+  :global([data-theme="light"]) .menu button.danger :global(svg) {
+    color: hsl(0 65% 46%);
+  }
+  .menu button.danger:hover,
+  .menu button.danger:focus-visible {
+    background: hsl(0 70% 55% / 0.14);
+  }
+  .confirm {
+    width: min(420px, calc(100vw - 48px));
+  }
+  .confirm h2 {
+    margin-bottom: 8px;
+  }
+  .confirm p {
+    font-size: 13.5px;
+    color: var(--mute);
+    text-wrap: pretty;
+  }
+  .btns {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+  }
 
   .scrim {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: 58;
     display: grid;
     place-items: center;
     background: rgb(0 0 0 / 0.4);

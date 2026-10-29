@@ -66,12 +66,23 @@ enum Cmd {
     },
     Suggest { query: String },
     Album { id: String },
+    /// Show a playlist, or change one of yours (signed in).
+    #[command(args_conflicts_with_subcommands = true)]
     Playlist {
-        id: String,
+        #[command(subcommand)]
+        edit: Option<PlaylistCmd>,
+        id: Option<String>,
         /// Follow continuations until the whole playlist is loaded.
         #[arg(long)]
         all: bool,
     },
+    /// Your listening history (signed in), or remove a play from it.
+    History {
+        #[command(subcommand)]
+        cmd: Option<HistoryCmd>,
+    },
+    /// The other version of a track (song ↔ music video).
+    Counterpart { video_id: String },
     Artist { id: String },
     /// Up next / radio for a track (or a playlist with --playlist).
     Radio {
@@ -95,6 +106,10 @@ enum Cmd {
         /// Stop after this many seconds of wall time.
         #[arg(long, default_value_t = 20.0)]
         secs: f64,
+        /// Report the play to YouTube Music history (signed in) and check
+        /// that it shows up. Prints ping kinds and statuses, never URLs.
+        #[arg(long)]
+        report: bool,
     },
     /// Sign-in and session commands.
     Auth {
@@ -160,6 +175,68 @@ enum AuthCmd {
     Keepalive,
     /// Delete the stored session.
     SignOut,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Vis {
+    Private,
+    Unlisted,
+    Public,
+}
+
+impl From<Vis> for Privacy {
+    fn from(v: Vis) -> Self {
+        match v {
+            Vis::Private => Privacy::Private,
+            Vis::Unlisted => Privacy::Unlisted,
+            Vis::Public => Privacy::Public,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum PlaylistCmd {
+    /// Create a playlist (private unless --privacy says otherwise).
+    Create {
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long, value_enum, default_value_t = Vis::Private)]
+        privacy: Vis,
+        /// Songs to start it with.
+        #[arg(long = "add")]
+        add: Vec<String>,
+    },
+    Rename { id: String, title: String },
+    Describe { id: String, description: String },
+    Privacy {
+        id: String,
+        #[arg(value_enum)]
+        privacy: Vis,
+    },
+    /// Add songs; refused as a duplicate unless --anyway.
+    Add {
+        id: String,
+        videos: Vec<String>,
+        #[arg(long)]
+        anyway: bool,
+    },
+    /// Move the row at index FROM before the row at --before (or to the end).
+    Move {
+        id: String,
+        from: usize,
+        #[arg(long)]
+        before: Option<usize>,
+    },
+    Delete { id: String },
+}
+
+#[derive(Subcommand)]
+enum HistoryCmd {
+    /// Remove the most recent play of a video from the history.
+    Remove { video_id: String },
+    /// Is this video in the newest day group?
+    Has { video_id: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -237,12 +314,39 @@ async fn run(cli: Cli) -> Result<()> {
             let r = svc.suggestions(&ctx, &query).await.map_err(e)?;
             out(j, &r, |r| r.iter().for_each(|s| println!("{s}")));
         }
-        Cmd::Album { id } | Cmd::Playlist { id, all: false } => {
+        Cmd::Playlist { edit: Some(cmd), .. } => {
+            accounts(&svc).restore().map_err(e)?;
+            playlist_edit(&svc, cmd).await?;
+        }
+        Cmd::Playlist { id: None, .. } => bail!("give a playlist id, or a change such as `playlist create <title>`"),
+        Cmd::History { cmd } => {
+            accounts(&svc).restore().map_err(e)?;
+            history(&svc, cmd, m, j).await?;
+        }
+        Cmd::Counterpart { video_id } => {
+            let _ = accounts(&svc).restore();
+            let ctx = svc.context();
+            let t = svc.track(&ctx, &ItemId::parse(&video_id)).await.map_err(e)?;
+            println!("track:       {}", show::track(&t));
+            match svc.counterpart(&ctx, &t).await.map_err(e)? {
+                None => println!("counterpart: none"),
+                Some(c) => {
+                    println!("counterpart: {}", show::track(&c.track));
+                    for s in &c.segments {
+                        println!("  shared: {:.3}s here = {:.3}s there, for {:.3}s", s.from_start, s.to_start, s.duration);
+                    }
+                    if c.segments.is_empty() {
+                        println!("  no segment map: a switch restarts at 0");
+                    }
+                }
+            }
+        }
+        Cmd::Album { id } | Cmd::Playlist { id: Some(id), all: false, .. } => {
             let c = svc.collection(&ctx, &ItemId::parse(&id)).await.map_err(e)?;
             out(j, &c, |c| show::collection(c, m));
-            println!("entries: {}  more pages: {}", c.entries.len(), c.cursor.is_some());
+            println!("entries: {}  more pages: {}  editable: {}  privacy: {:?}", c.entries.len(), c.cursor.is_some(), c.editable, c.privacy);
         }
-        Cmd::Playlist { id, all: true } => {
+        Cmd::Playlist { id: Some(id), all: true, .. } => {
             let mut c = svc.collection(&ctx, &ItemId::parse(&id)).await.map_err(e)?;
             let mut pages = 1;
             let mut cur = c.cursor.clone();
@@ -283,9 +387,9 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Record { dir } => record(&svc, dir).await?,
-        Cmd::Play { video_id, seek, next, secs } => {
+        Cmd::Play { video_id, seek, next, secs, report } => {
             let _ = accounts(&svc).restore();
-            play(svc.clone(), &video_id, seek, next.as_deref(), secs).await?
+            play(svc.clone(), &video_id, seek, next.as_deref(), secs, report).await?
         }
         Cmd::Auth { cmd } => auth(&svc, cmd).await?,
         Cmd::Lyrics { video_id, fresh } => {
@@ -559,7 +663,135 @@ async fn record(svc: &YtMusic, dir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option<&str>, secs: f64) -> Result<()> {
+fn outcome(o: MutationOutcome) -> &'static str {
+    match o {
+        MutationOutcome::Done => "done",
+        MutationOutcome::Rejected => "rejected",
+        MutationOutcome::OutcomeUnknown => "outcome unknown (refetch before retrying)",
+        MutationOutcome::Duplicate => "duplicate (already in the playlist; nothing added)",
+    }
+}
+
+async fn playlist_edit(svc: &Arc<YtMusic>, cmd: PlaylistCmd) -> Result<()> {
+    let e = |e: encore_core::AppError| anyhow!("{} ({:?})", e.message, e.code);
+    let ctx = svc.context();
+    let pid = |id: &str| id.trim_start_matches("ytm:").to_string();
+    match cmd {
+        PlaylistCmd::Create { title, description, privacy, add } => {
+            let ids: Vec<ItemId> = add.iter().map(|v| ItemId::parse(v)).collect();
+            let r = svc.playlist_create(&ctx, &title, &description, privacy.into(), &ids).await.map_err(e)?;
+            println!("create: {}", outcome(r.outcome));
+            if let Some(id) = r.playlist_id {
+                println!("playlist id: {id}");
+            }
+        }
+        PlaylistCmd::Rename { id, title } => {
+            let r = svc.playlist_edit(&ctx, &pid(&id), &PlaylistEdit { title: Some(title), ..Default::default() }).await.map_err(e)?;
+            println!("rename: {}", outcome(r));
+        }
+        PlaylistCmd::Describe { id, description } => {
+            let r = svc.playlist_edit(&ctx, &pid(&id), &PlaylistEdit { description: Some(description), ..Default::default() }).await.map_err(e)?;
+            println!("describe: {}", outcome(r));
+        }
+        PlaylistCmd::Privacy { id, privacy } => {
+            let r = svc.playlist_edit(&ctx, &pid(&id), &PlaylistEdit { privacy: Some(privacy.into()), ..Default::default() }).await.map_err(e)?;
+            println!("privacy: {}", outcome(r));
+        }
+        PlaylistCmd::Add { id, videos, anyway } => {
+            let ids: Vec<ItemId> = videos.iter().map(|v| ItemId::parse(v)).collect();
+            let r = svc.playlist_add(&ctx, &pid(&id), &ids, anyway).await.map_err(e)?;
+            println!("add: {}", outcome(r));
+        }
+        PlaylistCmd::Move { id, from, before } => {
+            let c = svc.collection(&ctx, &ItemId::parse(&format!("VL{}", pid(&id).trim_start_matches("VL")))).await.map_err(e)?;
+            let set = |i: usize| c.entries.get(i).and_then(|x| x.set_video_id.clone()).ok_or_else(|| anyhow!("no movable row at index {i}"));
+            let s = set(from)?;
+            let b = before.map(set).transpose()?;
+            let r = svc.playlist_move(&ctx, &pid(&id), &s, b.as_deref()).await.map_err(e)?;
+            println!("move: {}", outcome(r));
+        }
+        PlaylistCmd::Delete { id } => {
+            let r = svc.playlist_delete(&ctx, &pid(&id)).await.map_err(e)?;
+            println!("delete: {}", outcome(r));
+        }
+    }
+    Ok(())
+}
+
+async fn history(svc: &Arc<YtMusic>, cmd: Option<HistoryCmd>, m: usize, j: bool) -> Result<()> {
+    let e = |e: encore_core::AppError| anyhow!("{} ({:?})", e.message, e.code);
+    let ctx = svc.context();
+    let h = svc.history(&ctx).await.map_err(e)?;
+    match cmd {
+        None => out(j, &h, |h| {
+            if let Some(n) = &h.notice {
+                println!("notice: {n}{}", if h.paused { " (paused)" } else { "" });
+            }
+            for g in &h.groups {
+                println!("\n== {} ({} plays)", g.title, g.rows.len());
+                for r in g.rows.iter().take(m) {
+                    println!("  {}{}", show::track(&r.track), if r.removable { "" } else { "  (not removable)" });
+                }
+            }
+            println!("\ngroups: {}  more: {}", h.groups.len(), h.cursor.is_some());
+        }),
+        Some(HistoryCmd::Has { video_id }) => {
+            let id = ItemId::parse(&video_id);
+            let first = h.groups.first();
+            let yes = first.is_some_and(|g| g.rows.iter().any(|r| r.track.id == id));
+            println!("history: {id} in \"{}\": {}", first.map(|g| g.title.as_str()).unwrap_or("-"), if yes { "yes" } else { "no" });
+        }
+        Some(HistoryCmd::Remove { video_id }) => {
+            let id = ItemId::parse(&video_id);
+            let Some(row) = h.groups.iter().flat_map(|g| &g.rows).find(|r| r.track.id == id) else { bail!("{id} is not in the history") };
+            if !row.removable {
+                bail!("YouTube Music offers no removal for that row");
+            }
+            let r = svc.history_remove(&ctx, std::slice::from_ref(&row.row_id)).await.map_err(e)?;
+            println!("remove: {}", outcome(r));
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let h = svc.history(&svc.context()).await.map_err(e)?;
+            let n = h.groups.iter().flat_map(|g| &g.rows).filter(|r| r.track.id == id).count();
+            println!("plays of {id} left in history: {n}");
+        }
+    }
+    Ok(())
+}
+
+/// Prints which ping went out and its result; never the URL.
+struct ShowReporter(Arc<YtMusic>);
+struct ShowReport(Arc<dyn encore_core::service::PlayReport>);
+
+#[async_trait::async_trait]
+impl encore_core::service::PlayReporter for ShowReporter {
+    async fn open_report(&self, id: &ItemId) -> encore_core::Result<Option<Arc<dyn encore_core::service::PlayReport>>> {
+        let r = self.0.open_report(id).await;
+        match &r {
+            Ok(Some(rep)) => println!("report: /player ok, tracking present (flush at {:?} then every {}s)", rep.schedule().at, rep.schedule().every),
+            Ok(None) => println!("report: not reportable (signed out, or no tracking in /player)"),
+            Err(err) => println!("report: /player failed: {}", err.message),
+        }
+        Ok(r?.map(|rep| Arc::new(ShowReport(rep)) as Arc<dyn encore_core::service::PlayReport>))
+    }
+}
+
+#[async_trait::async_trait]
+impl encore_core::service::PlayReport for ShowReport {
+    fn schedule(&self) -> encore_core::service::FlushSchedule {
+        self.0.schedule()
+    }
+    async fn send(&self, ping: &encore_core::service::Ping, itag: Option<u32>) -> encore_core::Result<()> {
+        let r = self.0.send(ping, itag).await;
+        let what = match ping {
+            encore_core::service::Ping::Playback { cmt, .. } => format!("playback at {cmt:.1}s"),
+            encore_core::service::Ping::Watchtime { st, et, last, .. } => format!("watchtime {}{}", st.iter().zip(et).map(|(a, b)| format!("{a:.1}–{b:.1}")).collect::<Vec<_>>().join(","), if *last { " (final)" } else { "" }),
+        };
+        println!("ping: {what}: {}", match &r { Ok(()) => "ok".to_string(), Err(e) => e.message.clone() });
+        r
+    }
+}
+
+async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option<&str>, secs: f64, report: bool) -> Result<()> {
     use encore_player::{Player, PlayerEvent};
     let resolver = encore_resolver::YtDlpResolver::new(encore_resolver::ResolverConfig::default_paths());
     resolver.ensure_ready().await.map_err(anyhow::Error::msg)?;
@@ -570,6 +802,18 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
     let player = Player::new(svc.clone(), resolver.clone(), auth, Some(cache.clone())).map_err(|e| anyhow!("{}", e.message))?;
     let mut rx = player.subscribe();
     let ctx = svc.context();
+    let target = ItemId::parse(video_id);
+    let mut was_there = false;
+    if report {
+        if !svc.it.signed_in() {
+            bail!("--report needs a signed-in session (encore-cli whoami)");
+        }
+        let h = svc.history(&ctx).await.map_err(|e| anyhow!("{}", e.message))?;
+        was_there = h.groups.first().is_some_and(|g| g.rows.iter().any(|r| r.track.id == target));
+        println!("history before: {target} in the newest group: {}", if was_there { "yes" } else { "no" });
+        player.set_reporting(true);
+        player.report_history(Arc::new(ShowReporter(svc.clone())), Arc::new(|id: &ItemId| println!("history: play of {id} registered")));
+    }
     let mut tracks = vec![svc.track(&ctx, &ItemId::parse(video_id)).await.map_err(|e| anyhow!("{}", e.message))?];
     if let Some(n) = next {
         tracks.push(svc.track(&ctx, &ItemId::parse(n)).await.map_err(|e| anyhow!("{}", e.message))?);
@@ -626,6 +870,15 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     println!("track changes: {transitions}; audio cache: {} bytes in {}", cache.total_bytes(), cache_dir.display());
+    if report {
+        // End the play (the final ping), then read the history back.
+        player.stop();
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let h = svc.history(&svc.context()).await.map_err(|e| anyhow!("{}", e.message))?;
+        let first = h.groups.first();
+        let yes = first.is_some_and(|g| g.rows.iter().take(3).any(|r| r.track.id == target));
+        println!("history after: {target} near the top of \"{}\": {}{}", first.map(|g| g.title.as_str()).unwrap_or("-"), if yes { "yes" } else { "no" }, if was_there { " (it was already there before)" } else { "" });
+    }
     Ok(())
 }
 

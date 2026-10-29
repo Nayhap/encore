@@ -43,6 +43,16 @@ export type SigninEvent = B.SigninEvent_Serialize;
 export type NoticeEvent = B.NoticeEvent_Serialize;
 export type LyricsEvent = B.LyricsEvent_Serialize;
 export type ArtHueEvent = B.ArtHueEvent;
+export type Privacy = B.Privacy;
+export type PlaylistEdit = B.PlaylistEdit_Deserialize;
+export type PlaylistCreated = B.PlaylistCreated_Serialize;
+export type HistoryPage = B.HistoryPage_Serialize;
+export type HistoryGroup = B.HistoryGroup_Serialize;
+export type HistoryRow = B.HistoryRow_Serialize;
+export type Counterpart = B.Counterpart_Serialize;
+export type SharedSegment = B.SharedSegment;
+export type PlaylistsEvent = B.PlaylistsEvent_Serialize;
+export type HistoryEvent = B.HistoryEvent;
 
 /** Mock-only procedural artwork (dev without Tauri). */
 export type Motif = "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks";

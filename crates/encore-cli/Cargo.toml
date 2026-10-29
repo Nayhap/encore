@@ -23,3 +23,4 @@ url.workspace = true
 encore-player.workspace = true
 dirs = "6"
 encore-lyrics.workspace = true
+async-trait.workspace = true

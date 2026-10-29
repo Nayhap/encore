@@ -1,5 +1,5 @@
-import { SvelteSet } from "svelte/reactivity";
-import { BackendError, call, type AuthState, type Lyrics, type Phase, type PlayerSnapshot, type PositionAnchor, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
+import { BackendError, call, isTauri, type AuthState, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
 import { catalog } from "./catalog.svelte";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
@@ -311,6 +311,7 @@ export type View =
   | { name: "collection"; id: string }
   | { name: "artist"; id: string }
   | { name: "page"; browseId: string; params?: string | null; title?: string }
+  | { name: "history" }
   | { name: "settings" };
 
 class Nav {
@@ -343,6 +344,28 @@ export interface MenuItem {
 
 export type Theme = "system" | "dark" | "light";
 
+/** The create / edit playlist sheet. */
+export interface PlaylistSheet {
+  mode: "create" | "edit";
+  /** Editing: the playlist (`ytm:VL…`) and its bare id. */
+  id?: string;
+  playlistId?: string;
+  title?: string;
+  description?: string;
+  privacy?: Privacy;
+  /** Creating from "Add to playlist": the songs it starts with. */
+  trackIds?: string[];
+}
+
+/** A yes/no question before something that can't be undone. */
+export interface Confirm {
+  title: string;
+  text: string;
+  confirm: string;
+  danger?: boolean;
+  run: () => void;
+}
+
 class UI {
   stageOpen = $state(true);
   theater = $state(false);
@@ -354,6 +377,12 @@ class UI {
   systemTitlebar = $state(localStorage.getItem("titlebar") === "system");
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   toast = $state<{ text: string; id: number } | null>(null);
+  sheet = $state<PlaylistSheet | null>(null);
+  confirm = $state<Confirm | null>(null);
+  /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
+  reportHistory = $state(true);
+  /** Bumps when a play was reported, so History can refresh. */
+  historyRev = $state(0);
 
   say(text: string) {
     const id = Date.now();
@@ -385,6 +414,49 @@ class UI {
   }
 }
 
+/** Your playlists (the library's playlist list), shared by the sidebar,
+ *  Library and "Add to playlist". `rev` bumps on every change so open views
+ *  refetch (D20). */
+class Playlists {
+  list = $state<CollectionCard[]>([]);
+  rev = $state(0);
+  loaded = $state(false);
+  #seq = 0;
+
+  async load() {
+    const my = ++this.#seq;
+    if (!account.signedIn) {
+      this.list = [];
+      this.loaded = false;
+      return;
+    }
+    const p = await call((a) => a.library("playlists")).catch(() => null);
+    if (my !== this.#seq || !p) return;
+    catalog.addItems(p.items);
+    this.list = p.items.filter((i) => i.type === "collection") as CollectionCard[];
+    this.loaded = true;
+  }
+
+  /** The playlist the last change was about (`null`: not known). */
+  last = $state<string | null>(null);
+
+  /** Something changed on the server: refetch everywhere. */
+  changed(id: string | null = null) {
+    this.last = id;
+    this.rev++;
+    void this.load();
+  }
+
+  /** Show a playlist straight away, before the refetch brings its art. */
+  insert(c: CollectionCard) {
+    if (!this.list.some((x) => x.id === c.id)) this.list = [c, ...this.list.filter((x) => x.kind === "liked"), ...this.list.filter((x) => x.kind !== "liked")].filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i);
+  }
+
+  remove(id: string) {
+    this.list = this.list.filter((x) => x.id !== id);
+  }
+}
+
 class Account {
   state = $state<AuthState>({ state: "anonymous" });
   signin = $state<{ stage: string; message: string | null } | null>(null);
@@ -396,13 +468,63 @@ export const player = new Player();
 export const nav = new Nav();
 export const ui = new UI();
 export const account = new Account();
+export const playlists = new Playlists();
 
 const remote = (id: string) => id.replace(/^(ytm|mock):/, "");
 
+/** Open a web page in the system browser. */
+export function openExternal(url: string) {
+  if (isTauri) import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => ui.say("Could not open the browser"));
+  else window.open(url, "_blank", "noopener");
+}
+
+// ---------- song / video versions ----------
+
+/** Known pairs by track id; `null` = looked up, none. */
+export const versions = new SvelteMap<string, Counterpart | null>();
+const looking = new Map<string, Promise<Counterpart | null>>();
+
+/** The other version of a track: what it already knows, else the backend's
+ *  lookup (D21). Remembered for the session. */
+export function lookupVersion(t: Track): Promise<Counterpart | null> {
+  if (versions.has(t.id)) return Promise.resolve(versions.get(t.id) ?? null);
+  let p = looking.get(t.id);
+  if (!p) {
+    p = call((a) => a.counterpart(t))
+      .then((c) => {
+        versions.set(t.id, c);
+        if (c) catalog.addTracks([c.track]);
+        return c;
+      })
+      .catch(() => null)
+      .finally(() => looking.delete(t.id));
+    looking.set(t.id, p);
+  }
+  return p;
+}
+
+/** "Video" or "Song": what switching gets you. */
+export const otherKind = (t: Track) => (t.kind === "video" ? "song" : "video");
+
+/** Switch a queue entry (by uid) to its other version, or play the other
+ *  version of a track that isn't in the queue. */
+export async function playOtherVersion(t: Track, uid?: string) {
+  const c = await lookupVersion(t);
+  if (!c) return ui.say(t.kind === "video" ? "YouTube Music has no song version of this video" : "YouTube Music has no video version of this song");
+  try {
+    if (uid) await call((a) => a.switchVersion(uid));
+    else await call((a) => a.playVersion(t));
+  } catch (e: any) {
+    ui.say(`Could not switch: ${e.message}`);
+  }
+}
+
 /** Shared track actions so every menu uses the same words for the same thing. */
-export function trackMenu(id: string): MenuItem[] {
+export function trackMenu(id: string, uid?: string): MenuItem[] {
   const tr = catalog.track(id);
   if (!tr) return [];
+  // The playing entry switches in place; other rows play the other version.
+  const entry = uid ?? (player.current?.id === id ? player.currentEntry?.uid : undefined);
   const liked = player.liked.has(id);
   const artist = tr.artists.find((a) => a.id);
   const items: MenuItem[] = [
@@ -411,7 +533,10 @@ export function trackMenu(id: string): MenuItem[] {
     { label: "Start radio", icon: "radio", run: () => player.playTrack(id) },
     { label: liked ? "Remove from liked music" : "Add to liked music", icon: liked ? "heartFill" : "heart", run: () => (player.toggleLike(id), ui.say(liked ? "Removed from liked music" : "Added to liked music")) },
   ];
-  if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", run: () => void pickPlaylist(id) });
+  if ((tr.kind === "song" || tr.kind === "video") && versions.get(id) !== null) {
+    items.push({ label: tr.kind === "video" ? "Play the song version" : "Play the video version", icon: "swap", run: () => void playOtherVersion(tr, entry) });
+  }
+  if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", run: () => void pickPlaylist([id]) });
   if (artist?.id) items.push({ label: "Go to artist", icon: "artist", run: () => nav.go({ name: "artist", id: artist.id! }) });
   if (tr.album?.id) items.push({ label: "Go to album", icon: "album", run: () => nav.go({ name: "collection", id: tr.album!.id! }) });
   items.push({ label: "Copy link", icon: "link", run: () => (navigator.clipboard?.writeText(`https://music.youtube.com/watch?v=${remote(id)}`), ui.say("Link copied")) });
@@ -428,6 +553,14 @@ export function collectionMenu(id: string): MenuItem[] {
     f(full.entries.map((e) => e.track.id));
   };
   const listId = remote(id).replace(/^VL/, "");
+  const full = c && "editable" in c ? c : null;
+  const mineItems: MenuItem[] =
+    full?.editable && account.signedIn && full.playlistId
+      ? [
+          { label: "Edit details…", icon: "edit", run: () => editPlaylist(id) },
+          { label: "Delete playlist…", icon: "trash", danger: true, run: () => deletePlaylist(id) },
+        ]
+      : [];
   return [
     { label: "Play", icon: "play", run: () => player.playCollection(id) },
     { label: "Shuffle", icon: "shuffle", run: () => player.playCollection(id, 0, true) },
@@ -438,26 +571,78 @@ export function collectionMenu(id: string): MenuItem[] {
       icon: "link",
       run: () => (navigator.clipboard?.writeText(listId.startsWith("MPRE") ? `https://music.youtube.com/browse/${listId}` : `https://music.youtube.com/playlist?list=${listId}`), ui.say("Link copied")),
     },
+    ...mineItems,
   ];
 }
 
-/** Second menu: the user's playlists, to add a song to. */
-async function pickPlaylist(trackId: string) {
-  const lib = await call((a) => a.library("playlists")).catch(() => null);
-  const lists = (lib?.items ?? []).filter((i) => i.type === "collection" && i.kind !== "liked") as { id: string; title: string }[];
-  if (!lists.length) return ui.say("No playlists to add to");
-  ui.openMenuAgain(
-    lists.slice(0, 14).map((p) => ({
+// ---------- playlist actions (D20) ----------
+
+export function newPlaylist(trackIds: string[] = []) {
+  if (!account.signedIn) return ui.say("Sign in to create playlists");
+  ui.sheet = { mode: "create", trackIds };
+}
+
+export function editPlaylist(id: string) {
+  const c = catalog.collection(id);
+  if (!c || !("editable" in c) || !c.playlistId) return;
+  ui.sheet = { mode: "edit", id, playlistId: c.playlistId, title: c.title, description: c.description ?? "", privacy: c.privacy ?? undefined };
+}
+
+export function deletePlaylist(id: string) {
+  const c = catalog.collection(id);
+  if (!c || !("editable" in c) || !c.playlistId) return;
+  const pid = c.playlistId;
+  ui.confirm = {
+    title: "Delete this playlist?",
+    text: `“${c.title}” is deleted from YouTube Music. Songs already in your queue keep playing.`,
+    confirm: "Delete",
+    danger: true,
+    run: async () => {
+      const before = playlists.list;
+      playlists.remove(id);
+      const r = await call((a) => a.playlistDelete(pid)).catch((e: BackendError) => (ui.say(`Could not delete: ${e.message}`), null));
+      if (r === "done") {
+        ui.say(`Deleted “${c.title}”`);
+        if (nav.view.name === "collection" && nav.view.id === id) nav.go({ name: "library" });
+      } else if (r === "outcomeUnknown") {
+        ui.say("Could not confirm the delete; check your playlists");
+        playlists.changed();
+      } else {
+        playlists.list = before;
+        if (r === "rejected") ui.say("YouTube Music did not delete that playlist");
+      }
+    },
+  };
+}
+
+/** Add songs to a playlist; a duplicate asks before adding it again. */
+export async function addToPlaylist(p: { playlistId: string; title: string }, trackIds: string[], allowDuplicates = false) {
+  const r: MutationOutcome | null = await call((a) => a.playlistAdd(p.playlistId, trackIds, allowDuplicates)).catch((e: BackendError) => (ui.say(`Could not add: ${e.message}`), null));
+  if (r === "done") ui.say(`Added to “${p.title}”`);
+  else if (r === "duplicate") {
+    const one = trackIds.length === 1 ? catalog.track(trackIds[0])?.title : null;
+    ui.confirm = {
+      title: "Already in this playlist",
+      text: one ? `“${one}” is already in “${p.title}”. Add it again?` : `Some of these songs are already in “${p.title}”. Add them again?`,
+      confirm: "Add anyway",
+      run: () => void addToPlaylist(p, trackIds, true),
+    };
+  } else if (r === "outcomeUnknown") ui.say("Not sure that worked; check the playlist");
+  else if (r === "rejected") ui.say("YouTube Music did not accept that");
+}
+
+/** Second menu: "New playlist…" and your playlists, to add songs to. */
+async function pickPlaylist(trackIds: string[]) {
+  if (!playlists.loaded) await playlists.load();
+  const lists = playlists.list.filter((i) => i.kind !== "liked");
+  ui.openMenuAgain([
+    { label: "New playlist…", icon: "plus", run: () => newPlaylist(trackIds) },
+    ...lists.slice(0, 14).map((p) => ({
       label: p.title,
       icon: "list",
-      run: () => {
-        const pid = p.id.replace(/^(ytm|mock):/, "");
-        call((a) => a.playlistAdd(pid, [trackId]))
-          .then((r) => ui.say(r === "done" ? `Added to “${p.title}”` : r === "outcomeUnknown" ? "Not sure that worked; check the playlist" : "YouTube Music did not accept that"))
-          .catch((e: BackendError) => ui.say(`Could not add: ${e.message}`));
-      },
+      run: () => void addToPlaylist({ playlistId: p.id.replace(/^(ytm|mock):/, "").replace(/^VL/, ""), title: p.title }, trackIds),
     })),
-  );
+  ]);
 }
 
 /** Play an artist: their radio if YouTube offers one, else the top songs. */
@@ -482,10 +667,13 @@ export async function connect() {
       artHue: (h) => catalog.hues.set(h.key, [h.h1, h.h2]),
       notice: (n) => ui.say(n.text),
       signin: (s) => (account.signin = { stage: s.stage, message: s.message }),
+      playlists: (e) => playlists.changed(e.playlistId),
+      history: () => ui.historyRev++,
     }),
   );
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
+  ui.reportHistory = b.reportHistory;
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);
   // Lyrics for a restored track.

@@ -54,3 +54,18 @@ pub struct SigninEvent {
     pub stage: String,
     pub message: Option<String>,
 }
+
+/// A playlist was created, changed or deleted: sidebar, Library, the open
+/// playlist and the "Add to playlist" menu refresh.
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistsEvent {
+    pub playlist_id: Option<String>,
+}
+
+/// A play was reported to the history: the History page refreshes if open.
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEvent {
+    pub track_id: String,
+}

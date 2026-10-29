@@ -14,6 +14,7 @@
   import Deck from "./components/Deck.svelte";
   import Overlays from "./components/Overlays.svelte";
   import Palette from "./components/Palette.svelte";
+  import PlaylistDialog from "./components/PlaylistDialog.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import Stage from "./components/Stage.svelte";
   import Theater from "./components/Theater.svelte";
@@ -22,6 +23,7 @@
   import Artist from "./views/Artist.svelte";
   import Collection from "./views/Collection.svelte";
   import Explore from "./views/Explore.svelte";
+  import History from "./views/History.svelte";
   import Home from "./views/Home.svelte";
   import Library from "./views/Library.svelte";
   import BrowsePage from "./views/BrowsePage.svelte";
@@ -117,12 +119,14 @@
     }
     if (e.key === "Escape") {
       if (ui.menu) ui.menu = null;
+      else if (ui.confirm) ui.confirm = null;
+      else if (ui.sheet) ui.sheet = null;
       else if (ui.shortcuts) ui.shortcuts = false;
       else if (ui.palette) ui.palette = false;
       else if (ui.theater) ui.theater = false;
       return;
     }
-    if (typing || ui.palette || ui.menu) return;
+    if (typing || ui.palette || ui.menu || ui.sheet || ui.confirm) return;
 
     if (mod) {
       if (e.key === "ArrowLeft") player.prev();
@@ -213,6 +217,8 @@
             <Explore />
           {:else if nav.view.name === "library"}
             <Library />
+          {:else if nav.view.name === "history"}
+            <History />
           {:else if nav.view.name === "collection"}
             <Collection id={nav.view.id} />
           {:else if nav.view.name === "artist"}
@@ -232,6 +238,7 @@
 
 {#if ui.theater && player.current}<Theater />{/if}
 {#if ui.palette}<Palette />{/if}
+{#if ui.sheet}{#key ui.sheet}<PlaylistDialog sheet={ui.sheet} />{/key}{/if}
 <Overlays />
 {#if customChrome}<WindowControls />{/if}
 

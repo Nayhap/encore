@@ -26,6 +26,8 @@ pub struct Bootstrap {
     pub player: PlayerSnapshot,
     pub queue: QueueSnapshot,
     pub resolver: ResolverStatus,
+    /// Settings → Playback → "Send plays to YouTube history".
+    pub report_history: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -59,7 +61,16 @@ pub async fn bootstrap(core: S<'_>) -> Result<Bootstrap> {
         player: core.player.snapshot(),
         queue: core.player.queue_snapshot(),
         resolver: core.resolver.status(),
+        report_history: core.player.reporting(),
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_report_history(core: S<'_>, on: bool) -> Result<()> {
+    core.player.set_reporting(on);
+    core.store.put(crate::core::SETTINGS, crate::core::REPORT_HISTORY, &on, None)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -362,16 +373,132 @@ pub async fn set_subscribed(core: S<'_>, channel_id: String, subscribed: bool) -
     svc.set_subscribed(&svc.context(), &channel_id, subscribed).await
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn playlist_add(core: S<'_>, playlist_id: String, track_ids: Vec<ItemId>, allow_duplicates: bool) -> Result<MutationOutcome> {
-    let svc = core.service();
-    svc.playlist_add(&svc.context(), &playlist_id, &track_ids, allow_duplicates).await
+/// After a playlist write: drop the cached copies (the cache only serves on
+/// network failure, but must never bring back a deleted playlist or an old
+/// order) and tell every playlist surface to refresh.
+fn playlists_changed(app: &AppHandle, core: &Core, playlist_id: Option<&str>, outcome: MutationOutcome) {
+    if outcome == MutationOutcome::Rejected || outcome == MutationOutcome::Duplicate {
+        return;
+    }
+    let scope = core.account_scope();
+    let _ = core.store.delete(&scope, "library:Playlists");
+    if let Some(p) = playlist_id {
+        let bare = p.strip_prefix("VL").unwrap_or(p);
+        for key in [format!("collection:ytm:VL{bare}"), format!("collection:ytm:{bare}")] {
+            let _ = core.store.delete(&scope, &key);
+        }
+    }
+    let _ = PlaylistsEvent { playlist_id: playlist_id.map(|p| format!("ytm:VL{}", p.strip_prefix("VL").unwrap_or(p))) }.emit(app);
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn playlist_remove(core: S<'_>, playlist_id: String, entries: Vec<Entry>) -> Result<MutationOutcome> {
+pub async fn playlist_add(app: AppHandle, core: S<'_>, playlist_id: String, track_ids: Vec<ItemId>, allow_duplicates: bool) -> Result<MutationOutcome> {
+    let svc = core.service();
+    let r = svc.playlist_add(&svc.context(), &playlist_id, &track_ids, allow_duplicates).await?;
+    playlists_changed(&app, &core, Some(&playlist_id), r);
+    Ok(r)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn playlist_create(app: AppHandle, core: S<'_>, title: String, description: String, privacy: Privacy, track_ids: Vec<ItemId>) -> Result<PlaylistCreated> {
+    let svc = core.service();
+    let r = svc.playlist_create(&svc.context(), &title, &description, privacy, &track_ids).await?;
+    playlists_changed(&app, &core, r.playlist_id.as_deref(), r.outcome);
+    Ok(r)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn playlist_edit(app: AppHandle, core: S<'_>, playlist_id: String, edit: PlaylistEdit) -> Result<MutationOutcome> {
+    let svc = core.service();
+    let r = svc.playlist_edit(&svc.context(), &playlist_id, &edit).await?;
+    playlists_changed(&app, &core, Some(&playlist_id), r);
+    Ok(r)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn playlist_delete(app: AppHandle, core: S<'_>, playlist_id: String) -> Result<MutationOutcome> {
+    let svc = core.service();
+    let r = svc.playlist_delete(&svc.context(), &playlist_id).await?;
+    playlists_changed(&app, &core, Some(&playlist_id), r);
+    Ok(r)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn playlist_move(app: AppHandle, core: S<'_>, playlist_id: String, set_video_id: String, before: Option<String>) -> Result<MutationOutcome> {
+    let svc = core.service();
+    let r = svc.playlist_move(&svc.context(), &playlist_id, &set_video_id, before.as_deref()).await?;
+    playlists_changed(&app, &core, Some(&playlist_id), r);
+    Ok(r)
+}
+
+// ---------- history ----------
+
+/// Not cached: history changes with every play, and an old copy would offer
+/// removal tokens that no longer work (D19).
+#[tauri::command]
+#[specta::specta]
+pub async fn history(core: S<'_>) -> Result<HistoryPage> {
+    let svc = core.service();
+    svc.history(&svc.context()).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn history_more(core: S<'_>, cursor: String) -> Result<HistoryPage> {
+    let svc = core.service();
+    svc.history_more(&svc.context(), &cursor).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn history_remove(core: S<'_>, row_ids: Vec<String>) -> Result<MutationOutcome> {
+    let svc = core.service();
+    svc.history_remove(&svc.context(), &row_ids).await
+}
+
+// ---------- song / video ----------
+
+#[tauri::command]
+#[specta::specta]
+pub async fn counterpart(core: S<'_>, track: Track) -> Result<Option<Counterpart>> {
+    let svc = core.service();
+    svc.counterpart(&svc.context(), &track).await
+}
+
+/// Switch a queue entry to its other version. The pair is looked up here,
+/// not taken from the UI (D4).
+#[tauri::command]
+#[specta::specta]
+pub async fn switch_version(core: S<'_>, uid: String) -> Result<()> {
+    let entry = core.player.queue_snapshot().entries.into_iter().find(|e| e.uid == uid).ok_or_else(|| AppError::new(encore_core::ErrorCode::Stale, "That song is no longer in the queue."))?;
+    let svc = core.service();
+    let pair = svc.counterpart(&svc.context(), &entry.track).await?.ok_or_else(|| AppError::not_found(no_version(&entry.track)))?;
+    core.player.switch_version(&uid, &pair)
+}
+
+/// Play the other version of a track that is not playing, keeping the queue.
+#[tauri::command]
+#[specta::specta]
+pub async fn play_version(core: S<'_>, track: Track) -> Result<()> {
+    let svc = core.service();
+    let pair = svc.counterpart(&svc.context(), &track).await?.ok_or_else(|| AppError::not_found(no_version(&track)))?;
+    let mut t = pair.track;
+    t.counterpart = Some(track.id.clone());
+    core.player.play_now(t)
+}
+
+fn no_version(t: &Track) -> &'static str {
+    if t.kind == TrackKind::Video { "YouTube Music has no song version of this video." } else { "YouTube Music has no video version of this song." }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn playlist_remove(app: AppHandle, core: S<'_>, playlist_id: String, entries: Vec<Entry>) -> Result<MutationOutcome> {
     let svc = core.service();
     // The row's own ID, not the track's: an album row may list the video
     // while the track plays the song (D10).
@@ -379,7 +506,9 @@ pub async fn playlist_remove(core: S<'_>, playlist_id: String, entries: Vec<Entr
     if pairs.is_empty() {
         return Err(AppError::invalid("These songs cannot be removed from this playlist."));
     }
-    svc.playlist_remove(&svc.context(), &playlist_id, &pairs).await
+    let r = svc.playlist_remove(&svc.context(), &playlist_id, &pairs).await?;
+    playlists_changed(&app, &core, Some(&playlist_id), r);
+    Ok(r)
 }
 
 // ---------- auth ----------

@@ -4,6 +4,7 @@
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import Lyrics from "./Lyrics.svelte";
+  import VersionSwitch from "./VersionSwitch.svelte";
 
   const tr = $derived(player.current);
   const lyr = $derived(player.currentLyrics);
@@ -52,13 +53,16 @@
             {/if}
           </p>
         </div>
-        <button
-          class="icon-btn"
-          class:on={player.liked.has(tr.id)}
-          aria-pressed={player.liked.has(tr.id)}
-          aria-label={player.liked.has(tr.id) ? "Remove from liked music" : "Add to liked music"}
-          onclick={() => player.toggleLike(tr.id)}
-        ><Icon name={player.liked.has(tr.id) ? "heartFill" : "heart"} size={20} /></button>
+        <div class="tools">
+          {#if player.currentEntry}<VersionSwitch entry={player.currentEntry} />{/if}
+          <button
+            class="icon-btn"
+            class:on={player.liked.has(tr.id)}
+            aria-pressed={player.liked.has(tr.id)}
+            aria-label={player.liked.has(tr.id) ? "Remove from liked music" : "Add to liked music"}
+            onclick={() => player.toggleLike(tr.id)}
+          ><Icon name={player.liked.has(tr.id) ? "heartFill" : "heart"} size={20} /></button>
+        </div>
       </div>
 
       <section class="queue" aria-label="Up next">
@@ -94,7 +98,7 @@
               ondragover={(e) => { e.preventDefault(); dragOver = k; }}
               ondragend={() => (dragFrom = dragOver = null)}
               ondrop={() => drop(k)}
-              oncontextmenu={(e) => ui.openMenu(e, [{ label: "Remove from queue", icon: "x", run: () => player.removeAt(qi(k)) }, ...trackMenu(id)])}
+              oncontextmenu={(ev) => ui.openMenu(ev, [{ label: "Remove from queue", icon: "x", run: () => player.removeAt(qi(k)) }, ...trackMenu(id, e.uid)])}
             >
               <span class="grip" aria-hidden="true"><Icon name="grip" size={14} /></span>
               <button class="pick" onclick={() => player.jumpTo(qi(k))} aria-label="Play {t.title}">
@@ -239,6 +243,12 @@
   .titles {
     flex: 1;
     min-width: 0;
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
   }
   h2 {
     font-family: var(--font-display);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { call, isTauri, type AccountChannel, type BrowserProfile, type CacheInfo, type ResolverStatus } from "$lib/backend";
-  import { account, player, ui, type Theme } from "$lib/state.svelte";
+  import { account, openExternal, player, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { isMac, os, secretStore } from "$lib/platform";
 
@@ -82,6 +82,13 @@
     account.state = { state: "anonymous" };
     ui.say("Signed out");
   });
+  function setReport(on: boolean) {
+    ui.reportHistory = on;
+    call((a) => a.setReportHistory(on)).catch((e) => {
+      ui.reportHistory = !on;
+      ui.say(`Could not change that: ${e.message}`);
+    });
+  }
   const setupResolver = () => run("resolver", async () => (resolver = await call((a) => a.resolverSetup())));
   const clear = (w: "audio" | "art" | "lyrics") =>
     run("cache", async () => {
@@ -215,6 +222,17 @@
       <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
     </label>
     <div class="row">
+      <label class="grow" for="report-history">
+        <b>Send plays to YouTube history</b>
+        <p>
+          {account.signedIn ? "Songs you play here show up in your YouTube Music history and shape your recommendations." : "When you're signed in, songs you play here show up in your YouTube Music history."}
+          YouTube's own history setting still applies.
+        </p>
+        <button type="button" class="link" onclick={() => openExternal("https://myactivity.google.com/product/youtube")}>Manage your YouTube history <Icon name="external" size={13} /></button>
+      </label>
+      <input id="report-history" type="checkbox" role="switch" checked={ui.reportHistory} onchange={(e) => setReport(e.currentTarget.checked)} />
+    </div>
+    <div class="row">
       <div>
         <b>Stream resolver</b>
         <p>
@@ -309,6 +327,23 @@
     color: var(--text);
     font: inherit;
     font-size: 13px;
+  }
+  .grow {
+    display: grid;
+    justify-items: start;
+  }
+  .link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--text);
+  }
+  .link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
   .note {
     margin-top: 10px;

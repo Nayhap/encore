@@ -28,6 +28,10 @@ export interface Handlers {
   artHue(h: T.ArtHueEvent): void;
   notice(n: T.NoticeEvent): void;
   signin(s: T.SigninEvent): void;
+  /** A playlist was created, changed or deleted. */
+  playlists(e: T.PlaylistsEvent): void;
+  /** A play was reported to the history. */
+  history(e: T.HistoryEvent): void;
 }
 
 export interface Api {
@@ -73,8 +77,24 @@ export interface Api {
   setLike(trackId: string, liked: boolean): Promise<T.MutationOutcome>;
   setSaved(playlistId: string, saved: boolean): Promise<T.MutationOutcome>;
   setSubscribed(channelId: string, subscribed: boolean): Promise<T.MutationOutcome>;
-  playlistAdd(playlistId: string, trackIds: string[]): Promise<T.MutationOutcome>;
+  /** Refused as `duplicate` when a song is already there, unless `allowDuplicates`. */
+  playlistAdd(playlistId: string, trackIds: string[], allowDuplicates: boolean): Promise<T.MutationOutcome>;
   playlistRemove(playlistId: string, entries: T.Entry[]): Promise<T.MutationOutcome>;
+  playlistCreate(title: string, description: string, privacy: T.Privacy, trackIds: string[]): Promise<T.PlaylistCreated>;
+  playlistEdit(playlistId: string, edit: T.PlaylistEdit): Promise<T.MutationOutcome>;
+  playlistDelete(playlistId: string): Promise<T.MutationOutcome>;
+  /** Move the row `setVideoId` before the row `before`, or to the end. */
+  playlistMove(playlistId: string, setVideoId: string, before: string | null): Promise<T.MutationOutcome>;
+  history(): Promise<T.HistoryPage>;
+  historyMore(cursor: string): Promise<T.HistoryPage>;
+  historyRemove(rowIds: string[]): Promise<T.MutationOutcome>;
+  /** The other version of a track (song ↔ music video), or null. */
+  counterpart(track: T.Track): Promise<T.Counterpart | null>;
+  /** Switch a queue entry to its other version. */
+  switchVersion(uid: string): Promise<void>;
+  /** Play the other version of a track now, keeping the queue. */
+  playVersion(track: T.Track): Promise<void>;
+  setReportHistory(on: boolean): Promise<void>;
   authState(): Promise<T.AuthState>;
   browserProfiles(): Promise<T.BrowserProfile[]>;
   importBrowser(profileId: string): Promise<T.AuthState>;

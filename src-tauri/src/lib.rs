@@ -66,6 +66,17 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             set_subscribed,
             playlist_add,
             playlist_remove,
+            playlist_create,
+            playlist_edit,
+            playlist_delete,
+            playlist_move,
+            history,
+            history_more,
+            history_remove,
+            counterpart,
+            switch_version,
+            play_version,
+            set_report_history,
             auth_state,
             browser_profiles,
             import_browser,
@@ -76,7 +87,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             cancel_signin,
             window::snap_layouts,
         ])
-        .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent])
+        .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent])
 }
 
 /// Forward player events to the webview and drive lyrics.
@@ -220,6 +231,11 @@ pub fn run() {
                 }
             });
             forward_player_events(handle.clone(), core.clone());
+            // Plays go to YouTube Music history while the setting is on (D18).
+            let h4 = handle.clone();
+            core.player.report_history(core.ytm.clone(), Arc::new(move |id: &encore_core::model::ItemId| {
+                let _ = HistoryEvent { track_id: id.0.clone() }.emit(&h4);
+            }));
             media::install(&handle, core.clone());
             keepalive(handle.clone(), core.clone());
             // Bootstrap the stream resolver in the background (first run creates the venv).
