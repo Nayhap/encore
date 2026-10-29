@@ -11,6 +11,9 @@ const TARGET: &str = match manifest::current_target() {
     None => "x86_64-unknown-linux-gnu",
 };
 
+/// IDLE in the target's Python layout (left out when unpacking).
+const IDLE: &str = if cfg!(windows) { "python/Lib/idlelib" } else { "python/lib/python3.13/idlelib" };
+
 #[derive(Default)]
 struct MemFetcher {
     files: Mutex<HashMap<String, Vec<u8>>>,
@@ -71,7 +74,7 @@ fn fake(yt_dlp_version: &str, fetcher: Arc<MemFetcher>) -> Fake {
         .collect();
     let python = tar_gz(&[
         (py_exe, TarItem::File(b"#!python".to_vec(), 0o755)),
-        ("python/lib/python3.13/idlelib/x.py", TarItem::File(b"skip me".to_vec(), 0o644)),
+        (format!("{IDLE}/x.py").as_str(), TarItem::File(b"skip me".to_vec(), 0o644)),
         ("python/lib/python3.13/filler.bin", TarItem::File(filler, 0o644)),
     ]);
     let deno = zip_bytes(&[(manifest::deno_exe(TARGET), b"deno binary")]);
@@ -137,7 +140,7 @@ async fn installs_marks_and_activates() {
     assert!(set.site.join("yt_dlp_ejs/__init__.py").is_file());
     // Wheel data folders and trimmed Python parts are left out.
     assert!(!set.site.join("yt_dlp-x.data").exists());
-    assert!(!rt.root().join(f.manifest.components[0].id()).join("python/lib/python3.13/idlelib").exists());
+    assert!(!rt.root().join(f.manifest.components[0].id()).join(IDLE).exists());
     // Temporary folders and the v0.2 venv are gone.
     assert!(!rt.root().join(DOWNLOADS).exists());
     assert!(!rt.root().join(STAGING).exists());
