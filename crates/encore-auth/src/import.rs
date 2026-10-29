@@ -40,7 +40,7 @@ pub enum ImportError {
     NotFound(String),
     #[error("The Keychain did not release the {0} Safe Storage key (prompt denied or timed out).")]
     KeychainDenied(String),
-    #[error("Encore could not get {0}'s cookie key from the Secret Service or KWallet. Unlock your keyring and try again, or use “Sign in”.")]
+    #[error("Encore couldn't get {0}'s cookie key from GNOME Keyring or KWallet: no keyring is running, it's locked, or it has no key for {0}. Start or unlock your keyring and try again, or use “Sign in”.")]
     KeyUnavailable(String),
     #[error("Windows would not unlock {0}'s cookie key. {USE_SIGNIN}")]
     DpapiFailed(String),
