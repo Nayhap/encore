@@ -88,6 +88,12 @@ launch and uses it to get audio streams.
 | Debian, Ubuntu | `sudo apt install python3 python3-venv nodejs` |
 | Fedora | `sudo dnf install python3 nodejs` |
 
+Uninstalling keeps Encore's caches, settings and its copy of yt-dlp (a few
+hundred MB at most) unless you tick **Delete the application data** in the
+Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
+lists the folders to delete by hand on macOS and Linux, and the saved session
+in the system's credential store.
+
 ## Signing in
 
 Encore works without an account. To see your library, open **Settings**, then
