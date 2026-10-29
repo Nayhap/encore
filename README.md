@@ -69,8 +69,9 @@ Download the latest build from
   Encore, macOS says “Encore” Not Opened: choose **Done**, then go to
   **System Settings → Privacy & Security** and choose **Open Anyway**. Once you sign in, macOS asks for access to your saved
   session in the Keychain; choose **Always Allow**.
-- **Windows 10 and 11**: the `-setup.exe` installer (or the `.msi`). It
-  installs for your user and needs no admin rights. Builds are not code-signed
+- **Windows 10 and 11**: the `-setup.exe` installer, which installs for your
+  user and needs no admin rights. The `.msi` installs for all users and
+  needs an administrator. Builds are not code-signed
   yet: SmartScreen warns on first run (choose **More info**, then **Run
   anyway**), and if Smart App Control is on, Windows blocks them.
 - **Linux**: the `.deb` for Debian and Ubuntu, or the `.AppImage`. Needs
