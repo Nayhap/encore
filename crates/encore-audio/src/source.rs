@@ -14,7 +14,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::FileExt;
+use self::pos_io::PositionalIo;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -437,5 +437,53 @@ fn fetch_sequential(sh: &Shared, wf: &File, spec: HttpSpec) -> Result<(), String
         Ok(())
     } else {
         Err("download ended early".into())
+    }
+}
+
+/// Positional reads and writes on one shared file (Unix `pread`/`pwrite`;
+/// Windows `ReadFile`/`WriteFile` with an offset). Nothing here uses the
+/// file cursor, so Windows moving it is harmless.
+mod pos_io {
+    use std::fs::File;
+    use std::io;
+
+    pub trait PositionalIo {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+        fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
+    }
+
+    #[cfg(unix)]
+    impl PositionalIo for File {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+            std::os::unix::fs::FileExt::read_at(self, buf, offset)
+        }
+        fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+            std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+        }
+    }
+
+    #[cfg(windows)]
+    impl PositionalIo for File {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+            match std::os::windows::fs::FileExt::seek_read(self, buf, offset) {
+                // Reading at or past the end reports EOF as an error on Windows.
+                Err(e) if e.raw_os_error() == Some(38) => Ok(0), // ERROR_HANDLE_EOF
+                r => r,
+            }
+        }
+        fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+            while !buf.is_empty() {
+                match std::os::windows::fs::FileExt::seek_write(self, buf, offset) {
+                    Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write whole buffer")),
+                    Ok(n) => {
+                        buf = &buf[n..];
+                        offset += n as u64;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
     }
 }
