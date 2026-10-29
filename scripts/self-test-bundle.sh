@@ -20,16 +20,15 @@ case "$kind" in
     ;;
   appimage-in)
     img=$1; f=$(realpath "$2"); v=${3:-$video_default}
-    # A fresh system with only what README asks for: no audio server, no
-    # desktop, no development packages.
+    # A fresh system with what README asks for and a desktop's basic
+    # libraries (GTK), but no audio server and no development packages.
     docker run --rm -v "$f:/encore.AppImage:ro" "$img" bash -euo pipefail -c "
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
-      apt-get install -y -qq --no-install-recommends ca-certificates python3 python3-venv nodejs \
-        libasound2t64 libegl1 libgl1 libgles2 libgbm1 >/dev/null 2>&1 || \
-      apt-get install -y -qq --no-install-recommends ca-certificates python3 python3-venv nodejs \
-        libasound2 libegl1 libgl1 libgles2 libgbm1 >/dev/null
-      useradd -m 'qa' && cd /home/qa
+      common='ca-certificates python3 python3-venv nodejs libegl1 libgl1 libgles2 libgbm1'
+      apt-get install -y -qq --no-install-recommends \$common libgtk-3-0t64 libasound2t64 >/dev/null 2>&1 || \
+      apt-get install -y -qq --no-install-recommends \$common libgtk-3-0 libasound2 >/dev/null
+      useradd -m qa && cd /home/qa
       su qa -c 'cp /encore.AppImage ./e.AppImage && ./e.AppImage --appimage-extract >/dev/null && ./squashfs-root/AppRun --self-test $v ${SELF_TEST_ARGS:-}'
     "
     ;;
