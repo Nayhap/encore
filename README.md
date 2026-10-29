@@ -64,7 +64,11 @@ Download the latest build from
 [Releases](https://github.com/Nayhap/encore/releases/latest), or
 [build it yourself](docs/development.md).
 
-- **macOS**: `Encore.app`. Apple silicon and Intel.
+- **macOS**: the `.dmg`, for Apple silicon and Intel. Open it and drag Encore
+  to Applications. Builds are not code-signed yet, so the first time you open
+  Encore, macOS says “Encore” Not Opened: choose **Done**, then go to
+  **System Settings → Privacy & Security** and choose **Open Anyway**. Once you sign in, macOS asks for access to your saved
+  session in the Keychain; choose **Always Allow**.
 - **Windows 10 and 11**: the `-setup.exe` installer (or the `.msi`). It
   installs for your user and needs no admin rights. Builds are not code-signed
   yet: SmartScreen warns on first run (choose **More info**, then **Run
