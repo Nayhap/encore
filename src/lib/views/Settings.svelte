@@ -33,7 +33,9 @@
 
   onMount(async () => {
     profiles = await call((a) => a.browserProfiles()).catch(() => []);
-    profile = profiles.find((p) => p.id.startsWith("edge:"))?.id ?? profiles[0]?.id ?? "";
+    // Windows: Firefox is the browser import can actually read (D8).
+    const prefer = os === "windows" ? "firefox:" : "edge:";
+    profile = profiles.find((p) => p.id.startsWith(prefer))?.id ?? profiles[0]?.id ?? "";
     resolver = (await call((a) => a.bootstrap()).catch(() => null))?.resolver ?? null;
     cache = await call((a) => a.cacheInfo()).catch(() => null);
   });
