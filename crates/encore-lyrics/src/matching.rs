@@ -212,6 +212,7 @@ mod tests {
             plays: None,
             liked: None,
             playable: true,
+            counterpart: None,
         }
     }
     fn rec(title: &str, artist: &str, dur: f64) -> LrclibRecord {

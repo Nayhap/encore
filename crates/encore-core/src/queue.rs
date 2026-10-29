@@ -174,10 +174,12 @@ impl Queue {
 
     fn mark_played(&mut self) {
         if let Some(e) = self.current() {
-            let id = e.track.id.0.clone();
-            self.recent.retain(|x| x != &id);
-            self.recent.push(id);
-            if self.recent.len() > 50 {
+            // Remember the counterpart too, so radio does not bring back the
+            // video of the song that just played (or the other way round).
+            let ids: Vec<String> = e.track.recording_ids().map(|i| i.0.clone()).collect();
+            self.recent.retain(|x| !ids.contains(x));
+            self.recent.extend(ids);
+            while self.recent.len() > 50 {
                 self.recent.remove(0);
             }
         }
@@ -313,15 +315,21 @@ impl Queue {
     /// Append radio results, dropping tracks that are already queued ahead or
     /// were among the last 50 plays. Returns how many were added.
     pub fn extend_radio(&mut self, tracks: Vec<Track>) -> usize {
-        let ahead: HashSet<String> = match self.index {
-            Some(i) => self.entries[i..].iter().map(|e| e.track.id.0.clone()).collect(),
+        // A recording can arrive as its song or its video: compare both IDs.
+        let mut known: HashSet<String> = match self.index {
+            Some(i) => self.entries[i..].iter().flat_map(|e| e.track.recording_ids()).map(|id| id.0.clone()).collect(),
             None => HashSet::new(),
         };
-        let recent: HashSet<&String> = self.recent.iter().collect();
-        let mut seen = HashSet::new();
+        known.extend(self.recent.iter().cloned());
         let fresh: Vec<Track> = tracks
             .into_iter()
-            .filter(|t| t.playable && !ahead.contains(&t.id.0) && !recent.contains(&t.id.0) && seen.insert(t.id.0.clone()))
+            .filter(|t| {
+                if !t.playable || t.recording_ids().any(|id| known.contains(&id.0)) {
+                    return false;
+                }
+                known.extend(t.recording_ids().map(|id| id.0.clone()));
+                true
+            })
             .collect();
         let n = fresh.len();
         if n > 0 {
@@ -456,6 +464,7 @@ mod tests {
             plays: None,
             liked: None,
             playable: true,
+            counterpart: None,
         }
     }
     fn ids(q: &Queue) -> Vec<String> {
@@ -601,6 +610,20 @@ mod tests {
         assert_eq!(added, 2);
         assert_eq!(ids(&q), vec!["a", "b", "c", "d", "e", "x", "y"]);
         assert_eq!(q.entries()[5].origin, Origin::Radio);
+    }
+
+    #[test]
+    fn radio_skips_counterparts_of_queued_and_played_songs() {
+        let with = |n: &str, c: &str| Track { counterpart: Some(ItemId::ytm(c)), ..t(n) };
+        let mut q = Queue::new(42);
+        // An album row resolved to its song "a", with music video "va".
+        q.replace(vec![with("a", "va"), with("b", "vb")], 0, None, false, Origin::Collection).unwrap();
+        q.next();
+        // "va" is the video of a played song, "vb" of a queued one; "c"/"vc"
+        // are one recording offered twice; "vb2" is a different video.
+        let added = q.extend_radio(vec![t("va"), t("vb"), with("c", "vc"), t("vc"), with("vb2", "b"), t("d")]);
+        assert_eq!(added, 2);
+        assert_eq!(ids(&q), vec!["a", "b", "c", "d"]);
     }
 
     #[test]

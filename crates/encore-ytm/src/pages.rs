@@ -140,9 +140,13 @@ fn header_of(resp: &Value) -> Option<&Value> {
     find(c, "musicResponsiveHeaderRenderer").or_else(|| resp.get("header").and_then(|h| find(h, "musicDetailHeaderRenderer"))).or_else(|| resp.get("header").and_then(|h| h.get("musicResponsiveHeaderRenderer")))
 }
 
-fn entry_from(track: Track, set_video_id: Option<String>, idx: usize) -> Entry {
-    let entry_id = set_video_id.clone().unwrap_or_else(|| format!("{}#{idx}", track.id.remote()));
-    Entry { entry_id, track, set_video_id }
+fn entry_from(track: Track, video_id: Option<String>, set_video_id: Option<String>, idx: usize) -> Entry {
+    // The row's own ID: what the playlist holds, even if the track was
+    // resolved to its song (D10: edits address the row, not the track).
+    // A list row only gets a counterpart when it was resolved to its song.
+    let video_id = video_id.map(|v| ItemId::ytm(&v)).unwrap_or_else(|| track.counterpart.clone().unwrap_or_else(|| track.id.clone()));
+    let entry_id = set_video_id.clone().unwrap_or_else(|| format!("{}#{idx}", video_id.remote()));
+    Entry { entry_id, track, set_video_id, video_id }
 }
 
 fn entries_of(list: &Value, offset: usize) -> Vec<Entry> {
@@ -150,8 +154,10 @@ fn entries_of(list: &Value, offset: usize) -> Vec<Entry> {
     for (i, w) in list.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().enumerate() {
         let Some(r) = w.get("musicResponsiveListItemRenderer") else { continue };
         if let Some(ShelfItem::Track(t)) = list_item(r) {
-            let svid = r.get("playlistItemData").and_then(|p| p.get("playlistSetVideoId")).and_then(Value::as_str).map(str::to_string);
-            out.push(entry_from(t, svid, offset + i));
+            let data = r.get("playlistItemData");
+            let svid = data.and_then(|p| p.get("playlistSetVideoId")).and_then(Value::as_str).map(str::to_string);
+            let vid = data.and_then(|p| p.get("videoId")).and_then(Value::as_str).map(str::to_string);
+            out.push(entry_from(t, vid, svid, offset + i));
         }
     }
     out

@@ -106,11 +106,20 @@ pub struct Track {
     /// `None` = unknown, not "not liked".
     pub liked: Option<bool>,
     pub playable: bool,
+    /// The same recording in its other form: the music video when `id` is
+    /// the song. Never played on its own; kept for an explicit "play the
+    /// video instead" action (D4).
+    pub counterpart: Option<ItemId>,
 }
 
 impl Track {
     pub fn artist_line(&self) -> String {
         self.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+    }
+
+    /// `id` and, when known, `counterpart`: every ID this recording goes by.
+    pub fn recording_ids(&self) -> impl Iterator<Item = &ItemId> {
+        std::iter::once(&self.id).chain(self.counterpart.as_ref())
     }
 }
 
@@ -122,6 +131,10 @@ pub struct Entry {
     pub entry_id: String,
     pub track: Track,
     pub set_video_id: Option<String>,
+    /// The video ID the service lists for this row. Playlist edits pair it
+    /// with `set_video_id`. It differs from `track.id` when the row was
+    /// resolved to its song (album rows that list the music video).
+    pub video_id: ItemId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

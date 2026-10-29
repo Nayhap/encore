@@ -23,6 +23,7 @@ function toTrack(t: M.MTrack): T.Track {
     plays: t.plays ? `${t.plays} plays` : null,
     liked: liked.has(mid(t.id)),
     playable: true,
+    counterpart: null,
   };
 }
 const track = (id: string) => toTrack(M.tracks.find((t) => t.id === raw(id))!);
@@ -275,7 +276,7 @@ export const mockApi: Api = {
     return delay({
       id: mid(c.id), kind: kindOf(c), title: c.title, subtitle: card(c).subtitle, artists: card(c).artists, year: c.year ?? null, art: art(c.art),
       description: c.desc ?? null, stats: `${c.trackIds.length} songs`, trackCount: c.trackIds.length,
-      entries: c.trackIds.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null })),
+      entries: c.trackIds.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null, videoId: track(t).id })),
       cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", related: [],
     });
   },

@@ -117,7 +117,7 @@ mod tests {
     fn e(uid: &str) -> QueueEntry {
         QueueEntry {
             uid: uid.into(),
-            track: Track { id: ItemId::ytm(uid), title: uid.into(), artists: vec![], album: None, duration: None, explicit: false, art: None, kind: TrackKind::Song, plays: None, liked: None, playable: true },
+            track: Track { id: ItemId::ytm(uid), title: uid.into(), artists: vec![], album: None, duration: None, explicit: false, art: None, kind: TrackKind::Song, plays: None, liked: None, playable: true, counterpart: None },
             origin: Origin::Manual,
         }
     }

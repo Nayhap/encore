@@ -94,6 +94,92 @@ fn album_parses_header_and_tracks() {
     assert!(first.art.is_some());
 }
 
+/// Discovery, as (song, music video) pairs. The album page and its queue list
+/// the music videos; the songs were checked live (`player`: ATV, and the
+/// album's listed durations).
+const DISCOVERY: [(&str, &str); 14] = [
+    ("fa5IWHDbftI", "FGBhQbmPwH8"),
+    ("52fNscjkST4", "L93-7vRfxNs"),
+    ("Smi8vAbm_8o", "4whD6uAryMs"),
+    ("JhulBGMA7G4", "gAjR4_CbPpQ"),
+    ("AuTRLEWSfTo", "6S3ISlvlEbs"),
+    ("iRHo9cz2wFc", "xBTqRd09y3E"),
+    ("mZdfvOuRvFc", "bRt5z880CFY"),
+    ("IUpgPigGJ5s", "HoQN7K6HdRw"),
+    ("Om4L8mlTiAA", "sOS9aOIXPEk"),
+    ("OWiVJMgms9E", "CqZgd6-xQl8"),
+    ("POSwzCFwUZ0", "HhZaHf8RP6g"),
+    ("Can7kOYrGpI", "1-yzqgwTVi8"),
+    ("qXI87eMP-bs", "dKJfJMMsqX4"),
+    ("TZhxu5iCDnI", "Z6_ZNW1DACE"),
+];
+
+#[test]
+fn album_rows_play_the_song_not_the_music_video() {
+    let c = pages::collection(&fx("album"), &ItemId::ytm("MPREb_7ltM34kr0mH")).unwrap().value;
+    assert_eq!(c.entries.len(), DISCOVERY.len());
+    for (e, (song, video)) in c.entries.iter().zip(DISCOVERY) {
+        let t = &e.track;
+        assert_eq!(t.id.remote(), song, "{} plays the song", t.title);
+        assert_eq!(t.kind, TrackKind::Song, "{}", t.title);
+        assert_eq!(t.counterpart.as_ref().map(ItemId::remote), Some(video), "{} keeps its video", t.title);
+        // The row (and its setVideoId) still belongs to the listed video.
+        assert_eq!(e.video_id.remote(), video);
+        assert!(e.set_video_id.is_some());
+        // The row's like state is the video's, not the song's.
+        assert_eq!(t.liked, None);
+    }
+    // Durations are the album listing's, which are the songs' lengths.
+    let veridis = &c.entries[10].track;
+    assert_eq!((veridis.title.as_str(), veridis.duration), ("Veridis Quo", Some(346.0)));
+}
+
+#[test]
+fn album_queue_plays_the_songs() {
+    let n = pages::next(&fx("next_album")).unwrap();
+    assert_eq!(n.tracks.len(), DISCOVERY.len());
+    for (t, (song, video)) in n.tracks.iter().zip(DISCOVERY) {
+        assert_eq!(t.id.remote(), song, "{}", t.title);
+        assert_eq!(t.kind, TrackKind::Song);
+        assert_eq!(t.counterpart.as_ref().map(ItemId::remote), Some(video));
+        // lengthText is the video's; the stream gives the song's.
+        assert_eq!(t.duration, None);
+    }
+}
+
+#[test]
+fn real_videos_stay_videos() {
+    // The "Videos" search filter: music videos and user uploads.
+    let r = pages::search(&fx("search_videos"), "daft punk").unwrap().value;
+    assert!(r.videos.len() >= 10, "{}", r.videos.len());
+    assert!(r.songs.is_empty(), "{:?}", r.songs.iter().map(|t| &t.title).collect::<Vec<_>>());
+    assert!(r.videos.iter().all(|t| t.kind == TrackKind::Video && t.counterpart.is_none()));
+    // Videos in the "all" results.
+    let all = pages::search(&fx("search_all"), "daft punk").unwrap().value;
+    assert!(!all.videos.is_empty());
+    assert!(all.videos.iter().all(|t| t.kind == TrackKind::Video && t.counterpart.is_none()));
+    // Music-video shelves (Explore's trending videos, an artist's videos).
+    for p in [pages::browse_page(&fx("explore")).unwrap().value.shelves, pages::artist(&fx("artist"), &ItemId::ytm("UCRr1xG_2WIDs18a6cIiCxeA")).unwrap().value.shelves] {
+        let vids: Vec<&Track> = p.iter().flat_map(|s| &s.items).filter_map(|i| if let ShelfItem::Track(t) = i { Some(t) } else { None }).filter(|t| t.kind == TrackKind::Video).collect();
+        assert!(vids.len() >= 10, "{}", vids.len());
+        assert!(vids.iter().all(|t| t.counterpart.is_none()));
+    }
+    // A video in a playlist is what the playlist holds.
+    let pl = pages::collection(&fx("playlist_long"), &ItemId::ytm("VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3")).unwrap().value;
+    assert!(pl.entries.iter().any(|e| e.track.kind == TrackKind::Video));
+    assert!(pl.entries.iter().all(|e| e.track.counterpart.is_none() && e.video_id == e.track.id));
+}
+
+#[test]
+fn songs_elsewhere_are_unchanged() {
+    let s = pages::search(&fx("search_songs"), "daft punk").unwrap().value;
+    assert!(s.songs.iter().all(|t| t.counterpart.is_none()));
+    let a = pages::artist(&fx("artist"), &ItemId::ytm("UCRr1xG_2WIDs18a6cIiCxeA")).unwrap().value;
+    assert!(a.top_songs.iter().all(|t| t.kind == TrackKind::Song && t.counterpart.is_none()));
+    let n = pages::next(&fx("next_radio")).unwrap();
+    assert!(n.tracks.iter().all(|t| t.counterpart.is_none() && t.duration.is_some()));
+}
+
 #[test]
 fn long_playlist_paginates() {
     let id = ItemId::ytm("VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3");

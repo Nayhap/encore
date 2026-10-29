@@ -11,7 +11,7 @@ use encore_lyrics::LyricsService;
 struct Fake(Option<Lyrics>);
 
 fn track() -> Track {
-    Track { id: ItemId::ytm("abc"), title: "Song".into(), artists: vec![Credit { name: "Artist".into(), id: None }], album: None, duration: Some(200.0), explicit: false, art: None, kind: TrackKind::Song, plays: None, liked: None, playable: true }
+    Track { id: ItemId::ytm("abc"), title: "Song".into(), artists: vec![Credit { name: "Artist".into(), id: None }], album: None, duration: Some(200.0), explicit: false, art: None, kind: TrackKind::Song, plays: None, liked: None, playable: true, counterpart: None }
 }
 
 #[async_trait]
