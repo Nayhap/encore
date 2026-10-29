@@ -47,6 +47,11 @@
 
 ## Install
 
+<p align="center">
+  <img src="docs/assets/screens/windows-home-dark.webp" width="49%" alt="Encore on Windows 11, dark theme">
+  <img src="docs/assets/screens/linux-home-light.webp" width="49%" alt="Encore on Linux, light theme">
+</p>
+
 Download the latest build from
 [Releases](https://github.com/Nayhap/encore/releases/latest), or
 [build it yourself](docs/development.md).
