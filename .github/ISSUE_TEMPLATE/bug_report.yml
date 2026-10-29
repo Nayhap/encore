@@ -1,0 +1,38 @@
+name: Bug report
+description: Something doesn't work the way it should.
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a playlist
+        2. Press S
+        3. …
+  - type: input
+    attributes:
+      label: Encore version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: macOS version
+      placeholder: "15.4"
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Signed in?
+      options: ["Yes", "No"]
+  - type: textarea
+    attributes:
+      label: Log
+      description: From ~/Library/Logs/app.encore.desktop/encore.log. It is redacted, but check it before pasting.
+      render: text

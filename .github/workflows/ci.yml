@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - run: brew install cmake
+      - run: bun install --frozen-lockfile
+      - run: cargo test --workspace
+      - run: git diff --exit-code src/lib/backend/bindings.ts
+      - run: bun run check

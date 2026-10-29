@@ -1,0 +1,13 @@
+name: Feature request
+description: Suggest something Encore should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: What you want to do
+      description: Describe the problem or the moment, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: How you'd expect it to work

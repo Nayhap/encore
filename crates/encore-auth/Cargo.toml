@@ -1,0 +1,24 @@
+[package]
+name = "encore-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+httpdate = "1"
+keyring = { version = "3.6", features = ["apple-native"] }
+aes = "0.9"
+cbc = { version = "0.2", features = ["block-padding", "alloc"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+dirs = "6"
+parking_lot.workspace = true

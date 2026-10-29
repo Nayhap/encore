@@ -1,0 +1,51 @@
+[workspace]
+members = ["src-tauri", "crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+encore-core = { path = "crates/encore-core" }
+encore-ytm = { path = "crates/encore-ytm" }
+encore-auth = { path = "crates/encore-auth" }
+encore-audio = { path = "crates/encore-audio" }
+encore-lyrics = { path = "crates/encore-lyrics" }
+encore-resolver = { path = "crates/encore-resolver" }
+encore-player = { path = "crates/encore-player" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "gzip", "brotli", "json", "query", "stream", "charset"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.29", features = ["v4", "serde"] }
+rand = "0.10"
+parking_lot = "0.13"
+url = "2.5"
+sha1 = "0.11"
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.23"
+rusqlite = { version = "0.41", features = ["bundled"] }
+directories = "6"
+specta = { version = "=2.0.0-rc.26", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

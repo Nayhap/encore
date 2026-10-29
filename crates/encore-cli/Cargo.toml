@@ -1,0 +1,25 @@
+[package]
+name = "encore-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "encore-cli"
+path = "src/main.rs"
+
+[dependencies]
+encore-audio.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+encore-core.workspace = true
+encore-ytm.workspace = true
+encore-auth.workspace = true
+serde.workspace = true
+encore-resolver.workspace = true
+url.workspace = true
+encore-player.workspace = true
+dirs = "6"
+encore-lyrics.workspace = true

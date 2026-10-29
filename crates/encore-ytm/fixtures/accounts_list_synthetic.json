@@ -1,0 +1,9 @@
+{"actions":[{"getMultiPageMenuAction":{"menu":{"multiPageMenuRenderer":{"sections":[{"accountSectionListRenderer":{"contents":[{"accountItemSectionRenderer":{"contents":[
+ {"accountItem":{"accountName":{"simpleText":"Test Person"},"accountByline":{"simpleText":"@testperson"},"isSelected":true,
+   "accountPhoto":{"thumbnails":[{"url":"https://yt3.ggpht.com/synthetic-person=s88","width":88,"height":88}]},
+   "serviceEndpoint":{"selectActiveIdentityEndpoint":{"supportedTokens":[{"accountStateToken":{"hasChannel":true,"isMerged":false,"obfuscatedGaiaId":"SYNTHETIC"}},{"datasyncIdToken":{"datasyncIdToken":"100000000000000000001||"}},{"accountSigninToken":{"signinUrl":"https://accounts.google.com/ServiceLogin?authuser=0&continue=x"}}]}}}},
+ {"accountItem":{"accountName":{"simpleText":"Test Brand Channel"},"channelHandle":{"simpleText":"@testbrand"},"isSelected":false,
+   "serviceEndpoint":{"selectActiveIdentityEndpoint":{"supportedTokens":[{"pageIdToken":{"pageId":"112233445566778899000"}},{"datasyncIdToken":{"datasyncIdToken":"112233445566778899000||100000000000000000001"}},{"accountSigninToken":{"signinUrl":"https://accounts.google.com/ServiceLogin?authuser=0&continue=x"}}]}}}},
+ {"accountItem":{"accountName":{"simpleText":"Second Login"},"isSelected":false,
+   "serviceEndpoint":{"selectActiveIdentityEndpoint":{"supportedTokens":[{"datasyncIdToken":{"datasyncIdToken":"200000000000000000002||"}},{"accountSigninToken":{"signinUrl":"https://accounts.google.com/ServiceLogin?continue=x&authuser=1"}}]}}}}
+]}}]}}]}}}}]}

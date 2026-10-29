@@ -1,0 +1,19 @@
+[package]
+name = "encore-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+specta.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+regex = "1"
