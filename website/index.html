@@ -1,232 +1,363 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-os="macos">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Encore · YouTube Music for the desktop</title>
-  <meta name="description" content="An open-source desktop app for YouTube Music, with synced lyrics, a real queue and native playback.">
-  <meta property="og:title" content="Encore">
-  <meta property="og:description" content="YouTube Music for the desktop.">
-  <meta property="og:image" content="assets/og.jpg">
+  <title>Encore: YouTube Music for the desktop, with lyrics in the seek bar</title>
+  <meta name="description" content="A free, open-source YouTube Music app for macOS, Windows and Linux. The seek bar is drawn from the song's lyrics, so you can see the chorus coming.">
+  <link rel="canonical" href="https://encore.nayhap.com/">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://encore.nayhap.com/">
+  <meta property="og:site_name" content="Encore">
+  <meta property="og:title" content="Encore: see the chorus coming">
+  <meta property="og:description" content="A free, open-source YouTube Music app for macOS, Windows and Linux, with a seek bar drawn from the lyrics.">
+  <meta property="og:image" content="https://encore.nayhap.com/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Encore. See the chorus coming. A seek bar drawn from a song's lyrics.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="theme-color" content="#0b0d11">
-  <link rel="icon" href="favicon.png">
+  <meta name="twitter:title" content="Encore: see the chorus coming">
+  <meta name="twitter:description" content="A free, open-source YouTube Music app with a seek bar drawn from the lyrics.">
+  <meta name="twitter:image" content="https://encore.nayhap.com/assets/og.png">
+  <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f2f3f5" media="(prefers-color-scheme: light)">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="favicon.ico" sizes="32x32">
+  <link rel="icon" href="assets/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
   <link rel="preload" href="assets/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin>
-  <style>
-    @font-face { font-family: "Bricolage"; src: url("assets/fonts/bricolage.woff2") format("woff2"); font-weight: 200 800; font-stretch: 75% 100%; font-display: swap; }
-    @font-face { font-family: "Instrument"; src: url("assets/fonts/instrument.woff2") format("woff2"); font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; }
-    @font-face { font-family: "Plex Mono"; src: url("assets/fonts/plex-mono.woff2") format("woff2"); font-weight: 400; font-display: swap; }
-
-    /* The accent drifts through the hues of the app's covers, like the app does per song. */
-    @property --h { syntax: "<number>"; inherits: true; initial-value: 208; }
-    @keyframes hue { 0%, 100% { --h: 208; } 33% { --h: 312; } 66% { --h: 16; } }
-
-    :root {
-      --ink: #0b0d11; --panel: #13161b; --line: #232831;
-      --text: #eeece7; --mute: #8f959e; --dim: #5a606a;
-      --accent: hsl(var(--h) 80% 74%);
-      --display: "Bricolage", system-ui, sans-serif;
-      --ui: "Instrument", system-ui, sans-serif;
-      --mono: "Plex Mono", ui-monospace, monospace;
-      animation: hue 36s ease-in-out infinite;
-    }
-    * { box-sizing: border-box; }
-    html { background: var(--ink); color: var(--text); font: 17px/1.5 var(--ui); -webkit-font-smoothing: antialiased; }
-    body { margin: 0; overflow-x: hidden; }
-    a { color: inherit; }
-    img { display: block; max-width: 100%; height: auto; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
-
-    .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
-
-    nav { display: flex; align-items: center; justify-content: space-between; height: 72px; }
-    .brand { display: flex; align-items: center; gap: 10px; font: 700 20px var(--display); font-stretch: 85%; letter-spacing: -.02em; text-decoration: none; }
-    .brand img { width: 30px; height: 30px; }
-    nav .links { display: flex; gap: 22px; font-size: 15px; color: var(--mute); }
-    nav .links a { text-decoration: none; }
-    nav .links a:hover { color: var(--text); }
-
-    .hero { position: relative; padding: 72px 0 0; }
-    .hero::before {
-      content: ""; position: absolute; inset: -200px -30vw auto; height: 900px; z-index: -1; pointer-events: none;
-      background:
-        radial-gradient(40% 50% at 25% 30%, hsl(var(--h) 70% 45% / .32), transparent 70%),
-        radial-gradient(35% 45% at 80% 45%, hsl(calc(var(--h) + 50) 60% 40% / .28), transparent 70%);
-    }
-    h1 {
-      margin: 0; max-width: 14ch;
-      font: 720 clamp(52px, 8.4vw, 112px)/.92 var(--display); font-stretch: 78%; letter-spacing: -.045em;
-      text-wrap: balance;
-    }
-    .lede { margin: 26px 0 0; max-width: 34ch; font-size: 20px; color: var(--mute); text-wrap: pretty; }
-    .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
-    .btn {
-      display: inline-flex; align-items: center; gap: 9px; height: 48px; padding: 0 22px; border-radius: 999px;
-      font-weight: 600; text-decoration: none; background: rgb(255 255 255 / .08); box-shadow: inset 0 0 0 1px rgb(255 255 255 / .1);
-      transition: transform .15s, background-color .15s;
-    }
-    .btn:hover { background: rgb(255 255 255 / .13); }
-    .btn:active { transform: scale(.97); }
-    .btn.primary { background: var(--text); color: var(--ink); box-shadow: none; }
-    .btn.primary:hover { background: #fff; }
-    .btn svg { width: 18px; height: 18px; }
-    .note { margin-top: 14px; font-size: 13.5px; color: var(--dim); }
-
-    /* Signature: the seek bar from the app, drawn from a song's lyrics, playing. */
-    .map { margin: 64px 0 0; }
-    .line {
-      height: 1.3em; font: 650 clamp(22px, 2.6vw, 32px)/1.3 var(--display); letter-spacing: -.015em;
-      color: transparent; background: linear-gradient(90deg, var(--text) var(--p, 0%), rgb(238 236 231 / .32) var(--p, 0%));
-      -webkit-background-clip: text; background-clip: text; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .line.gap { background: none; color: var(--dim); }
-    .bar { position: relative; height: 26px; margin-top: 14px; }
-    .bar .rail { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: rgb(255 255 255 / .1); }
-    .bar .seg { position: absolute; top: 50%; transform: translateY(-50%); border-radius: 2px; overflow: hidden; background: rgb(255 255 255 / .22); }
-    .bar .seg.hook { background: hsl(var(--h) 70% 70% / .32); }
-    .bar .seg.chorus { background: hsl(var(--h) 70% 70% / .45); }
-    .bar .seg i { position: absolute; inset: 0; background: var(--accent); transform-origin: left; transform: scaleX(0); }
-    .bar .head { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; border-radius: 3px; background: var(--text); box-shadow: 0 0 0 2px var(--ink); }
-    .times { display: flex; justify-content: space-between; margin-top: 8px; font: 12.5px var(--mono); color: var(--dim); }
-
-    .shot {
-      margin: 56px 0 0; border-radius: 14px; overflow: hidden; position: relative;
-      box-shadow: 0 60px 140px -40px rgb(0 0 0 / .85), 0 0 0 1px rgb(255 255 255 / .08);
-    }
-    .shot .lights { position: absolute; left: 1.3%; top: 1.9%; display: flex; gap: 7px; }
-    .shot .lights i { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; }
-    .shot .lights i:nth-child(2) { background: #febc2e; } .shot .lights i:nth-child(3) { background: #28c840; }
-
-    section.feature { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; padding: 120px 0 0; }
-    section.feature:nth-of-type(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
-    section.feature:nth-of-type(even) .copy { order: 2; }
-    h2 { margin: 0; font: 680 clamp(32px, 3.6vw, 46px)/1.02 var(--display); font-stretch: 84%; letter-spacing: -.03em; text-wrap: balance; }
-    .copy p { margin: 16px 0 0; color: var(--mute); max-width: 38ch; text-wrap: pretty; }
-    kbd { font: 13px var(--mono); padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
-    .feature .shot { margin: 0; border-radius: 12px; }
-
-    footer { margin-top: 140px; padding: 36px 0 48px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; font-size: 14px; color: var(--dim); }
-    footer a { color: var(--mute); text-decoration: none; }
-    footer a:hover { color: var(--text); }
-
-    @media (max-width: 820px) {
-      section.feature, section.feature:nth-of-type(even) { grid-template-columns: 1fr; gap: 28px; padding-top: 88px; }
-      section.feature:nth-of-type(even) .copy { order: 0; }
-      nav .links a:not(:last-child) { display: none; }
-    }
-    @media (prefers-reduced-motion: reduce) { :root { animation: none; } }
-  </style>
+  <link rel="preload" href="assets/fonts/instrument.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    // Theme and OS before first paint, so nothing flashes.
+    (function () {
+      var d = document.documentElement, t = null;
+      try { t = localStorage.getItem("encore-theme"); } catch (e) {}
+      if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      d.dataset.theme = t;
+      var s = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
+      d.dataset.os = /mac|iphone|ipad/i.test(s) ? "macos" : /win/i.test(s) ? "windows" : /linux|x11|cros/i.test(s) && !/android/i.test(navigator.userAgent) ? "linux" : "macos";
+      d.classList.add("js");
+    })();
+  </script>
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
 </head>
 <body>
-  <div class="wrap">
-    <nav>
-      <a class="brand" href="./"><img src="assets/icon.png" alt="">Encore</a>
-      <div class="links">
-        <a href="#lyrics">Features</a>
-        <a href="https://github.com/Nayhap/encore">GitHub</a>
-      </div>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav">
+    <a class="brand" href="#top" aria-label="Encore, back to top">
+      <img src="assets/icon-64.png" width="28" height="28" alt="">
+      <span>Encore</span>
+    </a>
+
+    <!-- The page drawn as a song map: one segment per section, the playhead is your scroll. -->
+    <nav class="pagemap" aria-label="Sections">
+      <a href="#map" class="ps hook" style="--a:12%;--b:24%" data-label="The song map"><i></i><span>The song map</span></a>
+      <a href="#screens" class="ps chorus" style="--a:27%;--b:44%" data-label="The app"><i></i><span>The app</span></a>
+      <a href="#colour" class="ps verse" style="--a:47%;--b:58%" data-label="Colour"><i></i><span>Colour</span></a>
+      <a href="#keys" class="ps hook" style="--a:61%;--b:73%" data-label="Keys"><i></i><span>Keys</span></a>
+      <a href="#details" class="ps verse" style="--a:76%;--b:86%" data-label="Details"><i></i><span>Details</span></a>
+      <a href="#download" class="ps chorus" style="--a:89%;--b:100%" data-label="Download"><i></i><span>Download</span></a>
+      <b class="pm-head" aria-hidden="true"></b>
     </nav>
 
-    <header class="hero">
-      <h1>YouTube Music, without the browser tab.</h1>
-      <p class="lede">A desktop app with synced lyrics, a queue you can see and a player that doesn't eat your memory.</p>
-      <div class="cta">
-        <a class="btn primary" href="https://github.com/Nayhap/encore/releases/latest">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.6c0-2.4 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.8-1.6 0-3.2 1-4 2.4-1.7 3-.4 7.4 1.2 9.8.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.2-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8 0 0-2.6-1-2.6-3.9ZM14 5.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1 .1 2.1-.6 2.8-1.4Z"/></svg>
-          Download for macOS
-        </a>
-        <a class="btn" href="https://github.com/Nayhap/encore">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.4-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.6.3-1.1.6-1.3-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.8 1a9.6 9.6 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.6 4.9.4.3.7.9.7 1.9V21c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>
-          Source on GitHub
-        </a>
-      </div>
-      <p class="note">Free and open source. Windows and Linux are planned.</p>
+    <div class="nav-end">
+      <button class="kbtn" type="button" data-palette aria-label="Open the command palette" aria-keyshortcuts="Meta+K Control+K">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+        <kbd class="modk">⌘K</kbd>
+      </button>
+      <button class="iconbtn" type="button" id="theme" aria-label="Switch to light theme">
+        <svg class="sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6"/><path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M4.2 15.8l1.5-1.5M14.3 5.7l1.5-1.5"/></svg>
+        <svg class="moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>
+      </button>
+      <a class="iconbtn gh" href="https://github.com/Nayhap/encore" aria-label="Encore on GitHub">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" stroke="none" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.4-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.6.3-1.1.6-1.3-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.8 1a9.6 9.6 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.6 4.9.4.3.7.9.7 1.9V21c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>
+      </a>
+    </div>
+  </header>
 
-      <div class="map" aria-hidden="true">
-        <div class="line" id="line"></div>
-        <div class="bar" id="bar"><div class="rail"></div><div class="head" id="head"></div></div>
-        <div class="times"><span id="pos">0:00</span><span>3:38</span></div>
-      </div>
-
-      <div class="shot">
-        <img src="assets/screens/home.webp" width="2880" height="1800" alt="Encore's home screen, with lyrics and the queue in the right panel">
-        <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
-      </div>
-    </header>
-
-    <main>
-      <section class="feature" id="lyrics">
-        <div class="copy">
-          <h2>Lyrics that follow the song.</h2>
-          <p>Synced lyrics from YouTube Music and LRCLIB, line by line. The seek bar is drawn from them, so you can see the chorus coming and jump to it. Press <kbd>F</kbd> for full screen.</p>
+  <main id="main">
+    <!-- 0:00 -->
+    <section class="hero" id="top" aria-labelledby="h1">
+      <div class="glow" aria-hidden="true"></div>
+      <div class="wrap">
+        <p class="eyebrow"><span class="tc">0:00</span> YouTube Music for macOS, Windows and Linux</p>
+        <h1 id="h1">See the chorus coming.</h1>
+        <div class="hero-row">
+          <p class="lede">Encore is a free, open-source desktop app for YouTube Music. Its seek bar is drawn from the song’s lyrics: one mark for every sung line, taller where a line comes back.</p>
+          <div class="cta">
+            <a class="btn primary dl-main" href="https://github.com/Nayhap/encore/releases/latest">
+              <svg class="osi" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-macos"/></svg>
+              <span>Download for <b class="osname">macOS</b></span>
+            </a>
+            <a class="btn ghost" href="https://github.com/Nayhap/encore">Source on GitHub</a>
+          </div>
         </div>
-        <div class="shot"><img src="assets/screens/lyrics.webp" width="2880" height="1800" alt="Full-screen lyrics with the current line filling in" loading="lazy"></div>
-      </section>
 
-      <section class="feature">
-        <div class="copy">
-          <h2>One box for everything.</h2>
-          <p>Press <kbd>⌘K</kbd> to find songs, artists, albums and playlists, or to run a command. <kbd>Enter</kbd> plays, <kbd>⇧ Enter</kbd> plays next.</p>
+        <!-- The signature: a working copy of Encore's lyric seek bar, at hero scale. -->
+        <div class="stage" id="stage" aria-label="Interactive preview of Encore's player">
+          <div class="stage-side">
+            <div class="cover-wrap"><div class="cover" id="cover" aria-hidden="true"></div></div>
+            <div class="meta">
+              <p class="title" id="title">Daybreak Signal</p>
+              <p class="artist" id="artist">Lumen Drive</p>
+            </div>
+            <div class="transport" role="group" aria-label="Playback">
+              <button class="tbtn" type="button" id="shuffle" aria-label="Shuffle" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 6h3c3.5 0 5.5 8 9 8h2.5M2.5 14h3c1.3 0 2.4-1 3.3-2.4M11.2 8.4C12.1 7 13.2 6 14.5 6H17M15 3.8 17.2 6 15 8.2M15 11.8l2.2 2.2-2.2 2.2"/></svg></button>
+              <button class="tbtn" type="button" id="prev" aria-label="Previous song"><svg viewBox="0 0 20 20" aria-hidden="true"><path class="f" d="M15 4.5v11L7 10z"/><path d="M5 4.5v11"/></svg></button>
+              <button class="tbtn play" type="button" id="play" aria-label="Pause preview" aria-pressed="true">
+                <svg class="i-pause" viewBox="0 0 20 20" aria-hidden="true"><path class="f" d="M6 4h2.6v12H6zM11.4 4H14v12h-2.6z"/></svg>
+                <svg class="i-play" viewBox="0 0 20 20" aria-hidden="true"><path class="f" d="M6.5 3.8v12.4L16 10z"/></svg>
+              </button>
+              <button class="tbtn" type="button" id="next" aria-label="Next song"><svg viewBox="0 0 20 20" aria-hidden="true"><path class="f" d="M5 4.5v11l8-5.5z"/><path d="M15 4.5v11"/></svg></button>
+              <button class="tbtn" type="button" id="like" aria-label="Like" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16.5s-6.5-3.8-6.5-8.4A3.6 3.6 0 0 1 10 6a3.6 3.6 0 0 1 6.5 2.1c0 4.6-6.5 8.4-6.5 8.4Z"/></svg></button>
+            </div>
+            <div class="picks" id="picks" role="group" aria-label="Choose a song"></div>
+          </div>
+
+          <div class="lyrics" id="lyrics" aria-live="off">
+            <div class="lyr-track" id="lyr-track"></div>
+          </div>
+
+          <div class="stage-map">
+            <div class="map hero-map" id="hero-map"></div>
+            <div class="times"><span id="t-pos">0:00</span><span class="hint" id="hint">Drag the bar. Space, ← → and [ ] work too.</span><span id="t-dur">3:38</span></div>
+          </div>
         </div>
-        <div class="shot"><img src="assets/screens/search.webp" width="1400" height="1270" alt="The search palette with results for an artist" loading="lazy"></div>
-      </section>
+        <p class="footnote">A silent preview with invented songs, built from the app’s own seek bar. No audio plays on this page.</p>
+      </div>
+    </section>
 
-      <section class="feature">
-        <div class="copy">
-          <h2>Your library, signed in.</h2>
-          <p>Bring your session over from Edge, Chrome, Brave, Firefox or Safari, or sign in inside the app. Brand channels work. The session is kept in the macOS Keychain and nowhere else.</p>
+    <!-- 0:32 -->
+    <section class="sec" id="map" aria-labelledby="map-h">
+      <div class="wrap">
+        <div class="sec-head duo">
+          <div>
+            <p class="eyebrow"><span class="tc">0:32</span> The song map</p>
+            <h2 id="map-h">Every line gets a mark. Repeats stand taller.</h2>
+          </div>
+          <p class="sub">Encore lays each synced line on the timeline. Gaps are instrumental. A line sung twice is a hook, three times or more is the chorus. Point at a line to find every place it comes back.</p>
         </div>
-        <div class="shot"><img src="assets/screens/light.webp" width="2880" height="1800" alt="A playlist page in the light theme" loading="lazy"></div>
-      </section>
-    </main>
 
-    <footer>
-      <span>Encore is not affiliated with YouTube or Google.</span>
-      <span><a href="https://github.com/Nayhap/encore">GitHub</a> · <a href="https://github.com/Nayhap/encore/blob/main/LICENSE">MIT License</a></span>
-    </footer>
+        <figure class="anatomy">
+          <p class="anat-cap" aria-hidden="true"><b>Daybreak Signal</b> Lumen Drive <span>35 lines · 3:38</span></p>
+          <div class="map anat-map" id="anat-map" aria-hidden="true"></div>
+          <div class="legend" aria-hidden="true">
+            <span><i class="lg verse"></i>Sung once</span>
+            <span><i class="lg hook"></i>Sung twice</span>
+            <span><i class="lg chorus"></i>Three times or more</span>
+            <span><i class="lg gap"></i>Instrumental</span>
+          </div>
+          <figcaption class="sr">The seek bar for “Daybreak Signal”, with its lyric lines listed below.</figcaption>
+          <ol class="sheet" id="sheet"></ol>
+        </figure>
+      </div>
+    </section>
+
+    <!-- 1:04 -->
+    <section class="sec" id="screens" aria-labelledby="screens-h">
+      <div class="wrap">
+        <div class="sec-head split">
+          <div>
+            <p class="eyebrow"><span class="tc">1:04</span> The app</p>
+            <h2 id="screens-h">The real thing, on your system.</h2>
+          </div>
+          <div class="seg-ctl" role="radiogroup" aria-label="Operating system" id="os-ctl">
+            <button type="button" role="radio" data-os="macos" aria-checked="true">macOS</button>
+            <button type="button" role="radio" data-os="windows" aria-checked="false">Windows</button>
+            <button type="button" role="radio" data-os="linux" aria-checked="false">Linux</button>
+          </div>
+        </div>
+
+        <div class="viewer">
+          <div class="views" role="tablist" aria-label="Screens" id="views">
+            <button type="button" role="tab" id="tab-home" aria-controls="shot" aria-selected="true" data-view="home">
+              <span class="n">01</span><span class="vt">Home, lyrics and queue</span><span class="vd">Lyrics and what’s next stay beside whatever you browse.</span>
+            </button>
+            <button type="button" role="tab" id="tab-lyrics" aria-controls="shot" aria-selected="false" data-view="lyrics" tabindex="-1">
+              <span class="n">02</span><span class="vt">Full-screen lyrics</span><span class="vd">Press F. The cover sets the light.</span>
+            </button>
+            <button type="button" role="tab" id="tab-palette" aria-controls="shot" aria-selected="false" data-view="palette" tabindex="-1">
+              <span class="n">03</span><span class="vt">Search and commands</span><span class="vd">One box for songs, artists and actions. <kbd class="modk">⌘K</kbd></span>
+            </button>
+            <button type="button" role="tab" id="tab-settings" aria-controls="shot" aria-selected="false" data-view="settings" tabindex="-1">
+              <span class="n">04</span><span class="vt">Settings</span><span class="vd">Sign in, or import a session from your browser.</span>
+            </button>
+          </div>
+
+          <div class="window" id="shot" role="tabpanel" aria-labelledby="tab-home">
+            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <!-- The script picks the image for your OS and theme; this is the fallback without it. -->
+            <img id="shot-img" sizes="(min-width: 1100px) 860px, 94vw"
+                 width="2000" height="1250" alt="Encore on macOS, dark theme: home, with lyrics and the queue in the side panel" loading="lazy" decoding="async">
+            <noscript><img src="assets/shots/macos-home-dark-1100.webp" srcset="assets/shots/macos-home-dark-1100.webp 1100w, assets/shots/macos-home-dark-2000.webp 2000w" sizes="(min-width: 1100px) 860px, 94vw" width="2000" height="1250" alt="Encore on macOS, dark theme: home, with lyrics and the queue in the side panel" loading="lazy"></noscript>
+          </div>
+        </div>
+        <p class="shot-note">Screens from Encore running on demo data. <span class="theme-note">Switch the page theme to see the app’s other one.</span></p>
+      </div>
+    </section>
+
+    <!-- 1:36 -->
+    <section class="sec" id="colour" aria-labelledby="colour-h">
+      <div class="wrap colour-grid">
+        <div class="colour-copy">
+          <p class="eyebrow"><span class="tc">1:36</span> Colour</p>
+          <h2 id="colour-h">The cover picks the colour.</h2>
+          <p class="sub">Encore takes the dominant hue of the artwork and tints the highlights, the seek bar and the light behind the lyrics. Pick a cover. This page follows along.</p>
+          <dl class="tokens" id="tokens">
+            <div><dt><i class="sw s-accent"></i>Accent</dt><dd id="tk-accent">hsl(205 78% 74%)</dd></div>
+            <div><dt><i class="sw s-soft"></i>Highlight</dt><dd id="tk-soft">hsl(205 70% 70% / .16)</dd></div>
+            <div><dt><i class="sw s-tint"></i>Backlight</dt><dd id="tk-tint">hsl(205 60% 45% / .32)</dd></div>
+          </dl>
+        </div>
+        <div class="colour-play">
+          <div class="covers" id="covers" role="radiogroup" aria-label="Cover"></div>
+          <div class="deck" aria-hidden="true">
+            <div class="deck-cover" id="deck-cover"></div>
+            <div class="deck-meta"><b id="deck-title">Daybreak Signal</b><span id="deck-artist">Lumen Drive</span></div>
+            <div class="map deck-map" id="deck-map"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2:08 -->
+    <section class="sec" id="keys" aria-labelledby="keys-h">
+      <div class="wrap keys-grid">
+        <div>
+          <p class="eyebrow"><span class="tc">2:08</span> Keys</p>
+          <h2 id="keys-h">Leave the mouse alone.</h2>
+          <p class="sub">Every action has a key. These ones work on this page too, so try them.</p>
+          <div class="deck now" aria-hidden="true">
+            <div class="deck-cover" id="now-cover"></div>
+            <div class="deck-meta"><b id="now-line">Turn the dial till the dark gives in</b><span><span id="now-state">Playing</span> · <span id="now-title">Daybreak Signal</span></span></div>
+            <div class="map deck-map" id="now-map"></div>
+          </div>
+        </div>
+        <ul class="keys" id="keylist">
+          <li data-k="space"><span class="caps"><kbd>Space</kbd></span><span>Play or pause</span></li>
+          <li data-k="seek"><span class="caps"><kbd>←</kbd><kbd>→</kbd></span><span>Seek 5 s, or 15 s with <kbd class="shiftk">⇧</kbd></span></li>
+          <li data-k="line"><span class="caps"><kbd>[</kbd><kbd>]</kbd></span><span>Previous or next lyric line</span></li>
+          <li data-k="song"><span class="caps"><kbd class="modk-arrow">⌘←</kbd><kbd class="modk-arrow2">⌘→</kbd></span><span>Previous or next song</span></li>
+          <li data-k="f"><span class="caps"><kbd>F</kbd></span><span>Full-screen lyrics</span></li>
+          <li data-k="l"><span class="caps"><kbd>L</kbd></span><span>Like</span></li>
+          <li data-k="k"><span class="caps"><kbd class="modk">⌘K</kbd></span><span>Search and commands</span></li>
+          <li data-k="esc"><span class="caps"><kbd>Esc</kbd></span><span>Close</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 2:40 -->
+    <section class="sec" id="details" aria-labelledby="details-h">
+      <div class="wrap">
+        <div class="sec-head">
+          <p class="eyebrow"><span class="tc">2:40</span> Details</p>
+          <h2 id="details-h">Built to stay open all day.</h2>
+        </div>
+        <dl class="facts">
+          <div><dt>Native playback</dt><dd>Audio is decoded in Rust and streamed into a disk cache. The next song loads before this one ends.</dd></div>
+          <div><dt>System media controls</dt><dd>Media keys, Now Playing on macOS, the media flyout on Windows, MPRIS on Linux.</dd></div>
+          <div><dt>Lyrics from two places</dt><dd>YouTube Music’s timed lyrics first, then synced lyrics from LRCLIB, matched by title, artist and length.</dd></div>
+          <div><dt>Your whole library</dt><dd>Playlists, liked songs, albums, artists and subscriptions. Brand channels work too.</dd></div>
+          <div><dt>Sessions stay with you</dt><dd>Kept in the macOS Keychain, Windows Credential Manager or your Linux keyring. Encore has no servers and sends no analytics.</dd></div>
+          <div><dt>A queue that behaves</dt><dd>Drag to reorder, play next with <kbd class="shiftk">⇧</kbd>Enter, and shuffle, repeat and autoplay that do what they say.</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <!-- 3:12 -->
+    <section class="sec dl" id="download" aria-labelledby="download-h">
+      <div class="wrap">
+        <div class="dl-card">
+          <div class="dl-main-col">
+            <p class="eyebrow"><span class="tc">3:12</span> Download</p>
+            <h2 id="download-h">Get Encore for <span class="osname">macOS</span>.</h2>
+            <p class="sub dl-os-note" data-for="macos">Apple silicon and Intel.</p>
+            <p class="sub dl-os-note" data-for="windows">Windows 10 and 11. The installer needs no admin rights.</p>
+            <p class="sub dl-os-note" data-for="linux">A .deb for Debian and Ubuntu, or an AppImage.</p>
+            <div class="cta">
+              <a class="btn primary big dl-main" href="https://github.com/Nayhap/encore/releases/latest">
+                <svg class="osi" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-macos"/></svg>
+                <span>Download for <b class="osname">macOS</b></span>
+              </a>
+              <a class="btn ghost" href="https://github.com/Nayhap/encore">Build from source</a>
+            </div>
+            <p class="req">Playback needs Python 3.10 or newer and Node.js, Deno or Bun. Encore sets up its own copy of yt-dlp on first launch.</p>
+          </div>
+
+          <ul class="platforms" id="platforms">
+            <li data-os="macos">
+              <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-macos"/></svg><b>macOS</b><span>.app · Apple silicon and Intel</span></a>
+              <code><span>brew install python node</span><button type="button" class="copy" aria-label="Copy the macOS requirements command">Copy</button></code>
+            </li>
+            <li data-os="windows">
+              <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-windows"/></svg><b>Windows</b><span>-setup.exe or .msi · 10 and 11</span></a>
+              <code><span>winget install Python.Python.3.13 OpenJS.NodeJS.LTS</span><button type="button" class="copy" aria-label="Copy the Windows requirements command">Copy</button></code>
+              <small>Builds aren’t code-signed yet, so SmartScreen warns on first run: choose More info, then Run anyway.</small>
+            </li>
+            <li data-os="linux">
+              <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-linux"/></svg><b>Linux</b><span>.deb or .AppImage</span></a>
+              <code><span>sudo apt install python3 python3-venv nodejs</span><button type="button" class="copy" aria-label="Copy the Debian and Ubuntu requirements command">Copy</button></code>
+              <small>Needs WebKitGTK 4.1, and GNOME Keyring or KWallet to stay signed in.</small>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <div class="map foot-map" id="foot-map" aria-hidden="true"></div>
+      <div class="foot-row">
+        <p class="brandline"><img src="assets/icon-64.png" width="22" height="22" alt=""> Encore</p>
+        <ul class="foot-links">
+          <li><a href="https://github.com/Nayhap/encore">Source</a></li>
+          <li><a href="https://github.com/Nayhap/encore/releases/latest">Releases</a></li>
+          <li><a href="https://github.com/Nayhap/encore/blob/main/docs/architecture.md">How it works</a></li>
+          <li><a href="https://github.com/Nayhap/encore/blob/main/LICENSE">MIT licence</a></li>
+        </ul>
+      </div>
+      <p class="fine">Encore is unofficial and not affiliated with YouTube or Google. It uses YouTube Music’s private web API, which can change without notice. Streams come through <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a> and synced lyrics through <a href="https://lrclib.net">LRCLIB</a>. Songs, artists and covers on this page are invented.</p>
+    </div>
+  </footer>
+
+  <!-- Full-screen lyrics (F) -->
+  <div class="theater" id="theater" role="dialog" aria-modal="true" aria-label="Full-screen lyrics" hidden>
+    <div class="th-glow" aria-hidden="true"></div>
+    <button class="th-close" type="button" id="th-close">Close <kbd>Esc</kbd></button>
+    <div class="th-body">
+      <div class="th-side">
+        <div class="cover" id="th-cover" aria-hidden="true"></div>
+        <p class="title" id="th-title"></p>
+        <p class="artist" id="th-artist"></p>
+        <div class="map th-map" id="th-map"></div>
+        <div class="times"><span id="th-pos">0:00</span><span id="th-dur">0:00</span></div>
+      </div>
+      <div class="lyrics th-lyrics" id="th-lyrics"><div class="lyr-track" id="th-track"></div></div>
+    </div>
   </div>
 
-  <script>
-    // Lyric timings from the demo song in the screenshots. Lines sung 3+ times
-    // are chorus, twice a hook, as in the app's song map.
-    const D = 218;
-    const L = [[14,"Static on the dashboard, half past four"],[18.5,"Your voice is a rumour I can't ignore"],[23,"Streetlights keep counting what we left behind"],[27.5,"Every exit sign is a question mark"],[32,"Hold on, hold on"],[34.5,"The night's running out of road"],[39,"Turn the dial till the dark gives in"],[43.5,"There's a daybreak signal coming through"],[48,"Faint as a heartbeat, blue on blue"],[52.5,"If you can hear it, say my name"],[57,"We won't be strangers when the morning comes"],[61.5,"Daybreak signal, coming through"],[76,"Paper cups and a map we never read"],[80.5,"Radio ghosts singing what you said"],[85,"Every mile's a promise we forgot to keep"],[89.5,"Still I'm wide awake while the cities sleep"],[94,"Hold on, hold on"],[96.5,"The night's running out of road"],[101,"Turn the dial till the dark gives in"],[105.5,"There's a daybreak signal coming through"],[110,"Faint as a heartbeat, blue on blue"],[114.5,"If you can hear it, say my name"],[119,"We won't be strangers when the morning comes"],[123.5,"Daybreak signal, coming through"],[142,"And if the static swallows every word"],[147,"I'll draw the sunrise from the sounds I heard"],[152,"Ooh, coming through"],[156,"Ooh, coming through"],[160,"There's a daybreak signal coming through"],[164.5,"Faint as a heartbeat, blue on blue"],[169,"If you can hear it, say my name"],[173.5,"We won't be strangers when the morning comes"],[178,"Daybreak signal, coming through"],[186,"Blue on blue"],[192,"Coming through"]];
-    const count = {}; L.forEach(([, s]) => (count[s] = (count[s] || 0) + 1));
-    const bar = document.getElementById("bar"), head = document.getElementById("head");
-    const lineEl = document.getElementById("line"), posEl = document.getElementById("pos");
-    const H = { verse: 4, hook: 8, chorus: 12 };
-    const segs = L.map(([t, s], i) => {
-      const next = L[i + 1]?.[0] ?? D;
-      const end = Math.min(next - 0.35, t + Math.min(Math.max(s.length * 0.11 + 1.6, 2.4), 4.6));
-      const tier = count[s] >= 3 ? "chorus" : count[s] === 2 ? "hook" : "verse";
-      const el = document.createElement("div");
-      el.className = "seg " + tier;
-      el.style.cssText = `left:${(t / D) * 100}%;width:${((end - t) / D) * 100}%;height:${H[tier]}px`;
-      el.appendChild(document.createElement("i"));
-      bar.appendChild(el);
-      return { t, end, next, s, fill: el.firstChild };
-    });
-    const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let t = 40, last = performance.now(), shown = null;
-    function frame(now) {
-      t += ((now - last) / 1000) * 1.6; last = now;
-      if (t > D) t = 0;
-      if (reduce) t = 49;
-      let cur = null;
-      for (const g of segs) {
-        g.fill.style.transform = `scaleX(${Math.min(Math.max((t - g.t) / (g.end - g.t), 0), 1)})`;
-        if (g.t <= t) cur = g;
-      }
-      const sung = cur && t < cur.end + 1.5;
-      const text = sung ? cur.s : "♪";
-      if (text !== shown) { lineEl.textContent = text; lineEl.classList.toggle("gap", !sung); shown = text; }
-      if (sung) lineEl.style.setProperty("--p", `${Math.min((t - cur.t) / (cur.end - cur.t), 1) * 100}%`);
-      head.style.left = `${(t / D) * 100}%`;
-      posEl.textContent = fmt(t);
-      if (!reduce) requestAnimationFrame(frame);
-    }
-    requestAnimationFrame(frame);
-  </script>
+  <!-- Command palette (⌘K / Ctrl+K) -->
+  <div class="palette-scrim" id="palette" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Search and commands">
+      <div class="pal-input">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+        <input id="pal-q" type="text" placeholder="Search songs, sections and actions" autocomplete="off" spellcheck="false"
+               role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="list">
+        <kbd>esc</kbd>
+      </div>
+      <ul class="pal-list" id="pal-list" role="listbox" aria-label="Results"></ul>
+      <div class="pal-foot" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> Move</span><span><kbd>↵</kbd> Run</span><span class="pal-hint">The app’s palette searches YouTube Music.</span></div>
+    </div>
+  </div>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-macos" viewBox="0 0 24 24"><path fill="currentColor" d="M16.4 12.6c0-2.4 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.8-1.6 0-3.2 1-4 2.4-1.7 3-.4 7.4 1.2 9.8.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.2-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8 0 0-2.6-1-2.6-3.9ZM14 5.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1 .1 2.1-.6 2.8-1.4Z"/></symbol>
+    <symbol id="i-windows" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.1 10.4 4v7.3H3V5.1Zm8.4-1.2L21 2.5v8.8h-9.6V3.9ZM3 12.7h7.4V20L3 18.9v-6.2Zm8.4 0H21v8.8l-9.6-1.4v-7.4Z"/></symbol>
+    <symbol id="i-linux" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.2c-2.2 0-3.4 1.8-3.4 4.3 0 1.2.2 2-.4 3-.8 1.3-2.6 3.4-2.9 6-.1.9.1 1.6.5 2.1-.9.6-1.8 1-1.6 1.9.3 1 2 .6 3.2 1.3 1.1.6 2.2.9 3 .2.4-.3.7-.4 1.6-.4s1.2.1 1.6.4c.8.7 1.9.4 3-.2 1.2-.7 2.9-.3 3.2-1.3.2-.9-.7-1.3-1.6-1.9.4-.5.6-1.2.5-2.1-.3-2.6-2.1-4.7-2.9-6-.6-1-.4-1.8-.4-3 0-2.5-1.2-4.3-3.4-4.3Zm-1.4 3.4c.5 0 .8.6.8 1.2s-.3 1.1-.8 1.1-.8-.5-.8-1.1.3-1.2.8-1.2Zm2.8 0c.5 0 .8.6.8 1.2s-.3 1.1-.8 1.1-.8-.5-.8-1.1.3-1.2.8-1.2ZM12 8.6c.9 0 2 .6 2 1s-1.1 1.2-2 1.2-2-.8-2-1.2 1.1-1 2-1Zm-2.6 3.3c.6.5 1.6.9 2.6.9s2-.4 2.6-.9c.7 1.1 1.6 2.6 1.6 4.3 0 2-1.9 3-4.2 3s-4.2-1-4.2-3c0-1.7.9-3.2 1.6-4.3Z"/></symbol>
+  </svg>
 </body>
 </html>
