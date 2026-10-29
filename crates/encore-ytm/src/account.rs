@@ -1,7 +1,8 @@
 //! Account and session management on top of InnerTube: browser import,
-//! channel selection, validation, Keychain persistence and keep-alive.
+//! channel selection, validation, persistence in the OS credential store
+//! (D9) and keep-alive.
 //!
-//! A session is saved to the Keychain right after import with no channel
+//! A session is saved right after import with no channel
 //! (state `ChoosingChannel`); it becomes `SignedIn` only after the user picks
 //! a channel and a private surface loads as that channel (D7, Meiro #1).
 
@@ -45,7 +46,7 @@ impl Accounts {
         &self.ytm.it
     }
 
-    /// Load the stored session at startup (reads the Keychain once).
+    /// Load the stored session at startup (one read of the credential store).
     pub fn restore(&self) -> Result<AuthState> {
         match load_session(self.store.as_ref()).map_err(store_err)? {
             Some(s) if s.jar.has_login() => {
@@ -89,7 +90,9 @@ impl Accounts {
     pub async fn import_browser(&self, profile_id: &str, keychain_timeout: Duration) -> Result<AuthState> {
         let pid = profile_id.to_string();
         let jar = tokio::task::spawn_blocking(move || import::import(&pid, keychain_timeout)).await.map_err(|e| AppError::internal(e.to_string()))?.map_err(|e| match e {
-            ImportError::KeychainDenied(_) => AppError::new(ErrorCode::Keychain, e.to_string()).with_action("retryImport"),
+            ImportError::KeychainDenied(_) | ImportError::KeyUnavailable(_) | ImportError::BrowserRunning(_) => AppError::new(ErrorCode::Keychain, e.to_string()).with_action("retryImport"),
+            // Nothing to retry: the in-app sign-in is the way in.
+            ImportError::AppBound(_) | ImportError::DpapiFailed(_) => AppError::new(ErrorCode::Rejected, e.to_string()).with_action("signIn"),
             ImportError::NoLogin => AppError::new(ErrorCode::AuthRequired, e.to_string()),
             other => AppError::new(ErrorCode::Rejected, other.to_string()),
         })?;
@@ -105,7 +108,12 @@ impl Accounts {
         let _ = self.it().verify_session().await;
         self.load_channels().await?;
         let s = self.it().session().ok_or_else(AppError::auth_required)?;
-        save_session(self.store.as_ref(), &s).map_err(store_err)?;
+        if let Err(e) = save_session(self.store.as_ref(), &s) {
+            // Never keep a session that can't be stored safely (no plaintext fallback).
+            self.it().set_session(None);
+            self.channels.lock().clear();
+            return Err(store_err(e));
+        }
         Ok(self.state())
     }
 
