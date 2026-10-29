@@ -202,6 +202,10 @@ p {
 .pill.primary:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--text));
 }
+.pill:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
 
 .chip {
   height: 30px;
