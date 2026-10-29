@@ -31,6 +31,14 @@
   Windows and Linux). Shift+Enter plays next.
 - **Your library**: playlists, liked songs, albums, artists, subscriptions.
   Brand channels are supported.
+- **Playlists you can manage**: create, rename, describe, make private,
+  unlisted or public, reorder by dragging, and delete. "Add to playlist"
+  warns about duplicates and can start a new playlist.
+- **Your history**: plays count in your YouTube Music history and
+  recommendations, as in the official app (you can turn this off), and a
+  History page shows what you played, by day.
+- **Song or video**: switch between a song and its music video (audio
+  only) from the now playing panel or any track's menu.
 - **Native playback** in Rust, with seek, a disk cache and the next song
   loaded ahead of time.
 - **Shuffle, repeat and autoplay** that work the way you expect.

@@ -29,7 +29,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 | Crate | What it does |
 |---|---|
 | `encore-core` | Domain types, the `MusicService` and `StreamResolver` traits, the queue, the SQLite store, artwork keys, log redaction. |
-| `encore-ytm` | YouTube Music's internal API (`WEB_REMIX`, plus `ANDROID_MUSIC` for lyrics). Typed parsers for its responses, continuations, likes and playlist edits, account and channel listing. |
+| `encore-ytm` | YouTube Music's internal API (`WEB_REMIX`, plus `ANDROID_MUSIC` for lyrics). Typed parsers for its responses, continuations, likes, playlist management, history, song/video pairs, play reporting to history, account and channel listing. |
 | `encore-auth` | The cookie jar, the `SAPISIDHASH` authorization header (including brand channels), cookie readers for Chromium browsers, Firefox and Safari, and the Keychain session store. |
 | `encore-resolver` | Runs a pinned yt-dlp in its own Python environment as a long-lived helper. Cookies are passed per request in memory, never written to disk. Each URL is probed before playback. |
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
