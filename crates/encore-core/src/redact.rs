@@ -42,6 +42,8 @@ fn patterns() -> &'static [(Regex, &'static str)] {
             // Signed media URLs: keep scheme/host/path, drop the query.
             (r(r"(https?://[A-Za-z0-9.\-]*googlevideo\.com/[^\s?#]*)\?[^\s]*"), "$1?<redacted>"),
             (r(r"(https?://[^\s?#]+/videoplayback)\?[^\s]*"), "$1?<redacted>"),
+            // Playback stats (history reporting) URLs carry account-bound event ids.
+            (r(r"(https?://[^\s?#]+/api/stats/[A-Za-z]+)\?[^\s]*"), "$1?<redacted>"),
             // Authorization header values.
             (r(r"(?i)(SAPISID(?:1P|3P)?HASH)\s+[0-9]+_[0-9a-f]+(?:_u)?"), "$1 <redacted>"),
             (r(r"(?i)(authorization\s*[:=]\s*)(Bearer\s+)?[^\s,;]+"), "$1<redacted>"),
@@ -145,6 +147,14 @@ mod tests {
         let r = redact(&format!("fetching {u} failed"));
         assert!(!r.contains(CANARY), "{r}");
         assert!(r.contains("googlevideo.com/videoplayback?<redacted>"), "{r}");
+    }
+
+    #[test]
+    fn stats_urls_lose_query() {
+        let u = format!("https://s.youtube.com/api/stats/watchtime?docid=x&ei={CANARY}&cpn={CANARY}&of={CANARY}");
+        let r = redact(&format!("ping {u} failed"));
+        assert!(!r.contains(CANARY), "{r}");
+        assert!(r.contains("s.youtube.com/api/stats/watchtime?<redacted>"), "{r}");
     }
 
     #[test]

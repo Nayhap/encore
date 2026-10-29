@@ -255,3 +255,100 @@ fn library_grid_skips_pseudo_items() {
     assert_eq!(titles, vec!["Liked music", "Synthetic Road Trip"]);
     assert!(matches!(p.cont, Some(Cont::Query(_))));
 }
+
+// ---------- history (hand-built from the documented shape) ----------
+
+#[test]
+fn history_keeps_day_groups_order_and_played_versions() {
+    use encore_ytm::history;
+    let h = history::history(&fx("history_synthetic")).unwrap();
+    let titles: Vec<&str> = h.groups.iter().map(|g| g.title.as_str()).collect();
+    assert_eq!(titles, vec!["Today", "Yesterday", "October 2026"]);
+    let today = &h.groups[0].rows;
+    // Repeated plays stay separate rows.
+    assert_eq!(today.len(), 3);
+    assert_eq!(today[0].0.id, today[2].0.id);
+    // A played music video stays the video; its song becomes the counterpart.
+    let (v, _) = &today[1];
+    assert_eq!(v.id.remote(), "vvvvvvvvvv1");
+    assert_eq!(v.kind, TrackKind::Video);
+    assert_eq!(v.counterpart.as_ref().map(|c| c.remote()), Some("ssssssssss1"));
+    // Only the "Remove from history" token, scrubbed in the fixture.
+    assert!(today.iter().all(|(_, t)| t.as_deref() == Some("SCRUBBED_FEEDBACKTOKEN")));
+    assert_eq!(h.groups[1].rows[0].1, None, "a row without the menu item is not removable");
+    assert!(matches!(h.cont, Some(Cont::Body(_))));
+    assert!(h.notice.is_none() && !h.paused);
+}
+
+#[test]
+fn paused_history_is_a_notice() {
+    let h = encore_ytm::history::history(&fx("history_paused_synthetic")).unwrap();
+    assert!(h.groups.is_empty());
+    assert!(h.paused);
+    assert!(h.notice.unwrap().contains("paused"));
+}
+
+#[test]
+fn feedback_answer() {
+    assert_eq!(encore_ytm::history::feedback_outcome(&fx("feedback_synthetic")), MutationOutcome::Done);
+}
+
+// ---------- playlists ----------
+
+#[test]
+fn editable_playlist_has_privacy_and_entry_ids() {
+    let c = pages::collection(&fx("playlist_editable_synthetic"), &ItemId::ytm("VLPLsynthetic000001")).unwrap().value;
+    assert!(c.editable);
+    assert_eq!(c.privacy, Some(Privacy::Unlisted));
+    assert_eq!(c.title, "Synthetic Mix");
+    assert_eq!(c.entries.len(), 2);
+    assert_eq!(c.entries[1].set_video_id.as_deref(), Some("SETVIDEOID02"));
+    // Someone else's playlist has no privacy.
+    let other = pages::collection(&fx("playlist_long"), &ItemId::ytm("VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3")).unwrap().value;
+    assert!(!other.editable);
+    assert_eq!(other.privacy, None);
+}
+
+#[test]
+fn edit_answers() {
+    use encore_ytm::playlists::*;
+    assert_eq!(edit_outcome(&fx("edit_playlist_ok_synthetic")), MutationOutcome::Done);
+    assert_eq!(edit_outcome(&fx("edit_playlist_duplicate_synthetic")), MutationOutcome::Duplicate);
+    assert_eq!(edit_outcome(&fx("edit_playlist_failed_synthetic")), MutationOutcome::Rejected);
+    assert_eq!(created(&fx("playlist_create_synthetic")).as_deref(), Some("PLsynthetic000002"));
+    assert_eq!(delete_outcome(&fx("playlist_delete_refused_synthetic")), MutationOutcome::Rejected);
+}
+
+// ---------- song / video counterpart ----------
+
+#[test]
+fn counterpart_from_either_side_with_its_segment_map() {
+    let v = fx("next_counterpart_synthetic");
+    // Asked for the video: the song, mapped from the video's timeline.
+    let c = pages::counterpart(&v, &ItemId::ytm("vvvvvvvvvv1")).unwrap();
+    assert_eq!(c.track.id.remote(), "ssssssssss1");
+    assert_eq!(c.track.kind, TrackKind::Song);
+    assert_eq!(c.track.counterpart.as_ref().map(|x| x.remote()), Some("vvvvvvvvvv1"));
+    assert_eq!(c.segments, vec![SharedSegment { from_start: 15.5, to_start: 0.0, duration: 220.0 }]);
+    assert_eq!(c.map_position(75.5), Some(60.0));
+    assert_eq!(c.map_position(5.0), None, "the video's intro has no song position");
+    // Asked for the song: the video, with the map turned around.
+    let c = pages::counterpart(&v, &ItemId::ytm("ssssssssss1")).unwrap();
+    assert_eq!(c.track.id.remote(), "vvvvvvvvvv1");
+    assert_eq!(c.track.kind, TrackKind::Video);
+    assert_eq!(c.map_position(60.0), Some(75.5));
+    // A recommendation in the same queue is not anyone's counterpart.
+    assert!(pages::counterpart(&v, &ItemId::ytm("rrrrrrrrrr1")).is_none());
+    // Nothing paired in an ordinary radio answer.
+    assert!(pages::counterpart(&fx("next_radio"), &ItemId::ytm("4D7u5KF7SP8")).is_none());
+}
+
+// ---------- history reporting ----------
+
+#[test]
+fn signed_player_answer_has_tracking() {
+    let t = encore_ytm::tracking::PlaybackTracking::from_player(&fx("player_signed_synthetic")).unwrap();
+    assert_eq!(t.playback.host_str(), Some("s.youtube.com"));
+    assert_eq!(t.watchtime.as_ref().map(|u| u.path()), Some("/api/stats/watchtime"));
+    assert_eq!(t.schedule.due(3), 70.0);
+}

@@ -364,9 +364,9 @@ pub async fn set_subscribed(core: S<'_>, channel_id: String, subscribed: bool) -
 
 #[tauri::command]
 #[specta::specta]
-pub async fn playlist_add(core: S<'_>, playlist_id: String, track_ids: Vec<ItemId>) -> Result<MutationOutcome> {
+pub async fn playlist_add(core: S<'_>, playlist_id: String, track_ids: Vec<ItemId>, allow_duplicates: bool) -> Result<MutationOutcome> {
     let svc = core.service();
-    svc.playlist_add(&svc.context(), &playlist_id, &track_ids).await
+    svc.playlist_add(&svc.context(), &playlist_id, &track_ids, allow_duplicates).await
 }
 
 #[tauri::command]

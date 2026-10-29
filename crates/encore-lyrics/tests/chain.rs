@@ -79,7 +79,7 @@ impl MusicService for Fake {
     async fn set_subscribed(&self, _ctx: &RequestContext, _c: &str, _s: bool) -> Result<MutationOutcome> {
         Err(AppError::internal("unused"))
     }
-    async fn playlist_add(&self, _ctx: &RequestContext, _p: &str, _t: &[ItemId]) -> Result<MutationOutcome> {
+    async fn playlist_add(&self, _ctx: &RequestContext, _p: &str, _t: &[ItemId], _d: bool) -> Result<MutationOutcome> {
         Err(AppError::internal("unused"))
     }
     async fn playlist_remove(&self, _ctx: &RequestContext, _p: &str, _e: &[(ItemId, String)]) -> Result<MutationOutcome> {

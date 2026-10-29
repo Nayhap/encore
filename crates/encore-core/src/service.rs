@@ -50,10 +50,102 @@ pub trait MusicService: Send + Sync {
     async fn set_like(&self, ctx: &RequestContext, id: &ItemId, liked: bool) -> Result<MutationOutcome>;
     async fn set_saved(&self, ctx: &RequestContext, playlist_id: &str, saved: bool) -> Result<MutationOutcome>;
     async fn set_subscribed(&self, ctx: &RequestContext, channel_id: &str, subscribed: bool) -> Result<MutationOutcome>;
-    async fn playlist_add(&self, ctx: &RequestContext, playlist_id: &str, tracks: &[ItemId]) -> Result<MutationOutcome>;
+    /// Add tracks. Unless `allow_duplicates`, a song already in the playlist
+    /// is refused with `Duplicate` and nothing is added.
+    async fn playlist_add(&self, ctx: &RequestContext, playlist_id: &str, tracks: &[ItemId], allow_duplicates: bool) -> Result<MutationOutcome>;
     async fn playlist_remove(&self, ctx: &RequestContext, playlist_id: &str, entries: &[(ItemId, String)]) -> Result<MutationOutcome>;
     /// Service-native lyrics (timed if possible).
     async fn lyrics(&self, ctx: &RequestContext, id: &ItemId) -> Result<Option<Lyrics>>;
+
+    /// Create a playlist, optionally with its first songs, in one request.
+    async fn playlist_create(&self, _ctx: &RequestContext, _title: &str, _description: &str, _privacy: Privacy, _tracks: &[ItemId]) -> Result<PlaylistCreated> {
+        Err(unsupported())
+    }
+    async fn playlist_edit(&self, _ctx: &RequestContext, _playlist_id: &str, _edit: &PlaylistEdit) -> Result<MutationOutcome> {
+        Err(unsupported())
+    }
+    async fn playlist_delete(&self, _ctx: &RequestContext, _playlist_id: &str) -> Result<MutationOutcome> {
+        Err(unsupported())
+    }
+    /// Move the entry `set_video_id` before `before` (another entry's
+    /// `setVideoId`), or to the end when `None`.
+    async fn playlist_move(&self, _ctx: &RequestContext, _playlist_id: &str, _set_video_id: &str, _before: Option<&str>) -> Result<MutationOutcome> {
+        Err(unsupported())
+    }
+    /// The signed-in listening history, grouped as the service groups it.
+    async fn history(&self, _ctx: &RequestContext) -> Result<HistoryPage> {
+        Err(unsupported())
+    }
+    async fn history_more(&self, _ctx: &RequestContext, _cursor: &str) -> Result<HistoryPage> {
+        Err(unsupported())
+    }
+    /// Remove rows (by `HistoryRow::row_id`) from the history.
+    async fn history_remove(&self, _ctx: &RequestContext, _row_ids: &[String]) -> Result<MutationOutcome> {
+        Err(unsupported())
+    }
+    /// The other version of `track` (song ↔ music video), if the service
+    /// pairs one with it.
+    async fn counterpart(&self, _ctx: &RequestContext, _track: &Track) -> Result<Option<Counterpart>> {
+        Ok(None)
+    }
+}
+
+fn unsupported() -> crate::error::AppError {
+    crate::error::AppError::new(crate::error::ErrorCode::Unsupported, "This service does not support that.")
+}
+
+// ---------- play reporting (history) ----------
+
+/// When to send progress for a play: at each `at` second of the play's wall
+/// time, then every `every` seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlushSchedule {
+    pub at: Vec<f64>,
+    pub every: f64,
+}
+
+impl Default for FlushSchedule {
+    fn default() -> Self {
+        FlushSchedule { at: vec![10.0, 20.0, 30.0], every: 40.0 }
+    }
+}
+
+impl FlushSchedule {
+    /// The `n`th flush time (0-based) in seconds since the play started.
+    pub fn due(&self, n: usize) -> f64 {
+        match self.at.get(n) {
+            Some(t) => *t,
+            None => {
+                let last = self.at.last().copied().unwrap_or(0.0);
+                last + self.every.max(1.0) * (n + 1 - self.at.len()) as f64
+            }
+        }
+    }
+}
+
+/// What a reported play tells the service. Times are seconds; `rt` is wall
+/// time since the play started.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ping {
+    /// The play started (this creates the history entry).
+    Playback { cmt: f64, rt: f64 },
+    /// Heard stretches since the last ping (`st[i]..et[i]`).
+    Watchtime { st: Vec<f64>, et: Vec<f64>, cmt: f64, rt: f64, playing: bool, last: bool },
+}
+
+/// One reported play, bound to the account it started under.
+#[async_trait]
+pub trait PlayReport: Send + Sync {
+    fn schedule(&self) -> FlushSchedule;
+    /// Send a ping. Dropped (Ok) if the account changed since the play began.
+    async fn send(&self, ping: &Ping, itag: Option<u32>) -> Result<()>;
+}
+
+/// Starts reports for plays that became audible (D18 in decisions.md).
+#[async_trait]
+pub trait PlayReporter: Send + Sync {
+    /// `None` when this play can't be reported (signed out, no tracking).
+    async fn open_report(&self, id: &ItemId) -> Result<Option<std::sync::Arc<dyn PlayReport>>>;
 }
 
 // ---------- stream resolution ----------
@@ -176,6 +268,16 @@ mod tests {
         assert_eq!(PlayFailure::classify("Sign in to view this video. Login required", true).kind, PlayFailureKind::SessionExpired);
         assert_eq!(PlayFailure::classify("Connection timed out", false).kind, PlayFailureKind::Network);
         assert_eq!(PlayFailure::classify("something odd", false).kind, PlayFailureKind::Unknown);
+    }
+
+    #[test]
+    fn flush_schedule_then_interval() {
+        let s = FlushSchedule::default();
+        let due: Vec<f64> = (0..5).map(|n| s.due(n)).collect();
+        assert_eq!(due, vec![10.0, 20.0, 30.0, 70.0, 110.0]);
+        let s = FlushSchedule { at: vec![], every: 30.0 };
+        assert_eq!(s.due(0), 30.0);
+        assert_eq!(s.due(1), 60.0);
     }
 
     #[test]

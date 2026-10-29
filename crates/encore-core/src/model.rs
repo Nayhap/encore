@@ -248,9 +248,130 @@ pub struct Collection {
     /// Playlist id used for playback/radio/save (OLAK… for albums).
     pub playlist_id: Option<String>,
     pub saved: Option<bool>,
+    /// The service says this playlist is yours to edit (its editable
+    /// header), never inferred from being in the library.
     pub editable: bool,
+    /// Who can see it, for editable playlists (`None` when not given).
+    #[serde(default)]
+    pub privacy: Option<Privacy>,
     /// Extra shelves shown under an album ("Other versions", "More by").
     pub related: Vec<Shelf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum Privacy {
+    Public,
+    Unlisted,
+    Private,
+}
+
+impl Privacy {
+    /// The service's spelling (`PRIVATE`, …).
+    pub fn wire(self) -> &'static str {
+        match self {
+            Privacy::Public => "PUBLIC",
+            Privacy::Unlisted => "UNLISTED",
+            Privacy::Private => "PRIVATE",
+        }
+    }
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "PUBLIC" => Some(Privacy::Public),
+            "UNLISTED" => Some(Privacy::Unlisted),
+            "PRIVATE" => Some(Privacy::Private),
+            _ => None,
+        }
+    }
+}
+
+/// Changes to a playlist's details. `None` leaves a field alone; an empty
+/// description clears it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistEdit {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub privacy: Option<Privacy>,
+}
+
+/// Result of creating a playlist: the new id only when the service gave one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistCreated {
+    pub outcome: MutationOutcome,
+    /// `ytm:VL<id>`, for navigation.
+    pub id: Option<ItemId>,
+    /// Bare playlist id for edits.
+    pub playlist_id: Option<String>,
+}
+
+// ---------- history ----------
+
+/// One row of the listening history. `row_id` is unique within the page and
+/// is the handle for "Remove from history" (the service's token stays in
+/// Rust, D10).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryRow {
+    pub row_id: String,
+    pub track: Track,
+    pub removable: bool,
+}
+
+/// A day group as the service titles it ("Today", "Yesterday", "October 2026").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryGroup {
+    pub title: String,
+    pub rows: Vec<HistoryRow>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub groups: Vec<HistoryGroup>,
+    /// A message instead of (or above) the rows, such as "history is paused".
+    pub notice: Option<String>,
+    /// True when the notice says history is paused in the Google account.
+    pub paused: bool,
+    pub cursor: Option<String>,
+}
+
+// ---------- song / video counterparts ----------
+
+/// A stretch of the recording present in both versions, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedSegment {
+    /// Start in the version that is playing now.
+    pub from_start: f64,
+    /// Start in the other version.
+    pub to_start: f64,
+    pub duration: f64,
+}
+
+/// The other version of a track (song ↔ music video), with the timeline map
+/// when the service gives one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct Counterpart {
+    /// The track it pairs with.
+    pub of: ItemId,
+    pub track: Track,
+    pub segments: Vec<SharedSegment>,
+}
+
+impl Counterpart {
+    /// Where `pos` in the playing version lands in the other one. Inside a
+    /// shared segment the offset carries over; anywhere else (or without a
+    /// map) it is `None`: restart instead of guessing.
+    pub fn map_position(&self, pos: f64) -> Option<f64> {
+        if !pos.is_finite() || pos < 0.0 {
+            return None;
+        }
+        self.segments.iter().find(|s| pos >= s.from_start && pos < s.from_start + s.duration).map(|s| s.to_start + (pos - s.from_start))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -415,4 +536,42 @@ pub enum MutationOutcome {
     Done,
     Rejected,
     OutcomeUnknown,
+    /// The song is already in that playlist; nothing was added. Retry with
+    /// duplicates allowed if the user confirms.
+    Duplicate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cp(segments: Vec<SharedSegment>) -> Counterpart {
+        let t = Track { id: ItemId::ytm("b"), title: "t".into(), artists: vec![], album: None, duration: None, explicit: false, art: None, kind: TrackKind::Video, plays: None, liked: None, playable: true, counterpart: None };
+        Counterpart { of: ItemId::ytm("a"), track: t, segments }
+    }
+
+    #[test]
+    fn maps_position_inside_a_segment_only() {
+        let c = cp(vec![SharedSegment { from_start: 0.924, to_start: 0.0, duration: 212.5 }]);
+        assert_eq!(c.map_position(10.924), Some(10.0));
+        assert_eq!(c.map_position(0.5), None, "before the shared part");
+        assert_eq!(c.map_position(214.0), None, "after it");
+        assert_eq!(cp(vec![]).map_position(30.0), None, "no map, no guess");
+        assert_eq!(c.map_position(f64::NAN), None);
+    }
+
+    #[test]
+    fn walks_every_segment() {
+        let c = cp(vec![SharedSegment { from_start: 0.0, to_start: 10.0, duration: 60.0 }, SharedSegment { from_start: 90.0, to_start: 70.0, duration: 30.0 }]);
+        assert_eq!(c.map_position(95.0), Some(75.0));
+        assert_eq!(c.map_position(75.0), None);
+    }
+
+    #[test]
+    fn privacy_round_trips() {
+        for p in [Privacy::Public, Privacy::Unlisted, Privacy::Private] {
+            assert_eq!(Privacy::from_wire(p.wire()), Some(p));
+        }
+        assert_eq!(Privacy::from_wire("FRIENDS"), None);
+    }
 }
