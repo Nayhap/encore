@@ -1498,6 +1498,7 @@ name = "encore-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "dirs 6.0.0",
  "encore-audio",
@@ -1549,6 +1550,7 @@ dependencies = [
 name = "encore-player"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "encore-audio",
  "encore-core",
  "parking_lot 0.13.0",
