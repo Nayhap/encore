@@ -19,6 +19,16 @@ import traceback
 
 PROTOCOL = 1
 
+# The host speaks UTF-8 JSON. Python's pipes default to the system code page
+# on Windows (cp1252, cp932...), which garbles or rejects non-ASCII paths such
+# as a cache folder under C:\Users\José. -I ignores PYTHONIOENCODING, so set
+# it here.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 try:
     import yt_dlp
     from yt_dlp.cookies import YoutubeDLCookieJar
