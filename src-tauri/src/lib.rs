@@ -230,6 +230,10 @@ pub fn run() {
             // macOS: closing the window hides it and playback continues; the
             // Dock icon brings it back (D15). Windows and Linux have no such
             // way back without a tray icon, so closing quits there.
+            #[cfg(windows)]
+            if let Some(w) = app.get_webview_window("main") {
+                window::round_corners(&w);
+            }
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let h = app.handle().clone();
