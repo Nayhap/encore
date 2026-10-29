@@ -92,6 +92,7 @@ pub fn install(app: &AppHandle, core: Arc<Core>) {
 
     // Feed player events to Now Playing on the main thread.
     let mut rx = core.player.subscribe();
+    let player = core.player.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut last_track: Option<(String, bool)> = None;
@@ -99,10 +100,17 @@ pub fn install(app: &AppHandle, core: Arc<Core>) {
         loop {
             let ev = match rx.recv().await {
                 Ok(e) => e,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // Missed events: catch up from a snapshot.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => PlayerEvent::State(player.snapshot()),
                 Err(_) => break,
             };
-            let PlayerEvent::State(s) = ev else { continue };
+            let s = match ev {
+                PlayerEvent::State(s) => s,
+                // An automatic skip changes the song before the next state
+                // event; follow it at once so the OS never shows the old one.
+                PlayerEvent::TrackChanged(_) => player.snapshot(),
+                _ => continue,
+            };
             // Metadata is re-sent when the track changes and when its
             // duration becomes known (Now Playing shows progress then).
             let tid = s.current.as_ref().map(|c| (c.uid.clone(), s.duration.is_some()));
