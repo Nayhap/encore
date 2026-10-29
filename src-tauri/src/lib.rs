@@ -172,8 +172,10 @@ pub fn run() {
     logging::init(&paths.logs);
     let builder = specta_builder();
     let app = tauri::Builder::default();
-    // One Encore at a time: a second launch shows the running one.
-    #[cfg(not(target_os = "macos"))]
+    // One Encore at a time: a second launch shows the running one. macOS
+    // usually prevents a second copy itself, but not for a copy started from
+    // another place (the disk image, Downloads) or with `open -n`; two
+    // instances would share one database and play over each other.
     let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.unminimize();
