@@ -207,7 +207,7 @@ fn host_library_path() -> Option<Option<std::ffi::OsString>> {
 /// `major.minor` if `p` runs a Python 3.10 or newer. `args` go before `-I`
 /// (the `py` launcher takes `-3`).
 async fn python_version(p: &Path, args: &[&str]) -> Option<String> {
-    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
+    let out = quiet(Command::new(p).args(args).args(["-I", "-X", "utf8", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let v = text.lines().next()?.trim().to_string();
     let (maj, min) = v.split_once('.')?;
@@ -219,9 +219,11 @@ async fn python_ok(p: &Path) -> Option<String> {
     python_version(p, &[]).await
 }
 
-/// The real interpreter behind a launcher (`py`, the Store alias).
+/// The real interpreter behind a launcher (`py`, the Store alias). `-X utf8`
+/// makes Python print the path in UTF-8: by default Windows pipes use the
+/// ANSI code page, which garbles a path under C:\Users\José.
 async fn python_executable(p: &Path, args: &[&str]) -> Option<PathBuf> {
-    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print(sys.executable)"])).output().await.ok()?;
+    let out = quiet(Command::new(p).args(args).args(["-I", "-X", "utf8", "-c", "import sys; print(sys.executable)"])).output().await.ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let pb = PathBuf::from(s);
     pb.is_file().then_some(pb)
