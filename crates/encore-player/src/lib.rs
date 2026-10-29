@@ -3,18 +3,19 @@
 //! extends the queue from radio when autoplay is on, and publishes revisioned
 //! state, queue splices and 2 Hz position anchors (D13).
 
+pub mod history;
 pub mod types;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use encore_audio::{AudioCache, Engine, EngineEvent, HttpSpec, SourceSpec};
 use encore_core::error::{AppError, Result};
 use encore_core::model::*;
 use encore_core::queue::{Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
-use encore_core::service::{MusicService, PlayFailure, PlayFailureKind, ResolveAuth, ResolvedStream, StreamResolver};
+use encore_core::service::{MusicService, PlayFailure, PlayFailureKind, PlayReporter, ResolveAuth, ResolvedStream, StreamResolver};
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
@@ -74,6 +75,8 @@ pub struct Player {
     on_persist: Mutex<Option<Box<dyn Fn(&Queue, f64) + Send + Sync>>>,
     preloaded_streams: Mutex<HashMap<u64, ResolvedStream>>,
     cache: Option<AudioCache>,
+    /// Report plays to the service's history (a user setting, D18).
+    reporting: Arc<AtomicBool>,
 }
 
 fn s(n: u64) -> String {
@@ -123,6 +126,7 @@ impl Player {
             on_persist: Mutex::new(None),
             preloaded_streams: Mutex::new(HashMap::new()),
             cache: cache_for_player,
+            reporting: Arc::new(AtomicBool::new(false)),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -157,6 +161,20 @@ impl Player {
 
     pub fn subscribe(&self) -> broadcast::Receiver<PlayerEvent> {
         self.tx.subscribe()
+    }
+
+    /// Report plays through `reporter` from now on (while the setting is on).
+    pub fn report_history(&self, reporter: Arc<dyn PlayReporter>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
+        let _guard = self.rt.enter();
+        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), on_registered);
+    }
+
+    pub fn set_reporting(&self, on: bool) {
+        self.reporting.store(on, Ordering::Relaxed);
+    }
+
+    pub fn reporting(&self) -> bool {
+        self.reporting.load(Ordering::Relaxed)
     }
 
     pub fn engine(&self) -> &Engine {
@@ -1013,6 +1031,78 @@ impl Player {
         };
         self.engine.set_volume(if m { 0.0 } else { v as f32 });
         self.publish(false);
+    }
+
+    /// Switch a queue entry to the other version of its recording (song ↔
+    /// music video, D4: only ever on request). The entry keeps its uid, its
+    /// place and the queue's source. For the entry that is playing, the
+    /// position carries over through the service's segment map when it has
+    /// one, otherwise the new version starts from the beginning; a paused
+    /// entry stays paused.
+    pub fn switch_version(self: &Arc<Self>, uid: &str, pair: &Counterpart) -> Result<()> {
+        let (current, playing, pos) = {
+            let st = self.st.lock();
+            let i = st.queue.position_of(uid).ok_or_else(|| AppError::new(encore_core::error::ErrorCode::Stale, "That song is no longer in the queue."))?;
+            let e = &st.queue.entries()[i];
+            if e.track.id != pair.of {
+                return Err(AppError::new(encore_core::error::ErrorCode::Stale, "That version no longer matches what is in the queue."));
+            }
+            let current = st.queue.index() == Some(i);
+            (current, matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading), self.position_locked(&st))
+        };
+        let mut track = pair.track.clone();
+        track.counterpart = Some(pair.of.clone());
+        track.liked = None;
+        let start = pair.map_position(pos).unwrap_or(0.0);
+        self.st.lock().queue.replace_entry_track(uid, track)?;
+        if !current {
+            self.after_edit(None);
+            return Ok(());
+        }
+        if playing {
+            self.engine.clear_preload();
+            self.st.lock().preload = None;
+            self.play_current(start);
+        } else {
+            {
+                let mut st = self.st.lock();
+                st.track_gen += 1;
+                st.seek_gen += 1;
+                st.loaded = None;
+                st.error = None;
+                st.pending_pos = start;
+                st.last_duration = st.queue.current().and_then(|c| c.track.duration);
+                if st.queue.current().is_some() {
+                    st.phase = Phase::Paused;
+                }
+            }
+            self.engine.stop();
+            self.publish(false);
+            let cur = self.st.lock().queue.current().cloned();
+            let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
+        }
+        self.check_preload();
+        Ok(())
+    }
+
+    /// Play `track` right away, keeping the rest of the queue: it goes in
+    /// after the current entry and becomes current.
+    pub fn play_now(self: &Arc<Self>, track: Track) -> Result<()> {
+        let uid = {
+            let mut st = self.st.lock();
+            let had = st.queue.current().is_some();
+            st.queue.play_next(vec![track]);
+            if !had {
+                drop(st);
+                self.after_edit(Some(0));
+                return Ok(());
+            }
+            st.queue.index().and_then(|i| st.queue.get(i + 1)).map(|u| u.uid.clone())
+        };
+        match uid {
+            Some(u) => self.jump(&u),
+            None => Ok(()),
+        }
     }
 
     pub fn update_track(&self, id: &str, f: impl Fn(&mut Track)) {
