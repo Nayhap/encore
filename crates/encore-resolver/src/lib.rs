@@ -402,6 +402,61 @@ struct HelperFormat {
     authenticated: bool,
 }
 
+/// yt-dlp's error text ("ERROR: [youtube] abc: Sign in to confirm your
+/// age…") turned into a sentence for people. The original goes to the log.
+pub fn friendly_message(kind: PlayFailureKind, raw: &str, signed_in: bool) -> String {
+    let m = raw.to_ascii_lowercase();
+    match kind {
+        PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::Unknown => {
+            if m.contains("confirm your age") || m.contains("age-restricted") || m.contains("inappropriate for some users") {
+                return if signed_in { "YouTube won't play this age-restricted song for this account.".into() } else { "This song is age-restricted. Sign in from Settings to play it.".into() };
+            }
+            if m.contains("country") || m.contains("region") || m.contains("geo") {
+                return "This song isn't available in your country.".into();
+            }
+            if m.contains("premium") || m.contains("members-only") || m.contains("members only") || m.contains("join this channel") {
+                return "This song needs a YouTube Music Premium or channel membership.".into();
+            }
+            if m.contains("private video") {
+                return "This song is private on YouTube.".into();
+            }
+            if m.contains("removed") || m.contains("terminated") || m.contains("copyright") || m.contains("no longer available") || m.contains("video unavailable") || m.contains("not available") || m.contains("unavailable") {
+                return "This song is no longer available on YouTube.".into();
+            }
+            if m.contains("drm") {
+                return "This song is protected (DRM) and Encore can't play it.".into();
+            }
+            if kind == PlayFailureKind::SessionExpired {
+                return "Your YouTube Music session expired. Sign in again from Settings.".into();
+            }
+            if m.contains("no audio formats") {
+                return "YouTube offered no audio for this song.".into();
+            }
+        }
+        PlayFailureKind::Challenged => {
+            return if signed_in {
+                "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again.".into()
+            } else {
+                "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again, or sign in from Settings.".into()
+            };
+        }
+        PlayFailureKind::Network => return "Couldn't reach YouTube. Check your internet connection.".into(),
+        PlayFailureKind::Setup => return raw.to_string(),
+    }
+    // Something unrecognised: keep yt-dlp's words, without its prefixes.
+    let short = raw.trim().trim_start_matches("ERROR:").trim();
+    let short = match short.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map(|(_, r)| r).unwrap_or(short),
+        None => short,
+    };
+    // "abc123xyz_-: message" → "message"
+    let short = match short.split_once(": ") {
+        Some((id, r)) if id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => r,
+        _ => short,
+    };
+    format!("YouTube refused to play it: {short}")
+}
+
 fn fail(kind: PlayFailureKind, m: impl Into<String>) -> PlayFailure {
     PlayFailure::new(kind, m)
 }
@@ -620,7 +675,8 @@ impl YtDlpResolver {
                 Some("network") => PlayFailureKind::Network,
                 _ => PlayFailure::classify(msg, auth.is_some()).kind,
             };
-            return Err(fail(kind, msg.to_string()));
+            tracing::info!(video = video_id, ?kind, error = msg, "yt-dlp could not resolve");
+            return Err(fail(kind, friendly_message(kind, msg, auth.is_some())));
         }
         let f: HelperFormat = serde_json::from_value(v.get("format").cloned().unwrap_or_default()).map_err(|_| fail(PlayFailureKind::Unknown, "the resolver returned an unreadable format"))?;
         // Honour the server's "not before" time for this URL (TV client URLs
@@ -754,5 +810,49 @@ impl StreamResolver for YtDlpResolver {
 
     fn forget(&self, video_id: &str) {
         self.cache.lock().retain(|k, _| !k.starts_with(&format!("{video_id}|")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markers_from_older_versions_still_count() {
+        assert!(marker_ok(&marker()));
+        assert!(marker_ok(&format!("{} helper=774be87ab3f445a3", marker())));
+        assert!(!marker_ok("yt-dlp==2020.01.01 yt-dlp-ejs==0.1.0 helper=1"));
+    }
+
+    #[test]
+    fn pip_offline_is_recognised() {
+        assert!(pip_offline("WARNING: Retrying (Retry(total=1...)) after connection broken by 'NewConnectionError(...: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')'"));
+        assert!(pip_offline("ERROR: Could not find a version... (from versions: none)\nWARNING: ... getaddrinfo failed"));
+        assert!(!pip_offline("ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device"));
+    }
+
+    #[test]
+    fn yt_dlp_errors_read_as_sentences() {
+        let age = "ERROR: [youtube] 4D7u5KF7SP8: Sign in to confirm your age. This video may be inappropriate for some users.";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, age, false), "This song is age-restricted. Sign in from Settings to play it.");
+        let geo = "ERROR: [youtube] 4D7u5KF7SP8: Video unavailable. The uploader has not made this video available in your country";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, geo, false), "This song isn't available in your country.");
+        let gone = "ERROR: [youtube] 4D7u5KF7SP8: Video unavailable. This video has been removed by the uploader";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, gone, true), "This song is no longer available on YouTube.");
+        let odd = "ERROR: [youtube] 4D7u5KF7SP8: Something new happened";
+        assert_eq!(friendly_message(PlayFailureKind::Unknown, odd, false), "YouTube refused to play it: Something new happened");
+        assert!(!friendly_message(PlayFailureKind::Challenged, "Sign in to confirm you're not a bot", false).contains("ERROR"));
+    }
+
+    #[test]
+    fn nvm_versions_newest_first() {
+        let root = std::env::temp_dir().join(format!("encore-nvm-{}", std::process::id()));
+        for v in ["v9.11.2", "v22.11.0", "v20.18.1"] {
+            std::fs::create_dir_all(root.join(v).join("bin")).unwrap();
+        }
+        let got = newest_versions(&root, "bin");
+        assert_eq!(got[0], root.join("v22.11.0").join("bin"));
+        assert_eq!(got[2], root.join("v9.11.2").join("bin"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
