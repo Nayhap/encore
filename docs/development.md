@@ -162,3 +162,18 @@ Linux:
 - Without a Secret Service, Encore can't keep a session and says so when you
   sign in.
 - Closing the window quits Encore.
+### Testing a built bundle
+
+`encore --self-test [VIDEO_ID]` checks, without opening a window, what
+depends on the machine: the data folder and database, the audio output,
+the yt-dlp setup (Python, the venv, a JavaScript runtime) and, given a video
+id, resolving and decoding a real stream. It prints a JSON report and exits
+non-zero if playback can't work. YouTube's bot checks don't count as a
+failure unless you add `--strict`; on Windows add `--out report.json`, since
+release builds have no console.
+
+`scripts/self-test-bundle.sh` (`appimage`, `appimage-in <docker image>`,
+`deb`, `app`) and `scripts/self-test-bundle.ps1` (the NSIS installer) run it
+from the installed artifact, as users get it. CI runs them on every pull
+request and the release workflow before it drafts a release.
+

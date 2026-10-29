@@ -40,6 +40,25 @@ jobs:
         run: brew list cmake >/dev/null 2>&1 || brew install cmake
       - run: bun install --frozen-lockfile
       - run: bun run tauri build ${{ matrix.args }}
+      - name: Self-test the AppImage and .deb
+        if: runner.os == 'Linux'
+        run: |
+          scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage
+          scripts/self-test-bundle.sh appimage-in ubuntu:22.04 target/release/bundle/appimage/*.AppImage
+          scripts/self-test-bundle.sh deb target/release/bundle/deb/*.deb
+      - name: Self-test the app from the disk image (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          dmg=$(ls target/*/release/bundle/dmg/*.dmg)
+          hdiutil attach -nobrowse -readonly "$dmg" -mountpoint /tmp/encore-dmg
+          lipo -archs /tmp/encore-dmg/Encore.app/Contents/MacOS/encore
+          codesign --verify --deep --strict /tmp/encore-dmg/Encore.app
+          scripts/self-test-bundle.sh app /tmp/encore-dmg/Encore.app
+          hdiutil detach /tmp/encore-dmg
+      - name: Self-test the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/self-test-bundle.ps1 -Installer (Get-Item target/release/bundle/nsis/*-setup.exe).FullName
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ runner.os }}

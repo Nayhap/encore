@@ -44,6 +44,30 @@ jobs:
       - run: bun run check
       - name: Bundle
         run: bun run tauri build --bundles ${{ matrix.bundles }}
+      # Run the built artifact the way users get it: set up yt-dlp with the
+      # system's Python, resolve a song and decode it. This is the path the
+      # AppImage playback and no-audio-device bugs hid in.
+      - name: Self-test the AppImage
+        if: runner.os == 'Linux'
+        run: scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage
+      - name: Self-test the AppImage on a fresh Ubuntu 22.04 and 24.04
+        if: runner.os == 'Linux'
+        run: |
+          for img in ubuntu:22.04 ubuntu:24.04; do
+            echo "::group::$img"
+            scripts/self-test-bundle.sh appimage-in "$img" target/release/bundle/appimage/*.AppImage
+            echo "::endgroup::"
+          done
+      - name: Self-test the .deb
+        if: runner.os == 'Linux'
+        run: scripts/self-test-bundle.sh deb target/release/bundle/deb/*.deb
+      - name: Self-test the app (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/self-test-bundle.sh app target/release/bundle/macos/Encore.app
+      - name: Self-test the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/self-test-bundle.ps1 -Installer (Get-Item target/release/bundle/nsis/*-setup.exe).FullName
       - uses: actions/upload-artifact@v4
         with:
           name: encore-${{ runner.os }}

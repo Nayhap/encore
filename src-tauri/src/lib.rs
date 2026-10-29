@@ -6,6 +6,7 @@ mod core;
 mod events;
 mod logging;
 mod media;
+mod selftest;
 mod signin;
 mod window;
 
@@ -170,6 +171,9 @@ fn keepalive(app: tauri::AppHandle, core: Arc<Core>) {
 pub fn run() {
     let paths = core::Paths::new();
     logging::init(&paths.logs);
+    if selftest::wanted() {
+        selftest::run();
+    }
     let builder = specta_builder();
     let app = tauri::Builder::default();
     // One Encore at a time: a second launch shows the running one. macOS
