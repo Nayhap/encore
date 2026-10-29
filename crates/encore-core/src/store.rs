@@ -25,6 +25,11 @@ fn db_err(e: rusqlite::Error) -> AppError {
     AppError::internal(format!("storage error: {e}"))
 }
 
+/// The file isn't a usable SQLite database (as opposed to busy or unwritable).
+fn is_corrupt(e: &rusqlite::Error) -> bool {
+    matches!(e.sqlite_error_code(), Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
+}
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -45,9 +50,31 @@ impl Store {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p).map_err(|e| AppError::internal(format!("cannot create data dir: {}", e.kind())))?;
         }
-        let conn = Connection::open(path).map_err(db_err)?;
-        conn.execute_batch(SCHEMA).map_err(db_err)?;
-        conn.execute("INSERT OR IGNORE INTO meta (k, v) VALUES ('schema', '1')", []).map_err(db_err)?;
+        match Self::open_at(path) {
+            Ok(s) => Ok(s),
+            // A damaged database (power loss, a bad disk, a stray file) would
+            // stop Encore from starting every time. Everything in it is a
+            // cache or a setting, so set it aside and start a fresh one.
+            Err(e) if is_corrupt(&e) => {
+                let aside = path.with_extension(format!("sqlite.damaged-{}", now()));
+                tracing::warn!(error = %e, aside = %aside.display(), "storage was damaged; starting a fresh one");
+                std::fs::rename(path, &aside).map_err(|e| AppError::internal(format!("cannot move the damaged database aside: {}", e.kind())))?;
+                for ext in ["sqlite-wal", "sqlite-shm"] {
+                    let _ = std::fs::remove_file(path.with_extension(ext));
+                }
+                Self::open_at(path).map_err(db_err)
+            }
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    fn open_at(path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        // Another Encore (or a slow disk) holding a write lock is waited for,
+        // not reported as "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute("INSERT OR IGNORE INTO meta (k, v) VALUES ('schema', '1')", [])?;
         let s = Self { conn: Mutex::new(conn) };
         s.purge_expired();
         Ok(s)
@@ -138,6 +165,21 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_database_is_set_aside() {
+        let dir = std::env::temp_dir().join(format!("encore-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("encore.sqlite");
+        std::fs::write(&db, vec![0x5au8; 8192]).unwrap();
+        let s = Store::open(&db).expect("a damaged database must not stop startup");
+        s.put("settings", "k", &1, None).unwrap();
+        assert_eq!(s.get::<i32>("settings", "k").unwrap(), Some(1));
+        let aside = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().contains("damaged"));
+        assert!(aside, "the damaged file is kept for inspection");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn put_get_ttl_and_purge() {
