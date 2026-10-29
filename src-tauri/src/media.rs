@@ -14,6 +14,8 @@ use crate::core::Core;
 
 thread_local! {
     static CONTROLS: RefCell<Option<MediaControls>> = const { RefCell::new(None) };
+    /// The queue entry whose metadata the OS shows (main thread only).
+    static SHOWN: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 #[cfg(target_os = "macos")]
@@ -122,7 +124,14 @@ pub fn install(app: &AppHandle, core: Arc<Core>) {
                         if core.art.get(&key, 544).await.is_ok() {
                             if let Some(p) = core.art.path_for(&key, 544) {
                                 let url = file_url(&p);
-                                let _ = app2.run_on_main_thread(move || update(&snap2, Some(url), true));
+                                // Only if that song is still the one shown: a quick skip
+                                // must not be overwritten by an older song's cover.
+                                let _ = app2.run_on_main_thread(move || {
+                                    let uid = snap2.current.as_ref().map(|c| c.uid.clone());
+                                    if SHOWN.with(|s| *s.borrow() == uid) {
+                                        set_metadata(&snap2, Some(url));
+                                    }
+                                });
                             }
                         }
                     });
@@ -140,27 +149,36 @@ fn file_url(p: &std::path::Path) -> String {
     format!("file://{}", p.display())
 }
 
-fn update(s: &PlayerSnapshot, cover: Option<String>, changed_track: bool) {
+fn set_metadata(s: &PlayerSnapshot, cover: Option<String>) {
+    SHOWN.with(|x| *x.borrow_mut() = s.current.as_ref().map(|c| c.uid.clone()));
     CONTROLS.with(|c| {
         let mut b = c.borrow_mut();
         let Some(ctl) = b.as_mut() else { return };
-        if changed_track {
-            match &s.current {
-                Some(e) => {
-                    let artist = e.track.artist_line();
-                    let _ = ctl.set_metadata(MediaMetadata {
-                        title: Some(&e.track.title),
-                        artist: Some(&artist),
-                        album: e.track.album.as_ref().map(|a| a.name.as_str()),
-                        cover_url: cover.as_deref(),
-                        duration: s.duration.map(Duration::from_secs_f64),
-                    });
-                }
-                None => {
-                    let _ = ctl.set_metadata(MediaMetadata::default());
-                }
+        match &s.current {
+            Some(e) => {
+                let artist = e.track.artist_line();
+                let _ = ctl.set_metadata(MediaMetadata {
+                    title: Some(&e.track.title),
+                    artist: Some(&artist),
+                    album: e.track.album.as_ref().map(|a| a.name.as_str()),
+                    cover_url: cover.as_deref(),
+                    duration: s.duration.map(Duration::from_secs_f64),
+                });
+            }
+            None => {
+                let _ = ctl.set_metadata(MediaMetadata::default());
             }
         }
+    });
+}
+
+fn update(s: &PlayerSnapshot, cover: Option<String>, changed_track: bool) {
+    if changed_track {
+        set_metadata(s, cover);
+    }
+    CONTROLS.with(|c| {
+        let mut b = c.borrow_mut();
+        let Some(ctl) = b.as_mut() else { return };
         let progress = Some(MediaPosition(Duration::from_secs_f64(s.position.max(0.0))));
         let pb = match (s.current.is_some(), s.playing) {
             (false, _) => MediaPlayback::Stopped,
