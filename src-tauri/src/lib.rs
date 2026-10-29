@@ -87,6 +87,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             cancel_signin,
             window::snap_layouts,
             window::set_system_titlebar,
+            window::get_system_titlebar,
         ])
         .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent])
 }

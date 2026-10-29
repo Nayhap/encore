@@ -90,6 +90,11 @@ export const commands = {
 	 *  Encore so the window is created with it.
 	 */
 	setSystemTitlebar: (on: boolean, apply: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("set_system_titlebar", { on, apply })),
+	/**
+	 *  Whether the system title bar is on. The window's chrome follows this, so
+	 *  the UI reads it here rather than keeping its own copy.
+	 */
+	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
 };
 
 /** Events */

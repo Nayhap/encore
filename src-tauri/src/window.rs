@@ -11,7 +11,6 @@ fn titlebar_marker() -> std::path::PathBuf {
     crate::core::Paths::new().data.join("system-titlebar")
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn system_titlebar() -> bool {
     titlebar_marker().exists()
 }
@@ -23,6 +22,14 @@ pub fn system_titlebar() -> bool {
 pub fn create_main(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let cfg = app.config().app.windows.first().cloned().unwrap_or_default();
     tauri::WebviewWindowBuilder::from_config(app, &cfg)?.decorations(system_titlebar()).build()
+}
+
+/// Whether the system title bar is on. The window's chrome follows this, so
+/// the UI reads it here rather than keeping its own copy.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_system_titlebar() -> Result<bool> {
+    Ok(system_titlebar())
 }
 
 /// Saves the title bar choice. Windows applies it at once; Linux restarts

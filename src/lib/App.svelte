@@ -76,9 +76,17 @@
   $effect(() => {
     document.documentElement.dataset.chrome = customChrome ? "custom" : "native";
   });
-  // The backend applies the choice when the window is created; keep its copy
-  // in step with this one (earlier versions only kept it here).
-  if (isTauri && !isMac) commands.setSystemTitlebar(ui.systemTitlebar, false).catch(() => {});
+  // The backend decides the window's chrome when it creates the window, so
+  // its setting is the one to follow.
+  if (isTauri && !isMac)
+    commands
+      .getSystemTitlebar()
+      .then((r) => {
+        if (r.status !== "ok") return;
+        ui.systemTitlebar = r.data;
+        localStorage.setItem("titlebar", r.data ? "system" : "encore");
+      })
+      .catch(() => {});
 
   $effect(() => {
     localStorage.setItem("tint", ui.tint ? "on" : "off");
