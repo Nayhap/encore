@@ -729,7 +729,13 @@ export type PlayFailure = {
 	message: string,
 };
 
-export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown";
+export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown" | 
+/**
+ *  Playback isn't set up on this computer (no Python, no JS runtime, the
+ *  yt-dlp download failed). No song can play until that's fixed, so the
+ *  player doesn't skip through the queue.
+ */
+"setup";
 
 /**  `player:position`, a 2 Hz anchor (also right after seek/pause). */
 export type PlayerPositionEvent = PlayerPositionEvent_Serialize | PlayerPositionEvent_Deserialize;

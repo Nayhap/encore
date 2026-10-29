@@ -443,7 +443,9 @@ impl Player {
             let _ = self.tx.send(PlayerEvent::SessionExpired);
         }
         self.publish(false);
-        if autoskip {
+        if f.kind == PlayFailureKind::Setup {
+            let _ = self.tx.send(PlayerEvent::Notice(f.message.clone()));
+        } else if autoskip {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Skipped “{title}”: {}", f.message)));
             tokio::time::sleep(Duration::from_millis(600)).await;
             let step = self.st.lock().queue.next();

@@ -550,7 +550,7 @@ impl YtDlpResolver {
     }
 
     async fn call(&self, req: Value) -> Result<Value, PlayFailure> {
-        let env = self.env().await.map_err(|e| fail(PlayFailureKind::Unknown, e))?;
+        let env = self.env().await.map_err(|e| fail(PlayFailureKind::Setup, e))?;
         // Pick a free helper slot, else wait on the first.
         let mut slot = None;
         for m in &self.pool {
@@ -722,7 +722,10 @@ impl StreamResolver for YtDlpResolver {
         for attempt in 0..2 {
             let mut s = match self.extract(video_id, auth).await {
                 Ok(s) => s,
-                Err(e) if e.kind == PlayFailureKind::Unavailable || e.kind == PlayFailureKind::SessionExpired => return Err(e),
+                Err(e) if matches!(e.kind, PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::Setup) => {
+                    self.inflight.lock().remove(&key);
+                    return Err(e);
+                }
                 Err(e) => {
                     last = Some(e);
                     continue;
