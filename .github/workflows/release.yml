@@ -20,7 +20,9 @@ jobs:
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
           - os: windows-latest
             args: --bundles nsis,msi
-          - os: ubuntu-24.04
+          # The oldest Ubuntu we support: an AppImage only runs on systems
+          # whose glibc is at least as new as the one it was built with.
+          - os: ubuntu-22.04
             args: --bundles deb,appimage
     runs-on: ${{ matrix.os }}
     steps:
@@ -44,7 +46,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage
-          scripts/self-test-bundle.sh appimage-in ubuntu:22.04 target/release/bundle/appimage/*.AppImage
+          for img in ubuntu:22.04 debian:12 ubuntu:24.04; do
+            scripts/self-test-bundle.sh appimage-in "$img" target/release/bundle/appimage/*.AppImage
+          done
           scripts/self-test-bundle.sh deb target/release/bundle/deb/*.deb
       - name: Self-test the app from the disk image (macOS)
         if: runner.os == 'macOS'

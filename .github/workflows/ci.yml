@@ -20,7 +20,9 @@ jobs:
             bundles: app
           - os: windows-latest
             bundles: nsis,msi
-          - os: ubuntu-24.04
+          # The oldest Ubuntu we support: an AppImage only runs on systems
+          # whose glibc is at least as new as the one it was built with.
+          - os: ubuntu-22.04
             bundles: deb,appimage
     runs-on: ${{ matrix.os }}
     steps:
@@ -50,10 +52,10 @@ jobs:
       - name: Self-test the AppImage
         if: runner.os == 'Linux'
         run: scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage
-      - name: Self-test the AppImage on a fresh Ubuntu 22.04 and 24.04
+      - name: Self-test the AppImage on fresh Ubuntu 22.04, Debian 12 and Ubuntu 24.04
         if: runner.os == 'Linux'
         run: |
-          for img in ubuntu:22.04 ubuntu:24.04; do
+          for img in ubuntu:22.04 debian:12 ubuntu:24.04; do
             echo "::group::$img"
             scripts/self-test-bundle.sh appimage-in "$img" target/release/bundle/appimage/*.AppImage
             echo "::endgroup::"
