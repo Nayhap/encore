@@ -122,6 +122,99 @@ fn kind_of_video(t: Option<&str>) -> TrackKind {
     }
 }
 
+/// YouTube video IDs are 11 characters of URL-safe base64.
+fn is_video_id(s: &str) -> bool {
+    s.len() == 11 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The song (`MUSIC_VIDEO_TYPE_ATV`) a list row stands for, when the row's
+/// own `videoId` is something else.
+///
+/// Album pages often list a track by its music video. The row's "View song
+/// credits" menu item still opens `MPTC<id>`, and `<id>` is the album's audio
+/// track: same recording, same duration as the album listing. Rows that are
+/// really videos (video search, video shelves, playlists of videos) carry no
+/// credits page, or one for their own ID, so they are left alone.
+fn credits_song(r: &Value, vid: &str) -> Option<String> {
+    let items = r.get("menu")?.get("menuRenderer")?.get("items")?.as_array()?;
+    items
+        .iter()
+        .filter_map(|i| i.get("menuNavigationItemRenderer")?.get("navigationEndpoint")?.get("browseEndpoint")?.get("browseId")?.as_str())
+        .find_map(|b| b.strip_prefix("MPTC"))
+        .filter(|id| is_video_id(id) && *id != vid)
+        .map(str::to_string)
+}
+
+/// The song a `next` queue item stands for, when the item is a video.
+///
+/// An album played as a queue (`next` with its `OLAK5uy_…` playlist) lists
+/// the music videos too. Each item's `watchEndpoint.params` is a protobuf
+/// whose field 52 holds the album's audio track ID.
+fn queue_song(watch: &Value, vid: &str) -> Option<String> {
+    let p = watch.get("params")?.as_str()?;
+    proto_string(&b64_decode(p)?, 52).filter(|id| is_video_id(id) && id != vid)
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let s = s.replace("%3D", "=").replace("%3d", "=");
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes().filter(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// First length-delimited field `field` of a protobuf message, as UTF-8.
+fn proto_string(b: &[u8], field: u64) -> Option<String> {
+    fn varint(b: &[u8], i: &mut usize) -> Option<u64> {
+        let mut x = 0u64;
+        for shift in (0..64).step_by(7) {
+            let c = *b.get(*i)?;
+            *i += 1;
+            x |= ((c & 0x7f) as u64) << shift;
+            if c < 0x80 {
+                return Some(x);
+            }
+        }
+        None
+    }
+    let mut i = 0;
+    while i < b.len() {
+        let key = varint(b, &mut i)?;
+        match key & 7 {
+            0 => {
+                varint(b, &mut i)?;
+            }
+            1 => i += 8,
+            2 => {
+                let n = varint(b, &mut i)? as usize;
+                let v = b.get(i..i.checked_add(n)?)?;
+                i += n;
+                if key >> 3 == field {
+                    return String::from_utf8(v.to_vec()).ok();
+                }
+            }
+            5 => i += 4,
+            _ => return None,
+        }
+    }
+    None
+}
+
 pub fn explicit(v: &Value) -> bool {
     let mut out = Vec::new();
     find_all(v, "iconType", &mut out);
@@ -297,8 +390,21 @@ pub fn list_item(r: &Value) -> Option<ShelfItem> {
                 artists = first.split(", ").map(|n| Credit { name: n.to_string(), id: None }).collect();
             }
         }
+        let mut liked = liked(r.get("menu").unwrap_or(&Value::Null));
+        // A row that lists a song by its music video plays the song; the
+        // video stays on the track as its counterpart (D4). The row's like
+        // state is the video's, so it says nothing about the song.
+        let song = matches!(kind, TrackKind::Video | TrackKind::Unknown).then(|| credits_song(r, &vid)).flatten();
+        let (id, counterpart) = match song {
+            Some(s) => {
+                kind = TrackKind::Song;
+                liked = None;
+                (ItemId::ytm(&s), Some(ItemId::ytm(&vid)))
+            }
+            None => (ItemId::ytm(&vid), None),
+        };
         return Some(ShelfItem::Track(Track {
-            id: ItemId::ytm(&vid),
+            id,
             title,
             artists,
             album: meta.album,
@@ -307,8 +413,9 @@ pub fn list_item(r: &Value) -> Option<ShelfItem> {
             art: art_of(r),
             kind,
             plays: meta.plays,
-            liked: liked(r.get("menu").unwrap_or(&Value::Null)),
+            liked,
             playable: !greyed(r),
+            counterpart,
         }));
     }
     let n = r.get("navigationEndpoint").map(nav)?;
@@ -363,6 +470,7 @@ pub fn two_row(r: &Value) -> Option<ShelfItem> {
             plays: meta.plays,
             liked: None,
             playable: true,
+            counterpart: None,
         }));
     }
     let bid = n.browse_id.clone()?;
@@ -397,19 +505,37 @@ pub fn panel_video(r: &Value) -> Option<Track> {
             artists = vec![Credit { name: s, id: None }];
         }
     }
-    let vtype = find(r.get("navigationEndpoint").unwrap_or(&Value::Null), "musicVideoType").and_then(Value::as_str);
+    let ne = r.get("navigationEndpoint").unwrap_or(&Value::Null);
+    let vtype = find(ne, "musicVideoType").and_then(Value::as_str);
+    let mut kind = kind_of_video(vtype);
+    let mut duration = r.get("lengthText").and_then(text_opt).and_then(|t| parse_duration(&t));
+    let mut liked = liked(r.get("menu").unwrap_or(&Value::Null));
+    // An album queue lists its music videos; play the album's song (D4: the
+    // video stays as the counterpart). Length and like state are the
+    // video's, so they are dropped; the stream gives the real length.
+    let song = matches!(kind, TrackKind::Video | TrackKind::Unknown).then(|| ne.get("watchEndpoint").and_then(|w| queue_song(w, vid))).flatten();
+    let (id, counterpart) = match song {
+        Some(s) => {
+            kind = TrackKind::Song;
+            duration = None;
+            liked = None;
+            (ItemId::ytm(&s), Some(ItemId::ytm(vid)))
+        }
+        None => (ItemId::ytm(vid), None),
+    };
     Some(Track {
-        id: ItemId::ytm(vid),
+        id,
         title,
         artists,
         album: meta.album,
-        duration: r.get("lengthText").and_then(text_opt).and_then(|t| parse_duration(&t)),
+        duration,
         explicit: explicit(r.get("badges").unwrap_or(&Value::Null)),
         art: art_of(r),
-        kind: kind_of_video(vtype),
+        kind,
         plays: None,
-        liked: liked(r.get("menu").unwrap_or(&Value::Null)),
+        liked,
         playable: r.get("unplayableText").is_none(),
+        counterpart,
     })
 }
 
@@ -447,9 +573,21 @@ pub fn item(wrapper: &Value) -> Option<ShelfItem> {
         "musicResponsiveListItemRenderer" => list_item(r),
         "musicTwoRowItemRenderer" => two_row(r),
         "playlistPanelVideoRenderer" => panel_video(r).map(ShelfItem::Track),
-        // The wrapper holds the requested item and its song/video counterpart;
-        // only the primary one is what was asked for (no silent swap, D4).
-        "playlistPanelVideoWrapperRenderer" => r.get("primaryRenderer").and_then(|p| p.get("playlistPanelVideoRenderer")).and_then(panel_video).map(ShelfItem::Track),
+        // The wrapper holds the requested item and its song/video counterpart.
+        // The primary one is what was asked for, so it is what plays; the
+        // other is only remembered as the counterpart (D4).
+        "playlistPanelVideoWrapperRenderer" => {
+            let mut t = r.get("primaryRenderer").and_then(|p| p.get("playlistPanelVideoRenderer")).and_then(panel_video)?;
+            if t.counterpart.is_none() {
+                t.counterpart = r
+                    .get("counterpart")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.iter().find_map(|c| c.get("counterpartRenderer")?.get("playlistPanelVideoRenderer")?.get("videoId")?.as_str()))
+                    .filter(|c| *c != t.id.remote())
+                    .map(ItemId::ytm);
+            }
+            Some(ShelfItem::Track(t))
+        }
         "musicNavigationButtonRenderer" => nav_button(r),
         "musicMultiRowListItemRenderer" => multi_row(r),
         _ => None,
@@ -472,6 +610,7 @@ fn multi_row(r: &Value) -> Option<ShelfItem> {
         plays: None,
         liked: None,
         playable: true,
+        counterpart: None,
     }))
 }
 
@@ -560,6 +699,7 @@ pub fn card_top(r: &Value) -> Option<ShelfItem> {
             plays: meta.plays,
             liked: None,
             playable: true,
+            counterpart: None,
         }));
     }
     let bid = n.browse_id?;
@@ -653,6 +793,28 @@ mod tests {
         assert_eq!(argb_hue(0xffff0000), 0);
         assert_eq!(argb_hue(0xff00ff00), 120);
         assert_eq!(argb_hue(0xff0000ff), 240);
+    }
+
+    #[test]
+    fn queue_params_carry_the_song() {
+        // `watchEndpoint.params` of Discovery's first queue item.
+        let w = serde_json::json!({ "videoId": "FGBhQbmPwH8", "params": "OAHyAQIIAaIDC2ZhNUlXSERiZnRJ" });
+        assert_eq!(queue_song(&w, "FGBhQbmPwH8").as_deref(), Some("fa5IWHDbftI"));
+        // Radio items carry the item's own ID elsewhere and no field 52.
+        let w = serde_json::json!({ "videoId": "FGBhQbmPwH8", "params": "OAHyAQIIAeoEC0ZHQmhRYm1Qd0g4" });
+        assert_eq!(queue_song(&w, "FGBhQbmPwH8"), None);
+        assert_eq!(queue_song(&serde_json::json!({ "params": "%%%" }), "x"), None);
+        assert_eq!(queue_song(&serde_json::json!({ "params": "wAEB" }), "x"), None);
+    }
+
+    #[test]
+    fn credits_of_the_row_itself_are_not_a_counterpart() {
+        let row = |id: &str| serde_json::json!({ "menu": { "menuRenderer": { "items": [
+            { "menuNavigationItemRenderer": { "navigationEndpoint": { "browseEndpoint": { "browseId": format!("MPTC{id}") } } } }
+        ] } } });
+        assert_eq!(credits_song(&row("fa5IWHDbftI"), "FGBhQbmPwH8").as_deref(), Some("fa5IWHDbftI"));
+        assert_eq!(credits_song(&row("fa5IWHDbftI"), "fa5IWHDbftI"), None);
+        assert_eq!(credits_song(&row("short"), "FGBhQbmPwH8"), None);
     }
 
     #[test]

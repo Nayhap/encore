@@ -535,6 +535,7 @@ async fn record(svc: &YtMusic, dir: Option<PathBuf>) -> Result<()> {
     save("moods", svc.raw("browse", json!({"browseId": "FEmusic_moods_and_genres"})).await.map_err(e)?)?;
     save("search_all", svc.raw("search", json!({"query": "daft punk"})).await.map_err(e)?)?;
     save("search_songs", svc.raw("search", json!({"query": "daft punk", "params": "EgWKAQIIAWoMEA4QChADEAQQCRAF"})).await.map_err(e)?)?;
+    save("search_videos", svc.raw("search", json!({"query": "daft punk", "params": "EgWKAQIQAWoMEA4QChADEAQQCRAF"})).await.map_err(e)?)?;
     save("suggestions", svc.raw("music/get_search_suggestions", json!({"input": "daft p"})).await.map_err(e)?)?;
     save("album", svc.raw("browse", json!({"browseId": "MPREb_7ltM34kr0mH"})).await.map_err(e)?)?;
     save("artist", svc.raw("browse", json!({"browseId": "UCRr1xG_2WIDs18a6cIiCxeA"})).await.map_err(e)?)?;
@@ -547,6 +548,11 @@ async fn record(svc: &YtMusic, dir: Option<PathBuf>) -> Result<()> {
     save(
         "next_radio",
         svc.raw("next", json!({"videoId": "4D7u5KF7SP8", "playlistId": "RDAMVM4D7u5KF7SP8", "isAudioOnly": true, "enablePersistentPlaylistPanel": true, "params": "wAEB"})).await.map_err(e)?,
+    )?;
+    // The album (Discovery) played as a queue: its items are music videos.
+    save(
+        "next_album",
+        svc.raw("next", json!({"playlistId": "OLAK5uy_mz6eafmqdRHSaR4IwG0ll6J6rgv0_ZpGw", "isAudioOnly": true, "enablePersistentPlaylistPanel": true})).await.map_err(e)?,
     )?;
     save("lyrics_android", svc.raw_android("browse", json!({"browseId": "MPLYt_K8qWMWVqXGi-8"})).await.map_err(e)?)?;
     save("lyrics_web", svc.raw("browse", json!({"browseId": "MPLYt_K8qWMWVqXGi-8"})).await.map_err(e)?)?;

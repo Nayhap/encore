@@ -13,7 +13,8 @@ pub fn track(t: &Track) -> String {
     let album = t.album.as_ref().map(|a| format!(" [{}]", a.name)).unwrap_or_default();
     let e = if t.explicit { " (E)" } else { "" };
     let p = if t.playable { "" } else { " (unplayable)" };
-    format!("{}  {}{} — {}{}  {}{}  ({:?})", t.id, t.title, e, t.artist_line(), album, dur(t.duration), p, t.kind)
+    let c = t.counterpart.as_ref().map(|c| format!("  counterpart {c}")).unwrap_or_default();
+    format!("{}  {}{} — {}{}  {}{}  ({:?}){c}", t.id, t.title, e, t.artist_line(), album, dur(t.duration), p, t.kind)
 }
 
 pub fn item(i: &ShelfItem) -> String {

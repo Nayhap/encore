@@ -397,6 +397,12 @@ export type Entry_Deserialize = {
 	entryId: string,
 	track: Track_Deserialize,
 	setVideoId?: string | null,
+	/**
+	 *  The video ID the service lists for this row. Playlist edits pair it
+	 *  with `set_video_id`. It differs from `track.id` when the row was
+	 *  resolved to its song (album rows that list the music video).
+	 */
+	videoId: ItemId,
 };
 
 /**
@@ -407,6 +413,12 @@ export type Entry_Serialize = {
 	entryId: string,
 	track: Track_Serialize,
 	setVideoId: string | null,
+	/**
+	 *  The video ID the service lists for this row. Playlist edits pair it
+	 *  with `set_video_id`. It differs from `track.id` when the row was
+	 *  resolved to its song (album rows that list the music video).
+	 */
+	videoId: ItemId,
 };
 
 export type ErrorCode = "network" | "authRequired" | "sessionExpired" | "notFound" | "parse" | 
@@ -884,6 +896,12 @@ export type Track_Deserialize = {
 	/**  `None` = unknown, not "not liked". */
 	liked?: boolean | null,
 	playable: boolean,
+	/**
+	 *  The same recording in its other form: the music video when `id` is
+	 *  the song. Never played on its own; kept for an explicit "play the
+	 *  video instead" action (D4).
+	 */
+	counterpart?: ItemId | null,
 };
 
 export type Track_Serialize = {
@@ -901,6 +919,12 @@ export type Track_Serialize = {
 	/**  `None` = unknown, not "not liked". */
 	liked: boolean | null,
 	playable: boolean,
+	/**
+	 *  The same recording in its other form: the music video when `id` is
+	 *  the song. Never played on its own; kept for an explicit "play the
+	 *  video instead" action (D4).
+	 */
+	counterpart: ItemId | null,
 };
 
 export type Word = Word_Serialize | Word_Deserialize;

@@ -373,7 +373,9 @@ pub async fn playlist_add(core: S<'_>, playlist_id: String, track_ids: Vec<ItemI
 #[specta::specta]
 pub async fn playlist_remove(core: S<'_>, playlist_id: String, entries: Vec<Entry>) -> Result<MutationOutcome> {
     let svc = core.service();
-    let pairs: Vec<(ItemId, String)> = entries.into_iter().filter_map(|e| Some((e.track.id, e.set_video_id?))).collect();
+    // The row's own ID, not the track's: an album row may list the video
+    // while the track plays the song (D10).
+    let pairs: Vec<(ItemId, String)> = entries.into_iter().filter_map(|e| Some((e.video_id, e.set_video_id?))).collect();
     if pairs.is_empty() {
         return Err(AppError::invalid("These songs cannot be removed from this playlist."));
     }
