@@ -1,8 +1,6 @@
 <script lang="ts">
-  import { call, type CollectionCard } from "$lib/backend";
-  import { catalog } from "$lib/catalog.svelte";
   import { kindLabel } from "$lib/data";
-  import { account, collectionMenu, nav, player, ui, type View } from "$lib/state.svelte";
+  import { account, collectionMenu, nav, newPlaylist, player, playlists, ui, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { isMac, mod } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -11,23 +9,16 @@
     { label: "Home", icon: "home", view: { name: "home" } },
     { label: "Explore", icon: "compass", view: { name: "explore" } },
     { label: "Library", icon: "library", view: { name: "library" } },
+    { label: "History", icon: "history", view: { name: "history" } },
   ];
 
-  // Your playlists (signed in); refreshed when the account changes.
-  let pinned = $state<CollectionCard[]>([]);
+  // Your playlists (signed in): the shared list, reloaded when the account
+  // changes and after every playlist change.
   $effect(() => {
-    const s = account.state.state;
-    if (s !== "signedIn") {
-      pinned = [];
-      return;
-    }
-    call((a) => a.library("playlists"))
-      .then((p) => {
-        catalog.addItems(p.items);
-        pinned = p.items.filter((i) => i.type === "collection") as CollectionCard[];
-      })
-      .catch(() => (pinned = []));
+    account.state.state;
+    void playlists.load();
   });
+  const pinned = $derived(playlists.list);
   const isActive = (v: View) => nav.view.name === v.name;
   const isOpen = (id: string) => nav.view.name === "collection" && nav.view.id === id;
   const initial = $derived((account.name ?? "Y").trim()[0]?.toUpperCase() ?? "Y");
@@ -57,7 +48,7 @@
 
   <div class="section">
     <span>Playlists</span>
-    <button class="icon-btn" aria-label="New playlist" title="New playlist" onclick={() => ui.say(account.signedIn ? "Create playlists on music.youtube.com for now; they show up here" : "Sign in to create playlists")}><Icon name="plus" size={16} /></button>
+    <button class="icon-btn" aria-label="New playlist" title="New playlist" onclick={() => newPlaylist()}><Icon name="plus" size={16} /></button>
   </div>
   <ul class="pins">
     {#each pinned as c (c.id)}

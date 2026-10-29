@@ -276,6 +276,7 @@ pub fn collection(resp: &Value, id: &ItemId) -> Result<Parsed<Collection>, Strin
             playlist_id,
             saved,
             editable,
+            privacy: if editable { crate::playlists::privacy_of(resp) } else { None },
             related,
         },
         cont,
@@ -419,6 +420,71 @@ pub fn next(resp: &Value) -> Result<NextInfo, String> {
         }
     }
     Ok(NextInfo { tracks, playlist_id, cont, lyrics_browse_id, related_browse_id })
+}
+
+// ---------- song / video counterpart ----------
+
+fn ms(v: Option<&Value>) -> Option<f64> {
+    let v = v?;
+    v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()).filter(|x| x.is_finite() && *x >= 0.0).map(|x| x / 1000.0)
+}
+
+/// `segmentMap.segment[]` as seen from the primary item. Anything malformed
+/// (negative, empty, overlapping) discards the whole map: no map means
+/// restart, never a wrong offset.
+fn segments_of(cp: &Value, from_primary: bool) -> Vec<SharedSegment> {
+    let Some(list) = cp.get("segmentMap").and_then(|m| m.get("segment")).and_then(Value::as_array) else { return vec![] };
+    let mut out = Vec::new();
+    for s in list {
+        let (Some(p), Some(c), Some(d)) = (ms(s.get("primaryVideoStartTimeMilliseconds")), ms(s.get("counterpartVideoStartTimeMilliseconds")), ms(s.get("durationMilliseconds"))) else { return vec![] };
+        if d <= 0.0 {
+            return vec![];
+        }
+        out.push(if from_primary { SharedSegment { from_start: p, to_start: c, duration: d } } else { SharedSegment { from_start: c, to_start: p, duration: d } });
+    }
+    out.sort_by(|a, b| a.from_start.total_cmp(&b.from_start));
+    if out.windows(2).any(|w| w[0].from_start + w[0].duration > w[1].from_start + 1e-6) {
+        return vec![];
+    }
+    out
+}
+
+/// The other version of `id` in a `next` answer: the
+/// `playlistPanelVideoWrapperRenderer` that has `id` on either side. Never
+/// the first queue row by position, and never a recommendation.
+pub fn counterpart(resp: &Value, id: &ItemId) -> Option<Counterpart> {
+    let mut wrappers = Vec::new();
+    find_all(resp.get("contents").unwrap_or(&Value::Null), "playlistPanelVideoWrapperRenderer", &mut wrappers);
+    if let Some(c) = resp.get("continuationContents") {
+        find_all(c, "playlistPanelVideoWrapperRenderer", &mut wrappers);
+    }
+    for w in wrappers {
+        let Some(primary) = w.get("primaryRenderer").and_then(|p| p.get("playlistPanelVideoRenderer")).and_then(panel_video_as_is) else { continue };
+        let cps = w.get("counterpart").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        for cp in cps {
+            let Some(other) = cp.get("counterpartRenderer").and_then(|c| c.get("playlistPanelVideoRenderer")).and_then(panel_video_as_is) else { continue };
+            if other.id == primary.id {
+                continue;
+            }
+            let (mut track, from_primary, me) = if &primary.id == id {
+                (other, true, primary.clone())
+            } else if &other.id == id {
+                (primary.clone(), false, other)
+            } else {
+                continue;
+            };
+            if track.kind == TrackKind::Unknown {
+                track.kind = match me.kind {
+                    TrackKind::Song => TrackKind::Video,
+                    TrackKind::Video => TrackKind::Song,
+                    k => k,
+                };
+            }
+            track.counterpart = Some(id.clone());
+            return Some(Counterpart { of: id.clone(), track, segments: segments_of(cp, from_primary) });
+        }
+    }
+    None
 }
 
 // ---------- lyrics ----------

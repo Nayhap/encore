@@ -202,6 +202,13 @@ p {
 .pill.primary:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--text));
 }
+.pill.danger {
+  background: hsl(0 68% 52%);
+  color: #fff;
+}
+.pill.danger:hover {
+  background: hsl(0 68% 46%);
+}
 .pill:disabled {
   opacity: 0.45;
   pointer-events: none;

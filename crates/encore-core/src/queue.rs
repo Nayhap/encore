@@ -433,6 +433,16 @@ impl Queue {
         self.bump();
     }
 
+    /// Put another version of the recording into one entry (the song/video
+    /// switch). The entry keeps its uid, place, origin and the queue its
+    /// source; other entries of the same track are left alone.
+    pub fn replace_entry_track(&mut self, uid: &str, track: Track) -> Result<()> {
+        let i = self.position_of(uid).ok_or_else(|| AppError::new(crate::error::ErrorCode::Stale, "That song is no longer in the queue."))?;
+        self.entries[i].track = track;
+        self.bump();
+        Ok(())
+    }
+
     /// Update metadata for every entry of a track (e.g. like state).
     pub fn update_track(&mut self, id: &str, f: impl Fn(&mut Track)) {
         let mut changed = false;
@@ -474,6 +484,22 @@ mod tests {
         let mut q = Queue::new(42);
         q.replace(["a", "b", "c", "d", "e"].iter().map(|n| t(n)).collect(), 0, None, false, Origin::Collection).unwrap();
         q
+    }
+
+    #[test]
+    fn version_switch_replaces_one_entry_in_place() {
+        let mut q = Queue::new(1);
+        q.replace(vec![t("a"), t("b"), t("a")], 0, Some(QueueSource { label: "L".into(), collection_id: None, radio_playlist: None }), false, Origin::Collection).unwrap();
+        let uids: Vec<String> = q.entries().iter().map(|e| e.uid.clone()).collect();
+        let mut v = t("a-video");
+        v.kind = TrackKind::Video;
+        v.counterpart = Some(ItemId::ytm("a"));
+        q.replace_entry_track(&uids[0], v).unwrap();
+        assert_eq!(ids(&q), vec!["a-video", "b", "a"], "the duplicate entry is not touched");
+        assert_eq!(q.entries().iter().map(|e| e.uid.clone()).collect::<Vec<_>>(), uids);
+        assert_eq!(q.index(), Some(0));
+        assert_eq!(q.source.as_ref().map(|s| s.label.as_str()), Some("L"));
+        assert!(q.replace_entry_track("gone", t("x")).is_err());
     }
 
     #[test]

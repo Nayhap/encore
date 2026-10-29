@@ -48,8 +48,28 @@ export const commands = {
 	setLike: (trackId: ItemId, liked: boolean) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("set_like", { trackId, liked })),
 	setSaved: (playlistId: string, saved: boolean) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("set_saved", { playlistId, saved })),
 	setSubscribed: (channelId: string, subscribed: boolean) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("set_subscribed", { channelId, subscribed })),
-	playlistAdd: (playlistId: string, trackIds: ItemId[]) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_add", { playlistId, trackIds })),
+	playlistAdd: (playlistId: string, trackIds: ItemId[], allowDuplicates: boolean) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_add", { playlistId, trackIds, allowDuplicates })),
 	playlistRemove: (playlistId: string, entries: Entry_Deserialize[]) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_remove", { playlistId, entries })),
+	playlistCreate: (title: string, description: string, privacy: Privacy, trackIds: ItemId[]) => typedError<PlaylistCreated_Serialize, AppError_Serialize>(__TAURI_INVOKE("playlist_create", { title, description, privacy, trackIds })),
+	playlistEdit: (playlistId: string, edit: PlaylistEdit_Deserialize) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_edit", { playlistId, edit })),
+	playlistDelete: (playlistId: string) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_delete", { playlistId })),
+	playlistMove: (playlistId: string, setVideoId: string, before: string | null) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("playlist_move", { playlistId, setVideoId, before })),
+	/**
+	 *  Not cached: history changes with every play, and an old copy would offer
+	 *  removal tokens that no longer work (D19).
+	 */
+	history: () => typedError<HistoryPage_Serialize, AppError_Serialize>(__TAURI_INVOKE("history")),
+	historyMore: (cursor: string) => typedError<HistoryPage_Serialize, AppError_Serialize>(__TAURI_INVOKE("history_more", { cursor })),
+	historyRemove: (rowIds: string[]) => typedError<MutationOutcome, AppError_Serialize>(__TAURI_INVOKE("history_remove", { rowIds })),
+	counterpart: (track: Track_Deserialize) => typedError<Counterpart_Serialize | null, AppError_Serialize>(__TAURI_INVOKE("counterpart", { track })),
+	/**
+	 *  Switch a queue entry to its other version. The pair is looked up here,
+	 *  not taken from the UI (D4).
+	 */
+	switchVersion: (uid: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("switch_version", { uid })),
+	/**  Play the other version of a track that is not playing, keeping the queue. */
+	playVersion: (track: Track_Deserialize) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_version", { track })),
+	setReportHistory: (on: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("set_report_history", { on })),
 	authState: () => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("auth_state")),
 	browserProfiles: () => typedError<BrowserProfile[], AppError_Serialize>(__TAURI_INVOKE("browser_profiles")),
 	importBrowser: (profileId: string) => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("import_browser", { profileId })),
@@ -71,10 +91,12 @@ export const commands = {
 export const events = {
 	artHueEvent: makeEvent<ArtHueEvent, ArtHueEvent>("art-hue-event"),
 	authEvent: makeEvent<AuthEvent_Serialize, AuthEvent_Deserialize>("auth-event"),
+	historyEvent: makeEvent<HistoryEvent, HistoryEvent>("history-event"),
 	lyricsEvent: makeEvent<LyricsEvent_Serialize, LyricsEvent_Deserialize>("lyrics-event"),
 	noticeEvent: makeEvent<NoticeEvent_Serialize, NoticeEvent_Deserialize>("notice-event"),
 	playerPositionEvent: makeEvent<PlayerPositionEvent_Serialize, PlayerPositionEvent_Deserialize>("player-position-event"),
 	playerStateEvent: makeEvent<PlayerStateEvent_Serialize, PlayerStateEvent_Deserialize>("player-state-event"),
+	playlistsEvent: makeEvent<PlaylistsEvent_Serialize, PlaylistsEvent_Deserialize>("playlists-event"),
 	queueEvent: makeEvent<QueueEvent_Serialize, QueueEvent_Deserialize>("queue-event"),
 	signinEvent: makeEvent<SigninEvent_Serialize, SigninEvent_Deserialize>("signin-event"),
 };
@@ -233,6 +255,8 @@ export type Bootstrap_Deserialize = {
 	player: PlayerSnapshot_Deserialize,
 	queue: QueueSnapshot_Deserialize,
 	resolver: ResolverStatus_Deserialize,
+	/**  Settings → Playback → "Send plays to YouTube history". */
+	reportHistory: boolean,
 };
 
 export type Bootstrap_Serialize = {
@@ -241,6 +265,8 @@ export type Bootstrap_Serialize = {
 	player: PlayerSnapshot_Serialize,
 	queue: QueueSnapshot_Serialize,
 	resolver: ResolverStatus_Serialize,
+	/**  Settings → Playback → "Send plays to YouTube history". */
+	reportHistory: boolean,
 };
 
 export type BrowserProfile = {
@@ -320,7 +346,13 @@ export type Collection_Deserialize = {
 	/**  Playlist id used for playback/radio/save (OLAK… for albums). */
 	playlistId?: string | null,
 	saved?: boolean | null,
+	/**
+	 *  The service says this playlist is yours to edit (its editable
+	 *  header), never inferred from being in the library.
+	 */
 	editable: boolean,
+	/**  Who can see it, for editable playlists (`None` when not given). */
+	privacy?: Privacy | null,
 	/**  Extra shelves shown under an album ("Other versions", "More by"). */
 	related: Shelf_Deserialize[],
 };
@@ -342,9 +374,43 @@ export type Collection_Serialize = {
 	/**  Playlist id used for playback/radio/save (OLAK… for albums). */
 	playlistId: string | null,
 	saved: boolean | null,
+	/**
+	 *  The service says this playlist is yours to edit (its editable
+	 *  header), never inferred from being in the library.
+	 */
 	editable: boolean,
+	/**  Who can see it, for editable playlists (`None` when not given). */
+	privacy: Privacy | null,
 	/**  Extra shelves shown under an album ("Other versions", "More by"). */
 	related: Shelf_Serialize[],
+};
+
+/**
+ *  The other version of a track (song ↔ music video), with the timeline map
+ *  when the service gives one.
+ */
+export type Counterpart = Counterpart_Serialize | Counterpart_Deserialize;
+
+/**
+ *  The other version of a track (song ↔ music video), with the timeline map
+ *  when the service gives one.
+ */
+export type Counterpart_Deserialize = {
+	/**  The track it pairs with. */
+	of: ItemId,
+	track: Track_Deserialize,
+	segments: SharedSegment[],
+};
+
+/**
+ *  The other version of a track (song ↔ music video), with the timeline map
+ *  when the service gives one.
+ */
+export type Counterpart_Serialize = {
+	/**  The track it pairs with. */
+	of: ItemId,
+	track: Track_Serialize,
+	segments: SharedSegment[],
 };
 
 /**
@@ -429,6 +495,75 @@ export type ErrorCode = "network" | "authRequired" | "sessionExpired" | "notFoun
 /**  Superseded by a newer request or an account switch. */
 "stale" | "unsupported" | "outcomeUnknown" | "rejected" | "invalidArgument" | "keychain" | "internal";
 
+/**  A play was reported to the history: the History page refreshes if open. */
+export type HistoryEvent = {
+	trackId: string,
+};
+
+/**  A day group as the service titles it ("Today", "Yesterday", "October 2026"). */
+export type HistoryGroup = HistoryGroup_Serialize | HistoryGroup_Deserialize;
+
+/**  A day group as the service titles it ("Today", "Yesterday", "October 2026"). */
+export type HistoryGroup_Deserialize = {
+	title: string,
+	rows: HistoryRow_Deserialize[],
+};
+
+/**  A day group as the service titles it ("Today", "Yesterday", "October 2026"). */
+export type HistoryGroup_Serialize = {
+	title: string,
+	rows: HistoryRow_Serialize[],
+};
+
+export type HistoryPage = HistoryPage_Serialize | HistoryPage_Deserialize;
+
+export type HistoryPage_Deserialize = {
+	groups: HistoryGroup_Deserialize[],
+	/**  A message instead of (or above) the rows, such as "history is paused". */
+	notice?: string | null,
+	/**  True when the notice says history is paused in the Google account. */
+	paused: boolean,
+	cursor?: string | null,
+};
+
+export type HistoryPage_Serialize = {
+	groups: HistoryGroup_Serialize[],
+	/**  A message instead of (or above) the rows, such as "history is paused". */
+	notice: string | null,
+	/**  True when the notice says history is paused in the Google account. */
+	paused: boolean,
+	cursor: string | null,
+};
+
+/**
+ *  One row of the listening history. `row_id` is unique within the page and
+ *  is the handle for "Remove from history" (the service's token stays in
+ *  Rust, D10).
+ */
+export type HistoryRow = HistoryRow_Serialize | HistoryRow_Deserialize;
+
+/**
+ *  One row of the listening history. `row_id` is unique within the page and
+ *  is the handle for "Remove from history" (the service's token stays in
+ *  Rust, D10).
+ */
+export type HistoryRow_Deserialize = {
+	rowId: string,
+	track: Track_Deserialize,
+	removable: boolean,
+};
+
+/**
+ *  One row of the listening history. `row_id` is unique within the page and
+ *  is the handle for "Remove from history" (the service's token stays in
+ *  Rust, D10).
+ */
+export type HistoryRow_Serialize = {
+	rowId: string,
+	track: Track_Serialize,
+	removable: boolean,
+};
+
 /**  `ServiceId` + opaque remote id, serialised as `"ytm:<remote>"`. */
 export type ItemId = string;
 
@@ -508,7 +643,12 @@ export type Lyrics_Serialize = {
 };
 
 /**  Result of a write. HTTP 200 is not proof; ambiguous results refetch (D10). */
-export type MutationOutcome = "done" | "rejected" | "outcomeUnknown";
+export type MutationOutcome = "done" | "rejected" | "outcomeUnknown" | 
+/**
+ *  The song is already in that playlist; nothing was added. Retry with
+ *  duplicates allowed if the user confirms.
+ */
+"duplicate";
 
 /**  A user-facing notice ("Skipped X: …", "Session expired"). */
 export type NoticeEvent = NoticeEvent_Serialize | NoticeEvent_Deserialize;
@@ -643,6 +783,75 @@ export type PlayerStateEvent_Deserialize = PlayerSnapshot_Deserialize;
 /**  `player:state`, sent on every change. */
 export type PlayerStateEvent_Serialize = PlayerSnapshot_Serialize;
 
+/**  Result of creating a playlist: the new id only when the service gave one. */
+export type PlaylistCreated = PlaylistCreated_Serialize | PlaylistCreated_Deserialize;
+
+/**  Result of creating a playlist: the new id only when the service gave one. */
+export type PlaylistCreated_Deserialize = {
+	outcome: MutationOutcome,
+	/**  `ytm:VL<id>`, for navigation. */
+	id?: ItemId | null,
+	/**  Bare playlist id for edits. */
+	playlistId?: string | null,
+};
+
+/**  Result of creating a playlist: the new id only when the service gave one. */
+export type PlaylistCreated_Serialize = {
+	outcome: MutationOutcome,
+	/**  `ytm:VL<id>`, for navigation. */
+	id: ItemId | null,
+	/**  Bare playlist id for edits. */
+	playlistId: string | null,
+};
+
+/**
+ *  Changes to a playlist's details. `None` leaves a field alone; an empty
+ *  description clears it.
+ */
+export type PlaylistEdit = PlaylistEdit_Serialize | PlaylistEdit_Deserialize;
+
+/**
+ *  Changes to a playlist's details. `None` leaves a field alone; an empty
+ *  description clears it.
+ */
+export type PlaylistEdit_Deserialize = {
+	title?: string | null,
+	description?: string | null,
+	privacy?: Privacy | null,
+};
+
+/**
+ *  Changes to a playlist's details. `None` leaves a field alone; an empty
+ *  description clears it.
+ */
+export type PlaylistEdit_Serialize = {
+	title: string | null,
+	description: string | null,
+	privacy: Privacy | null,
+};
+
+/**
+ *  A playlist was created, changed or deleted: sidebar, Library, the open
+ *  playlist and the "Add to playlist" menu refresh.
+ */
+export type PlaylistsEvent = PlaylistsEvent_Serialize | PlaylistsEvent_Deserialize;
+
+/**
+ *  A playlist was created, changed or deleted: sidebar, Library, the open
+ *  playlist and the "Add to playlist" menu refresh.
+ */
+export type PlaylistsEvent_Deserialize = {
+	playlistId?: string | null,
+};
+
+/**
+ *  A playlist was created, changed or deleted: sidebar, Library, the open
+ *  playlist and the "Add to playlist" menu refresh.
+ */
+export type PlaylistsEvent_Serialize = {
+	playlistId: string | null,
+};
+
 /**  2 Hz position anchor; the UI interpolates between anchors. */
 export type PositionAnchor = PositionAnchor_Serialize | PositionAnchor_Deserialize;
 
@@ -663,6 +872,8 @@ export type PositionAnchor_Serialize = {
 	duration: number | null,
 	playing: boolean,
 };
+
+export type Privacy = "public" | "unlisted" | "private";
 
 export type QueueEntry = QueueEntry_Serialize | QueueEntry_Deserialize;
 
@@ -798,6 +1009,15 @@ export type SearchResults_Serialize = {
 	playlists: CollectionCard_Serialize[],
 	didYouMean: string | null,
 	cursor: string | null,
+};
+
+/**  A stretch of the recording present in both versions, in seconds. */
+export type SharedSegment = {
+	/**  Start in the version that is playing now. */
+	fromStart: number | null,
+	/**  Start in the other version. */
+	toStart: number | null,
+	duration: number | null,
 };
 
 export type Shelf = Shelf_Serialize | Shelf_Deserialize;

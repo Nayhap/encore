@@ -98,7 +98,22 @@ $C lyrics 4D7u5KF7SP8
 $C auth profiles                     # browsers and profiles Encore can import from
 $C auth import-edge && $C auth select 0
 $C whoami && $C liked && $C playlists
+
+$C counterpart fa5IWHDbftI           # the song's music video, and the segment map if any
+$C history                           # signed in: day groups, newest first
+$C play 4D7u5KF7SP8 --secs 45 --report   # report the play, then read the history back
+$C history remove 4D7u5KF7SP8        # remove that play again
+
+$C playlist create "Encore test" --add 4D7u5KF7SP8   # private unless --privacy
+$C playlist add PL… 4D7u5KF7SP8      # "duplicate"; add --anyway to add it again
+$C playlist rename PL… "New name"
+$C playlist privacy PL… unlisted
+$C playlist move PL… 1 --before 0    # by row index
+$C playlist delete PL…
 ```
+
+Signed-in commands print outcomes, ping kinds and HTTP statuses only: never
+cookies, tokens or tracking URLs.
 
 ## Where Encore keeps things
 
@@ -119,6 +134,13 @@ All systems:
 - The first play of a song takes 5 to 8 seconds without an account, because
   YouTube delays stream links for signed-out listeners. The next song in the
   queue is prepared in the background to hide this.
+- Plays are reported to YouTube history only when signed in. If your YouTube
+  history is paused in your Google account, YouTube ignores them.
+- Some libraries report that YouTube refuses "Remove from history" for brand
+  channels. Encore shows when a removal was refused.
+- Signed out, YouTube gives no timeline map between a song and its video, so
+  switching versions starts the other one from the beginning. The video
+  version plays the video's audio; there is no video picture.
 
 macOS:
 

@@ -13,3 +13,6 @@ specta.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

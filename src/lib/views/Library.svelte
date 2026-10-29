@@ -3,7 +3,7 @@
   import { catalog } from "$lib/catalog.svelte";
   import { kindLabel } from "$lib/data";
   import { Resource } from "$lib/load.svelte";
-  import { account, collectionMenu, nav, player, ui } from "$lib/state.svelte";
+  import { account, collectionMenu, nav, newPlaylist, player, playlists, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Status from "$lib/components/Status.svelte";
@@ -29,6 +29,8 @@
   $effect(() => {
     filter;
     account.state.state;
+    // A playlist was created, renamed or deleted.
+    if (filter === "Playlists") playlists.rev;
     void page.reload();
   });
   // Keep loading pages so "Songs" and long lists are complete.
@@ -100,7 +102,7 @@
     {:else if layout === "grid"}
       <div class="grid">
         {#if filter === "Playlists"}
-          <button class="new" onclick={() => ui.say("Create playlists on music.youtube.com for now; they show up here")}>
+          <button class="new" onclick={() => newPlaylist()}>
             <span class="new-art"><Icon name="plus" size={30} stroke={1.5} /></span>
             <span class="t">New playlist</span>
           </button>
@@ -111,6 +113,14 @@
       </div>
     {:else}
       <ul class="list">
+        {#if filter === "Playlists"}
+          <li>
+            <button onclick={() => newPlaylist()}>
+              <span class="thumb new-thumb"><Icon name="plus" size={22} stroke={1.5} /></span>
+              <span class="txt"><span class="t ell">New playlist</span></span>
+            </button>
+          </li>
+        {/if}
         {#each cols as c (c.id)}
           <li>
             <button onclick={() => nav.go({ name: "collection", id: c.id })} oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}>
@@ -232,6 +242,18 @@
   .thumb {
     width: 52px;
     flex: none;
+  }
+  .new-thumb {
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    border-radius: 6px;
+    border: 1.5px dashed color-mix(in srgb, var(--text) 25%, transparent);
+    color: var(--mute);
+  }
+  .list button:hover .new-thumb {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .txt {
     flex: 1;

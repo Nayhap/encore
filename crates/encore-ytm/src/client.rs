@@ -37,8 +37,38 @@ struct State {
     session: Option<Session>,
 }
 
+/// Who requests go out as, frozen at one moment. A sequence of requests that
+/// must agree (a play's `/player` call and its pings) uses one snapshot, so a
+/// channel switch in between can't mix identities (D2).
+#[derive(Clone)]
+pub struct Identity {
+    session: Option<Session>,
+    version: String,
+    visitor: Option<String>,
+    epoch: u64,
+}
+
+impl Identity {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+    /// Signed in with a chosen channel.
+    pub fn signed_in(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.jar.has_login() && s.channel.is_some())
+    }
+    fn signed(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.jar.has_login())
+    }
+}
+
 pub struct InnerTube {
     http: reqwest::Client,
+    /// For stats pings: never follows redirects, so the session can't be
+    /// forwarded to another host.
+    stats_http: reqwest::Client,
     state: RwLock<State>,
     epoch: AtomicU64,
     hl: String,
@@ -57,8 +87,10 @@ impl InnerTube {
             .brotli(true)
             .build()
             .expect("http client");
+        let stats_http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build().expect("stats client");
         Arc::new(Self {
             http,
+            stats_http,
             state: RwLock::new(State { version: FALLBACK_VERSION.into(), version_at: None, visitor: None, session: None }),
             epoch: AtomicU64::new(1),
             hl: hl.into(),
@@ -143,7 +175,13 @@ impl InnerTube {
         }
     }
 
-    fn context(&self, client: Client, st: &State, signed: bool) -> Value {
+    /// The current identity, to pin a sequence of requests to.
+    pub fn identity(&self) -> Identity {
+        let st = self.state.read();
+        Identity { session: st.session.clone(), version: st.version.clone(), visitor: st.visitor.clone(), epoch: self.epoch() }
+    }
+
+    fn context(&self, client: Client, st: &Identity, signed: bool) -> Value {
         let mut c = match client {
             Client::WebRemix => json!({ "clientName": "WEB_REMIX", "clientVersion": st.version, "hl": self.hl, "gl": self.gl }),
             Client::AndroidMusic => json!({ "clientName": "ANDROID_MUSIC", "clientVersion": ANDROID_MUSIC_VERSION, "androidSdkVersion": 34, "osName": "Android", "osVersion": "14", "hl": self.hl, "gl": self.gl }),
@@ -161,12 +199,18 @@ impl InnerTube {
     }
 
     /// POST an InnerTube endpoint. `query` is appended (continuations).
-    pub async fn post(&self, client: Client, endpoint: &str, mut body: Value, query: &[(&str, &str)]) -> Result<Value> {
+    pub async fn post(&self, client: Client, endpoint: &str, body: Value, query: &[(&str, &str)]) -> Result<Value> {
         self.bootstrap().await;
-        let epoch = self.epoch();
+        let id = self.identity();
+        self.post_as(&id, client, endpoint, body, query).await
+    }
+
+    /// POST as a pinned identity (see [`Identity`]).
+    pub async fn post_as(&self, id: &Identity, client: Client, endpoint: &str, mut body: Value, query: &[(&str, &str)]) -> Result<Value> {
+        let epoch = id.epoch;
         let (url, req) = {
-            let st = self.state.read();
-            let signed = client == Client::WebRemix && st.session.as_ref().is_some_and(|s| s.jar.has_login());
+            let st = id;
+            let signed = client == Client::WebRemix && st.signed();
             body["context"] = self.context(client, &st, signed);
             let host = ORIGIN;
             let mut url = url::Url::parse(&format!("{host}/youtubei/v1/{endpoint}")).map_err(|e| AppError::internal(e.to_string()))?;
@@ -218,7 +262,10 @@ impl InnerTube {
             }
         })?;
         let status = resp.status().as_u16();
-        self.merge_cookies(&url, resp.headers());
+        // Rotated cookies belong to the identity that made the request.
+        if self.epoch() == epoch {
+            self.merge_cookies(&url, resp.headers());
+        }
         let text = resp.text().await.map_err(|_| AppError::network("The response from YouTube Music was interrupted."))?;
         tracing::info!(endpoint, status, ms = t0.elapsed().as_millis() as u64, bytes = text.len(), signed = self.has_cookies(), "innertube");
         if self.epoch() != epoch {
@@ -279,6 +326,50 @@ impl InnerTube {
         }
     }
 
+    /// GET a playback stats URL (history reporting, D18) as `id`. Only https
+    /// `s.youtube.com` / `www.youtube.com` / `music.youtube.com` URLs under
+    /// `/api/stats/` are accepted, redirects are not followed and response
+    /// cookies are not merged. Returns the HTTP status.
+    pub async fn stats_get(&self, id: &Identity, url: &url::Url) -> Result<u16> {
+        if !stats_url_ok(url) {
+            return Err(AppError::invalid("Refused to send a stats ping to an unexpected address."));
+        }
+        if id.epoch != self.epoch() {
+            return Err(AppError::stale());
+        }
+        let s = id.session.as_ref().filter(|s| s.jar.has_login()).ok_or_else(AppError::auth_required)?;
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let ch = s.channel.as_ref();
+        let user = ch.and_then(|c| c.page_id.as_ref().and(c.user_session_id.as_deref()));
+        let mut rb = self
+            .stats_http
+            .get(url.clone())
+            .header("User-Agent", WEB_UA)
+            .header("Accept", "*/*")
+            .header("X-YouTube-Client-Name", "67")
+            .header("X-YouTube-Client-Version", id.version.as_str())
+            .header("Origin", ORIGIN)
+            .header("X-Origin", ORIGIN)
+            .header("Referer", format!("{ORIGIN}/"))
+            .header("Cookie", s.jar.header_for(url))
+            .header("X-Goog-AuthUser", ch.map(|c| c.auth_user).unwrap_or(0).to_string());
+        if let Some(a) = sapisid_authorization(&s.jar, ORIGIN, ts, user) {
+            rb = rb.header("Authorization", a);
+        }
+        if let Some(p) = ch.and_then(|c| c.page_id.as_ref()) {
+            rb = rb.header("X-Goog-PageId", p.as_str());
+        }
+        if let Some(v) = &id.visitor {
+            rb = rb.header("X-Goog-Visitor-Id", v.as_str());
+        }
+        let t0 = Instant::now();
+        let resp = rb.send().await.map_err(|_| AppError::network("Could not reach YouTube for the play report."))?;
+        let status = resp.status().as_u16();
+        // The path says which ping it was; the query (ids, nonce) stays out of the log.
+        tracing::info!(path = url.path(), status, ms = t0.elapsed().as_millis() as u64, "stats ping");
+        Ok(status)
+    }
+
     /// Keep-alive: GET /verify_session and merge rotated cookies. Returns
     /// whether any cookie changed.
     pub async fn verify_session(&self) -> Result<bool> {
@@ -315,6 +406,16 @@ impl InnerTube {
     }
 }
 
+/// Stats pings carry the session, so they only go to YouTube's own stats paths.
+pub fn stats_url_ok(u: &url::Url) -> bool {
+    u.scheme() == "https"
+        && matches!(u.host_str(), Some("s.youtube.com" | "www.youtube.com" | "music.youtube.com"))
+        && u.port().is_none()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && matches!(u.path(), "/api/stats/playback" | "/api/stats/watchtime")
+}
+
 fn short(s: &str) -> String {
     let s = encore_core::redact::redact(s);
     if s.chars().count() > 120 { format!("{}…", s.chars().take(120).collect::<String>()) } else { s }
@@ -325,4 +426,23 @@ fn scrape(body: &str, marker: &str) -> Option<String> {
     let rest = &body[i..];
     let j = rest.find('"')?;
     Some(rest[..j].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_urls_are_restricted() {
+        let ok = |s: &str| stats_url_ok(&url::Url::parse(s).unwrap());
+        assert!(ok("https://s.youtube.com/api/stats/playback?docid=x"));
+        assert!(ok("https://s.youtube.com/api/stats/watchtime?docid=x"));
+        assert!(!ok("http://s.youtube.com/api/stats/playback"));
+        assert!(!ok("https://s.youtube.com.evil.example/api/stats/playback"));
+        assert!(!ok("https://evil.example/api/stats/playback"));
+        assert!(!ok("https://s.youtube.com:8443/api/stats/playback"));
+        assert!(!ok("https://user@s.youtube.com/api/stats/playback"));
+        assert!(!ok("https://s.youtube.com/api/stats/qoe"));
+        assert!(!ok("https://s.youtube.com/redirect?to=x"));
+    }
 }

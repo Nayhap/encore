@@ -26,7 +26,25 @@ function toTrack(t: M.MTrack): T.Track {
     counterpart: null,
   };
 }
-const track = (id: string) => toTrack(M.tracks.find((t) => t.id === raw(id))!);
+// Songs with a play count have a music video too (`<id>-mv`, 12 s of intro).
+const MV = "-mv";
+const INTRO = 12;
+function toVideo(t: M.MTrack): T.Track {
+  return { ...toTrack(t), id: mid(t.id + MV), album: null, duration: t.dur + INTRO, kind: "video", plays: t.plays ? `${t.plays} views` : null, liked: liked.has(mid(t.id + MV)), counterpart: null };
+}
+function track(id: string): T.Track {
+  const r = raw(id);
+  if (r.endsWith(MV)) return toVideo(M.tracks.find((t) => t.id === r.slice(0, -MV.length))!);
+  return toTrack(M.tracks.find((t) => t.id === r)!);
+}
+function counterpartOf(t: T.Track): T.Counterpart | null {
+  const r = raw(t.id);
+  const songId = r.endsWith(MV) ? r.slice(0, -MV.length) : r;
+  const m = M.tracks.find((x) => x.id === songId);
+  if (!m?.plays) return null;
+  if (r.endsWith(MV)) return { of: t.id, track: { ...toTrack(m), counterpart: t.id }, segments: [{ fromStart: INTRO, toStart: 0, duration: m.dur }] };
+  return { of: t.id, track: { ...toVideo(m), counterpart: t.id }, segments: [{ fromStart: 0, toStart: INTRO, duration: m.dur }] };
+}
 
 function kindOf(c: M.MCollection): T.CollectionKind {
   return c.kind === "album" ? "album" : c.kind === "single" ? "single" : c.kind === "mix" ? "mix" : c.id === "pl-liked" ? "liked" : "playlist";
@@ -55,6 +73,38 @@ const shelf = (title: string, items: T.ShelfItem[], layout: "carousel" | "list" 
 
 const liked = new Set<string>(M.collections.find((c) => c.id === "pl-liked")!.trackIds.map(mid));
 const delay = <T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
+
+// ---------- your playlists and history ----------
+
+const privacy = new Map<string, T.Privacy>([["pl-late", "private"], ["pl-jp", "public"], ["pl-rain", "unlisted"]]);
+let setN = 0;
+const setIds = new Map<string, string[]>();
+function setsOf(c: M.MCollection) {
+  let s = setIds.get(c.id);
+  if (!s || s.length !== c.trackIds.length) {
+    s = c.trackIds.map(() => `sv${++setN}`);
+    setIds.set(c.id, s);
+  }
+  return s;
+}
+const mine = (id: string) => M.collections.find((c) => c.id === raw(id).replace(/^VL/, "") && c.by === "You");
+const changed = (id: string | null) => h?.playlists({ playlistId: id ? mid(id) : null });
+
+let rowN = 0;
+const row = (id: string): T.HistoryRow => ({ rowId: `h${++rowN}`, track: track(id), removable: true });
+const hist: { title: string; rows: T.HistoryRow[] }[] = [
+  { title: "Today", rows: [] },
+  { title: "Yesterday", rows: M.tracks.slice(8, 12).map((t) => row(t.id)) },
+  { title: "Last week", rows: [...M.tracks.slice(20, 23).map((t) => row(t.id)), row(M.tracks[0].id + MV), ...M.tracks.slice(30, 33).map((t) => row(t.id))] },
+];
+hist[0].rows = [M.tracks[3], M.tracks[14], M.tracks[0]].map((t) => row(t.id));
+let reportHistory = true;
+function played(t: T.Track) {
+  if (!reportHistory || auth.state !== "signedIn") return;
+  hist[0].rows.unshift({ rowId: `h${++rowN}`, track: t, removable: true });
+  h?.history({ trackId: t.id });
+}
+
 
 // ---------- simulated player ----------
 
@@ -114,15 +164,17 @@ function shuffled<X>(xs: X[]) {
   }
   return a;
 }
-function go(i: number) {
+function go(i: number, at = 0) {
   P.index = i;
-  P.position = 0;
+  P.position = at;
   P.playing = true;
   P.phase = "playing";
   tgen++;
   publish(true);
   anchor();
   sendLyrics();
+  const t = P.entries[i]?.track;
+  if (t) setTimeout(() => P.playing && P.entries[P.index ?? -1]?.track.id === t.id && played(t), 2000);
 }
 function sendLyrics() {
   const cur = P.index != null ? P.entries[P.index] : null;
@@ -212,6 +264,7 @@ export const mockApi: Api = {
     setTimeout(sendLyrics, 50);
     return delay({
       version: "mock",
+      reportHistory,
       auth,
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
@@ -276,8 +329,8 @@ export const mockApi: Api = {
     return delay({
       id: mid(c.id), kind: kindOf(c), title: c.title, subtitle: card(c).subtitle, artists: card(c).artists, year: c.year ?? null, art: art(c.art),
       description: c.desc ?? null, stats: `${c.trackIds.length} songs`, trackCount: c.trackIds.length,
-      entries: c.trackIds.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null, videoId: track(t).id })),
-      cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", related: [],
+      entries: c.trackIds.map((t, i) => ({ entryId: c.by === "You" ? setsOf(c)[i] : `${t}#${i}`, track: track(t), setVideoId: c.by === "You" ? setsOf(c)[i] : null, videoId: track(t).id })),
+      cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
     });
   },
   collectionMore: async () => ({ entries: [], cursor: null }),
@@ -437,8 +490,104 @@ export const mockApi: Api = {
   },
   setSaved: async () => "done",
   setSubscribed: async () => "done",
-  playlistAdd: async () => "done",
-  playlistRemove: async () => "done",
+  async playlistAdd(p, ids, dup) {
+    const c = mine(p);
+    if (!c) return delay("rejected" as const);
+    const add = ids.map(raw);
+    if (!dup && add.some((id) => c.trackIds.includes(id))) return delay("duplicate" as const);
+    const sets = setsOf(c);
+    for (const id of add) {
+      c.trackIds.push(id);
+      sets.push(`sv${++setN}`);
+    }
+    changed(c.id);
+    return delay("done" as const);
+  },
+  async playlistRemove(p, entries) {
+    const c = mine(p);
+    if (!c) return "rejected";
+    const sets = setsOf(c);
+    const drop = new Set(entries.map((e) => e.setVideoId));
+    const keep = c.trackIds.map((t, i) => [t, sets[i]] as const).filter(([, sv]) => !drop.has(sv));
+    c.trackIds = keep.map((k) => k[0]);
+    setIds.set(c.id, keep.map((k) => k[1]));
+    changed(c.id);
+    return "done";
+  },
+  async playlistCreate(title, description, pr, ids) {
+    const id = `pl-new-${Date.now().toString(36)}`;
+    const seed = 300 + M.collections.length;
+    M.collections.push({ id, kind: "playlist", title: title.trim(), by: "You", art: { seed, h1: (seed * 47) % 360, h2: (seed * 91) % 360, motif: "orbit" }, trackIds: ids.map(raw), desc: description || undefined });
+    privacy.set(id, pr);
+    changed(id);
+    return delay({ outcome: "done" as const, id: mid(id), playlistId: id }, 300);
+  },
+  async playlistEdit(p, e) {
+    const c = mine(p);
+    if (!c) return "rejected";
+    if (e.title != null) c.title = e.title.trim();
+    if (e.description != null) c.desc = e.description || undefined;
+    if (e.privacy) privacy.set(c.id, e.privacy);
+    changed(c.id);
+    return delay("done" as const, 250);
+  },
+  async playlistDelete(p) {
+    const c = mine(p);
+    if (!c) return "rejected";
+    M.collections.splice(M.collections.indexOf(c), 1);
+    changed(c.id);
+    return delay("done" as const, 250);
+  },
+  async playlistMove(p, sv, before) {
+    const c = mine(p);
+    if (!c) return "rejected";
+    const sets = setsOf(c);
+    const from = sets.indexOf(sv);
+    if (from < 0) return "rejected";
+    const [t] = c.trackIds.splice(from, 1);
+    const [s1] = sets.splice(from, 1);
+    const to = before ? sets.indexOf(before) : sets.length;
+    c.trackIds.splice(to < 0 ? sets.length : to, 0, t);
+    sets.splice(to < 0 ? sets.length : to, 0, s1);
+    return delay("done" as const, 150);
+  },
+  async history() {
+    if (auth.state !== "signedIn") throw { code: "authRequired", message: "Sign in to YouTube Music to use this.", retryable: false, action: "signIn" };
+    return delay({ groups: hist.filter((g) => g.rows.length), notice: null, paused: false, cursor: null });
+  },
+  historyMore: async () => ({ groups: [], notice: null, paused: false, cursor: null }),
+  async historyRemove(ids) {
+    for (const g of hist) g.rows = g.rows.filter((r) => !ids.includes(r.rowId));
+    return delay("done" as const, 200);
+  },
+  counterpart: (t) => delay(counterpartOf(t), 150),
+  async switchVersion(u) {
+    const i = P.entries.findIndex((e) => e.uid === u);
+    const e = P.entries[i];
+    const c = e && counterpartOf(e.track);
+    if (!c) throw { code: "notFound", message: "YouTube Music has no other version of this.", retryable: false, action: null };
+    const seg = c.segments.find((s) => P.position >= (s.fromStart ?? 0) && P.position < (s.fromStart ?? 0) + (s.duration ?? 0));
+    const at = i === P.index && seg ? (seg.toStart ?? 0) + (P.position - (seg.fromStart ?? 0)) : 0;
+    P.entries[i] = { ...e, track: c.track };
+    if (i !== P.index) return publish(true);
+    const was = P.playing;
+    go(i, at);
+    if (!was) {
+      P.playing = false;
+      P.phase = "paused";
+      publish();
+      anchor();
+    }
+  },
+  async playVersion(t) {
+    const c = counterpartOf(t);
+    if (!c) throw { code: "notFound", message: "YouTube Music has no other version of this.", retryable: false, action: null };
+    await mockApi.playNext([c.track]);
+    if (P.index != null && P.entries.length > 1) go(P.index + 1);
+  },
+  async setReportHistory(on) {
+    reportHistory = on;
+  },
   authState: async () => auth,
   browserProfiles: async () => [{ id: "edge:Default", browser: "Microsoft Edge", name: "Profile 1" }],
   async importBrowser() {

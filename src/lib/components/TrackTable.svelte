@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Track } from "$lib/backend";
   import { artistLine, fmt } from "$lib/data";
-  import { nav, player, trackMenu, ui } from "$lib/state.svelte";
+  import { nav, player, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
 
@@ -12,13 +12,42 @@
     showAlbum = true,
     showArt = true,
     showPlays = false,
+    head = true,
     onremove,
-  }: { tracks: Track[]; label: string; collectionId?: string; showAlbum?: boolean; showArt?: boolean; showPlays?: boolean; onremove?: (index: number) => void } = $props();
+    extraMenu,
+    endMenu,
+    reorder,
+  }: {
+    tracks: Track[];
+    label: string;
+    collectionId?: string;
+    showAlbum?: boolean;
+    showArt?: boolean;
+    showPlays?: boolean;
+    /** Show the column header row. */
+    head?: boolean;
+    onremove?: (index: number) => void;
+    /** Row-specific actions, listed first in the row's menu. */
+    extraMenu?: (index: number) => MenuItem[];
+    /** Row-specific actions, listed last. */
+    endMenu?: (index: number) => MenuItem[];
+    /** Drag rows to reorder: the row at `from` takes the place of `to`. */
+    reorder?: (from: number, to: number) => void;
+  } = $props();
 
   const menuFor = (i: number) => {
     const items = trackMenu(tracks[i].id);
-    return onremove ? [{ label: "Remove from this playlist", icon: "x", run: () => onremove(i) }, ...items] : items;
+    const extra = extraMenu?.(i) ?? [];
+    const rm = onremove ? [{ label: "Remove from this playlist", icon: "x", run: () => onremove(i) }] : [];
+    return [...extra, ...rm, ...items, ...(endMenu?.(i) ?? [])];
   };
+
+  let dragFrom = $state<number | null>(null);
+  let dragOver = $state<number | null>(null);
+  function drop(k: number) {
+    if (reorder && dragFrom !== null && dragFrom !== k) reorder(dragFrom, k);
+    dragFrom = dragOver = null;
+  }
 
   const play = (i: number) => {
     const t = tracks[i];
@@ -36,14 +65,14 @@
 </script>
 
 <div class="table" class:no-album={!showAlbum} class:plays={showPlays} role="table" aria-label="{label} songs">
-  <div class="row head" role="row">
+  {#if head}<div class="row head" role="row">
     <span role="columnheader">#</span>
     <span role="columnheader">Title</span>
     {#if showAlbum}<span role="columnheader">Album</span>{/if}
     {#if showPlays}<span role="columnheader" class="r">Plays</span>{/if}
     <span role="columnheader" class="r"><Icon name="clock" size={15} /></span>
     <span></span>
-  </div>
+  </div>{/if}
   {#each tracks as t, i (t.id + ":" + i)}
     {@const id = t.id}
     {@const current = player.current?.id === id}
@@ -52,6 +81,14 @@
       class="row"
       class:current
       class:unplayable={!t.playable}
+      class:over={reorder && dragOver === i && dragFrom !== null && dragFrom !== i}
+      class:below={reorder && dragOver === i && dragFrom !== null && dragFrom < i}
+      class:dragging={dragFrom === i}
+      draggable={reorder ? "true" : undefined}
+      ondragstart={reorder ? (e) => { dragFrom = i; e.dataTransfer!.effectAllowed = "move"; } : undefined}
+      ondragover={reorder ? (e) => { e.preventDefault(); dragOver = i; } : undefined}
+      ondragend={reorder ? () => (dragFrom = dragOver = null) : undefined}
+      ondrop={reorder ? () => drop(i) : undefined}
       role="row"
       tabindex="0"
       ondblclick={() => play(i)}
@@ -113,6 +150,26 @@
 <style>
   .row.unplayable {
     opacity: 0.45;
+  }
+  .row {
+    position: relative;
+  }
+  .row.over::before {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: -1px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .row.over.below::before {
+    top: auto;
+    bottom: -1px;
+  }
+  .row.dragging {
+    opacity: 0.4;
   }
   .table {
     --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 96px 40px;

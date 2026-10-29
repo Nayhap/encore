@@ -496,6 +496,16 @@ fn link_if_supported(title: String, bid: String, params: Option<String>) -> Opti
 
 /// `playlistPanelVideoRenderer` (up next / radio).
 pub fn panel_video(r: &Value) -> Option<Track> {
+    panel_video_with(r, true)
+}
+
+/// A panel item exactly as listed: a video stays the video (used for the
+/// two halves of a song/video pair).
+pub fn panel_video_as_is(r: &Value) -> Option<Track> {
+    panel_video_with(r, false)
+}
+
+fn panel_video_with(r: &Value, resolve_song: bool) -> Option<Track> {
     let vid = r.get("videoId").and_then(Value::as_str).or_else(|| find(r.get("navigationEndpoint")?, "videoId").and_then(Value::as_str))?;
     let title = r.get("title").and_then(text_opt)?;
     let meta = meta_from_runs(r.get("longBylineText").map(runs).unwrap_or(&[]));
@@ -513,7 +523,7 @@ pub fn panel_video(r: &Value) -> Option<Track> {
     // An album queue lists its music videos; play the album's song (D4: the
     // video stays as the counterpart). Length and like state are the
     // video's, so they are dropped; the stream gives the real length.
-    let song = matches!(kind, TrackKind::Video | TrackKind::Unknown).then(|| ne.get("watchEndpoint").and_then(|w| queue_song(w, vid))).flatten();
+    let song = (resolve_song && matches!(kind, TrackKind::Video | TrackKind::Unknown)).then(|| ne.get("watchEndpoint").and_then(|w| queue_song(w, vid))).flatten();
     let (id, counterpart) = match song {
         Some(s) => {
             kind = TrackKind::Song;

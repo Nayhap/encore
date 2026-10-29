@@ -16,6 +16,10 @@ use encore_ytm::{InnerTube, YtMusic};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// Settings scope and keys in the store (D11).
+pub const SETTINGS: &str = "settings";
+pub const REPORT_HISTORY: &str = "report_history";
+
 pub struct Paths {
     pub data: PathBuf,
     pub cache: PathBuf,
@@ -84,6 +88,8 @@ impl Core {
         let resolver = YtDlpResolver::new(ResolverConfig { root: paths.data.join("resolver"), cache_dir: paths.cache.join("yt-dlp") });
         let audio_cache = AudioCache::new(paths.cache.join("audio"), encore_audio::cache::DEFAULT_LIMIT).map_err(|e| AppError::internal(format!("audio cache: {}", e.kind())))?;
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;
+        // On unless turned off (it only ever reports for a signed-in account).
+        player.set_reporting(store.get::<bool>(SETTINGS, REPORT_HISTORY).ok().flatten().unwrap_or(true));
         let lyrics = Arc::new(LyricsService::new(ytm.clone(), Some(store.clone())));
         let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone()));
         let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths });

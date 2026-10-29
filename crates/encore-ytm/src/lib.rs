@@ -2,9 +2,12 @@
 
 pub mod account;
 pub mod client;
+pub mod history;
 pub mod pages;
 pub mod parse;
+pub mod playlists;
 pub mod scrub;
+pub mod tracking;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +17,7 @@ use async_trait::async_trait;
 use encore_auth::Session;
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
-use encore_core::service::{Capabilities, MusicService, RequestContext};
+use encore_core::service::{Capabilities, MusicService, PlayReport, PlayReporter, RequestContext};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -33,6 +36,7 @@ enum CursorKind {
         section: LibrarySection,
     },
     Radio { playlist_id: Option<String> },
+    History,
 }
 
 #[derive(Clone)]
@@ -68,9 +72,38 @@ impl Cursors {
     }
 }
 
+/// History removal tokens behind opaque row ids: in memory only, bound to
+/// the account epoch, expiring with the cursors (D19).
+#[derive(Default)]
+struct RowTokens {
+    map: Mutex<HashMap<String, (String, u64, Instant)>>,
+}
+
+impl RowTokens {
+    fn put(&self, token: String, epoch: u64) -> String {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut m = self.map.lock();
+        m.retain(|_, r| r.2.elapsed() < CURSOR_TTL);
+        m.insert(id.clone(), (token, epoch, Instant::now()));
+        id
+    }
+    fn get(&self, id: &str, epoch: u64) -> Option<String> {
+        self.map.lock().get(id).filter(|r| r.1 == epoch && r.2.elapsed() < CURSOR_TTL).map(|r| r.0.clone())
+    }
+    fn forget(&self, id: &str) {
+        self.map.lock().remove(id);
+    }
+}
+
+const PAIR_TTL: Duration = Duration::from_secs(30 * 60);
+const NO_PAIR_TTL: Duration = Duration::from_secs(10 * 60);
+
 pub struct YtMusic {
     pub it: Arc<InnerTube>,
     cursors: Cursors,
+    rows: RowTokens,
+    /// Song/video pairs by (account, track id); absences expire sooner.
+    pairs: Mutex<HashMap<(String, String), (Option<Counterpart>, Instant)>>,
 }
 
 fn parse_err(e: String) -> AppError {
@@ -100,6 +133,21 @@ fn library_browse(s: LibrarySection) -> &'static str {
     }
 }
 
+fn norm(s: &str) -> String {
+    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A title without the usual version labels: "Song (Official Video)" is "song".
+fn norm_title(s: &str) -> String {
+    let mut t = norm(s);
+    for tag in ["official music video", "official video", "official audio", "official visualizer", "lyric video", "lyrics", "audio", "video", "hd", "4k", "remastered"] {
+        for (o, c) in [("(", ")"), ("[", "]")] {
+            t = t.replace(&format!("{o}{tag}{c}"), "");
+        }
+    }
+    norm(t.trim_end_matches(|c: char| c == '-' || c.is_whitespace()))
+}
+
 fn status_ok(v: &Value) -> MutationOutcome {
     match v.get("status").and_then(Value::as_str) {
         Some("STATUS_SUCCEEDED") | None => MutationOutcome::Done,
@@ -118,7 +166,7 @@ fn write_result(r: Result<Value>) -> Result<MutationOutcome> {
 
 impl YtMusic {
     pub fn new(it: Arc<InnerTube>) -> Self {
-        Self { it, cursors: Cursors::default() }
+        Self { it, cursors: Cursors::default(), rows: RowTokens::default(), pairs: Mutex::new(HashMap::new()) }
     }
 
     fn check(&self, ctx: &RequestContext) -> Result<()> {
@@ -152,6 +200,65 @@ impl YtMusic {
         let mut page = p.value;
         page.cursor = self.cursors.put(CursorKind::Shelves, p.cont, epoch);
         page
+    }
+
+    fn history_page(&self, raw: history::RawHistory, epoch: u64) -> HistoryPage {
+        let groups = raw
+            .groups
+            .into_iter()
+            .map(|g| HistoryGroup {
+                title: g.title,
+                rows: g
+                    .rows
+                    .into_iter()
+                    .map(|(track, token)| {
+                        let removable = token.is_some();
+                        let row_id = match token {
+                            Some(t) => self.rows.put(t, epoch),
+                            None => uuid::Uuid::new_v4().simple().to_string(),
+                        };
+                        HistoryRow { row_id, track, removable }
+                    })
+                    .collect(),
+            })
+            .collect();
+        HistoryPage { groups, notice: raw.notice, paused: raw.paused, cursor: self.cursors.put(CursorKind::History, raw.cont, epoch) }
+    }
+
+    async fn edit(&self, playlist_id: &str, actions: Vec<Value>) -> Result<MutationOutcome> {
+        if actions.is_empty() {
+            return Ok(MutationOutcome::Done);
+        }
+        match self.it.post(Client::WebRemix, "browse/edit_playlist", playlists::edit_body(playlist_id, actions), &[]).await {
+            Ok(v) => Ok(playlists::edit_outcome(&v)),
+            Err(e) if e.code == ErrorCode::Network => Ok(MutationOutcome::OutcomeUnknown),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Last resort for a pair: a search for the other kind, accepted only
+    /// on the same title, the same first artist and a length within 5 s.
+    async fn counterpart_by_search(&self, ctx: &RequestContext, t: &Track) -> Result<Option<Counterpart>> {
+        let (filter, want) = match t.kind {
+            TrackKind::Song => (SearchFilter::Videos, TrackKind::Video),
+            TrackKind::Video => (SearchFilter::Songs, TrackKind::Song),
+            _ => return Ok(None),
+        };
+        let (Some(artist), Some(dur)) = (t.artists.first(), t.duration) else { return Ok(None) };
+        let r = self.search(ctx, &format!("{} {}", t.title, artist.name), Some(filter)).await?;
+        let pool = if want == TrackKind::Video { r.videos } else { r.songs };
+        let title = norm_title(&t.title);
+        let found = pool.into_iter().find(|c| {
+            c.id != t.id
+                && norm_title(&c.title) == title
+                && c.artists.first().is_some_and(|a| norm(&a.name) == norm(&artist.name))
+                && c.duration.is_some_and(|d| (d - dur).abs() <= 5.0)
+        });
+        Ok(found.map(|mut track| {
+            track.kind = want;
+            track.counterpart = Some(t.id.clone());
+            Counterpart { of: t.id.clone(), track, segments: vec![] }
+        }))
     }
 
     /// `account/accounts_list` for the signed-in cookies: the channel picker.
@@ -427,12 +534,11 @@ impl MusicService for YtMusic {
         write_result(self.it.post(Client::WebRemix, ep, json!({ "channelIds": [channel_id] }), &[]).await)
     }
 
-    async fn playlist_add(&self, ctx: &RequestContext, playlist_id: &str, tracks: &[ItemId]) -> Result<MutationOutcome> {
+    async fn playlist_add(&self, ctx: &RequestContext, playlist_id: &str, tracks: &[ItemId], allow_duplicates: bool) -> Result<MutationOutcome> {
         self.check(ctx)?;
         self.require_auth()?;
-        let pl = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
-        let actions: Vec<Value> = tracks.iter().map(|t| json!({ "action": "ACTION_ADD_VIDEO", "addedVideoId": t.remote() })).collect();
-        write_result(self.it.post(Client::WebRemix, "browse/edit_playlist", json!({ "playlistId": pl, "actions": actions }), &[]).await)
+        let ids: Vec<&str> = tracks.iter().map(|t| t.remote()).collect();
+        self.edit(playlist_id, playlists::add_actions(&ids, allow_duplicates)).await
     }
 
     async fn playlist_remove(&self, ctx: &RequestContext, playlist_id: &str, entries: &[(ItemId, String)]) -> Result<MutationOutcome> {
@@ -441,6 +547,143 @@ impl MusicService for YtMusic {
         let pl = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
         let actions: Vec<Value> = entries.iter().map(|(t, s)| json!({ "action": "ACTION_REMOVE_VIDEO", "removedVideoId": t.remote(), "setVideoId": s })).collect();
         write_result(self.it.post(Client::WebRemix, "browse/edit_playlist", json!({ "playlistId": pl, "actions": actions }), &[]).await)
+    }
+
+    async fn playlist_create(&self, ctx: &RequestContext, title: &str, description: &str, privacy: Privacy, tracks: &[ItemId]) -> Result<PlaylistCreated> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        let title = playlists::check_title(title).map_err(AppError::invalid)?;
+        let description = playlists::check_description(description).map_err(AppError::invalid)?;
+        let ids: Vec<&str> = tracks.iter().map(|t| t.remote()).collect();
+        match self.it.post(Client::WebRemix, "playlist/create", playlists::create_body(&title, &description, privacy, &ids), &[]).await {
+            Ok(v) => Ok(match playlists::created(&v) {
+                Some(pl) => PlaylistCreated { outcome: MutationOutcome::Done, id: Some(ItemId::ytm(&format!("VL{pl}"))), playlist_id: Some(pl) },
+                None => PlaylistCreated { outcome: MutationOutcome::Rejected, id: None, playlist_id: None },
+            }),
+            // Maybe created, maybe not: never create again on our own.
+            Err(e) if e.code == ErrorCode::Network => Ok(PlaylistCreated { outcome: MutationOutcome::OutcomeUnknown, id: None, playlist_id: None }),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn playlist_edit(&self, ctx: &RequestContext, playlist_id: &str, edit: &PlaylistEdit) -> Result<MutationOutcome> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        let mut e = edit.clone();
+        if let Some(t) = &e.title {
+            e.title = Some(playlists::check_title(t).map_err(AppError::invalid)?);
+        }
+        if let Some(d) = &e.description {
+            e.description = Some(playlists::check_description(d).map_err(AppError::invalid)?);
+        }
+        self.edit(playlist_id, playlists::edit_actions(&e)).await
+    }
+
+    async fn playlist_delete(&self, ctx: &RequestContext, playlist_id: &str) -> Result<MutationOutcome> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        match self.it.post(Client::WebRemix, "playlist/delete", json!({ "playlistId": playlists::bare(playlist_id) }), &[]).await {
+            Ok(v) => Ok(playlists::delete_outcome(&v)),
+            Err(e) if e.code == ErrorCode::Network => Ok(MutationOutcome::OutcomeUnknown),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn playlist_move(&self, ctx: &RequestContext, playlist_id: &str, set_video_id: &str, before: Option<&str>) -> Result<MutationOutcome> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        if before == Some(set_video_id) {
+            return Ok(MutationOutcome::Done);
+        }
+        self.edit(playlist_id, vec![playlists::move_action(set_video_id, before)]).await
+    }
+
+    async fn history(&self, ctx: &RequestContext) -> Result<HistoryPage> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        let v = self.browse("FEmusic_history", None).await?;
+        if parse::is_signed_out(&v) {
+            return Err(AppError::session_expired());
+        }
+        let raw = history::history(&v).map_err(parse_err)?;
+        self.check(ctx)?;
+        Ok(self.history_page(raw, ctx.epoch))
+    }
+
+    async fn history_more(&self, ctx: &RequestContext, cursor: &str) -> Result<HistoryPage> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        let c = self.cursors.take(cursor, ctx.epoch)?;
+        let CursorKind::History = c.kind else { return Err(AppError::invalid("Not a history cursor.")) };
+        let v = self.continue_browse("browse", &c.cont, json!({})).await?;
+        let mut raw = history::history_continuation(&v).map_err(parse_err)?;
+        // Stop on a repeated token or an empty page.
+        if raw.groups.is_empty() || raw.cont.as_ref() == Some(&c.cont) {
+            raw.cont = None;
+        }
+        Ok(self.history_page(raw, ctx.epoch))
+    }
+
+    async fn history_remove(&self, ctx: &RequestContext, row_ids: &[String]) -> Result<MutationOutcome> {
+        self.check(ctx)?;
+        self.require_auth()?;
+        let tokens: Vec<String> = row_ids.iter().filter_map(|r| self.rows.get(r, ctx.epoch)).collect();
+        if tokens.is_empty() || tokens.len() != row_ids.len() {
+            return Err(AppError::new(ErrorCode::Stale, "This history list is out of date. Reload it and try again."));
+        }
+        let out = match self.it.post(Client::WebRemix, "feedback", json!({ "feedbackTokens": tokens }), &[]).await {
+            Ok(v) => history::feedback_outcome(&v),
+            Err(e) if e.code == ErrorCode::Network => MutationOutcome::OutcomeUnknown,
+            Err(e) => return Err(e),
+        };
+        if out == MutationOutcome::Done {
+            row_ids.iter().for_each(|r| self.rows.forget(r));
+        }
+        Ok(out)
+    }
+
+    async fn counterpart(&self, ctx: &RequestContext, track: &Track) -> Result<Option<Counterpart>> {
+        self.check(ctx)?;
+        let key = (ctx.account.clone(), track.id.0.clone());
+        if let Some((c, at)) = self.pairs.lock().get(&key).cloned() {
+            if at.elapsed() < if c.is_some() { PAIR_TTL } else { NO_PAIR_TTL } {
+                return Ok(c);
+            }
+        }
+        let id = &track.id;
+        // 1. The service's own pairing in `next`, with the timeline map.
+        let mut found = None;
+        for body in [json!({ "videoId": id.remote(), "isAudioOnly": true }), json!({ "videoId": id.remote(), "playlistId": format!("RDAMVM{}", id.remote()), "isAudioOnly": true, "params": "wAEB" })] {
+            let v = self.it.post(Client::WebRemix, "next", body, &[]).await?;
+            if let Some(c) = pages::counterpart(&v, id) {
+                found = Some(c);
+                break;
+            }
+        }
+        // A pairing already known for this track (album rows, D4) wins over a
+        // different one.
+        if let Some(known) = &track.counterpart {
+            if found.as_ref().is_none_or(|c| &c.track.id != known) {
+                found = match self.track(ctx, known).await {
+                    Ok(mut t) => {
+                        if t.kind == TrackKind::Unknown {
+                            t.kind = if track.kind == TrackKind::Song { TrackKind::Video } else { TrackKind::Song };
+                        }
+                        t.counterpart = Some(id.clone());
+                        Some(Counterpart { of: id.clone(), track: t, segments: vec![] })
+                    }
+                    Err(e) if e.code == ErrorCode::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+        // 2. A strictly matching search result.
+        if found.is_none() {
+            found = self.counterpart_by_search(ctx, track).await?;
+        }
+        self.check(ctx)?;
+        self.pairs.lock().insert(key, (found.clone(), Instant::now()));
+        Ok(found)
     }
 
     async fn lyrics(&self, ctx: &RequestContext, id: &ItemId) -> Result<Option<Lyrics>> {
@@ -456,5 +699,42 @@ impl MusicService for YtMusic {
         }
         let w = self.browse(&bid, None).await?;
         Ok(pages::plain_lyrics(&w, id))
+    }
+}
+
+#[async_trait]
+impl PlayReporter for YtMusic {
+    async fn open_report(&self, id: &ItemId) -> Result<Option<Arc<dyn PlayReport>>> {
+        self.it.bootstrap().await;
+        // Pinned now: the `/player` call and every ping of this play go out
+        // as this identity.
+        let ident = self.it.identity();
+        if !ident.signed_in() {
+            return Ok(None);
+        }
+        let body = json!({
+            "videoId": id.remote(),
+            "playbackContext": { "contentPlaybackContext": { "referer": format!("{}/watch?v={}", client::ORIGIN, id.remote()) } },
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+        });
+        let v = self.it.post_as(&ident, Client::WebRemix, "player", body, &[]).await?;
+        let Some(tracking) = tracking::PlaybackTracking::from_player(&v) else {
+            tracing::info!(video = %id, "play not reportable (no tracking for this account)");
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(tracking::YtReport { it: self.it.clone(), id: ident, tracking, cpn: tracking::cpn() })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn titles_compare_without_version_labels() {
+        assert_eq!(norm_title("Harder, Better, Faster, Stronger (Official Video)"), norm_title("Harder, Better, Faster, Stronger"));
+        assert_eq!(norm_title("One More Time [Official Music Video]"), "one more time");
+        assert_ne!(norm_title("One More Time (Live)"), norm_title("One More Time"));
     }
 }
