@@ -203,6 +203,9 @@ pub fn run() {
             });
         })
         .setup(move |app| {
+            // Off macOS the window is built here, with the chosen title bar.
+            #[cfg(not(target_os = "macos"))]
+            window::create_main(app.handle())?;
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
             let core = tauri::async_runtime::block_on(async { Core::new() }).map_err(|e| e.message)?;
@@ -251,10 +254,7 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 window::round_corners(&w);
             }
-            #[cfg(not(target_os = "macos"))]
-            if let Some(w) = app.get_webview_window("main") {
-                window::show_with_chrome(&w);
-            }
+
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let h = app.handle().clone();

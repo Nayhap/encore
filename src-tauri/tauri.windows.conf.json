@@ -11,7 +11,7 @@
         "decorations": false,
         "shadow": true,
         "backgroundColor": "#0e1014",
-        "visible": false
+        "create": false
       }
     ]
   },

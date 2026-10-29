@@ -16,14 +16,13 @@ pub fn system_titlebar() -> bool {
     titlebar_marker().exists()
 }
 
-/// Off macOS the window starts hidden (see tauri.*.conf.json); give it the
-/// chosen chrome, then show it.
+/// Off macOS the main window isn't created from the config (`create: false`
+/// in tauri.*.conf.json) so it can be built with the chosen chrome. GTK
+/// can't add a title bar to a window that already exists.
 #[cfg(not(target_os = "macos"))]
-pub fn show_with_chrome(window: &tauri::WebviewWindow) {
-    if system_titlebar() {
-        let _ = window.set_decorations(true);
-    }
-    let _ = window.show();
+pub fn create_main(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let cfg = app.config().app.windows.first().cloned().unwrap_or_default();
+    tauri::WebviewWindowBuilder::from_config(app, &cfg)?.decorations(system_titlebar()).build()
 }
 
 /// Saves the title bar choice. Windows applies it at once; Linux restarts
