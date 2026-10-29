@@ -376,7 +376,7 @@ class UI {
   /** Windows and Linux: use the OS title bar instead of Encore's buttons. */
   systemTitlebar = $state(localStorage.getItem("titlebar") === "system");
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  toast = $state<{ text: string; id: number } | null>(null);
+  toast = $state<{ text: string; id: number; ms: number; level: "info" | "warn" | "error" } | null>(null);
   sheet = $state<PlaylistSheet | null>(null);
   confirm = $state<Confirm | null>(null);
   /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
@@ -384,12 +384,15 @@ class UI {
   /** Bumps when a play was reported, so History can refresh. */
   historyRev = $state(0);
 
-  say(text: string) {
+  /** A short message above the player bar. Longer messages (errors that
+   *  say what to do) stay up long enough to read. */
+  say(text: string, level: "info" | "warn" | "error" = "info") {
     const id = Date.now();
-    this.toast = { text, id };
+    const ms = Math.min(14000, Math.max(2400, 1200 + text.length * 55)) + (level === "info" ? 0 : 2000);
+    this.toast = { text, id, ms, level };
     setTimeout(() => {
       if (this.toast?.id === id) this.toast = null;
-    }, 3200);
+    }, ms + 400);
   }
 
   lastMenuAt = { x: 200, y: 200 };
@@ -665,7 +668,7 @@ export async function connect() {
       auth: (s) => (account.state = s),
       lyrics: (l) => player.setLyrics(l.trackId, l.lyrics),
       artHue: (h) => catalog.hues.set(h.key, [h.h1, h.h2]),
-      notice: (n) => ui.say(n.text),
+      notice: (n) => ui.say(n.text, n.level === "error" ? "error" : n.level === "warn" ? "warn" : "info"),
       signin: (s) => (account.signin = { stage: s.stage, message: s.message }),
       playlists: (e) => playlists.changed(e.playlistId),
       history: () => ui.historyRev++,

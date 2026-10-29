@@ -107,9 +107,12 @@
 
 {#if ui.toast}
   {#key ui.toast.id}
-    <div class="toast" role="status">
-      <Icon name="check" size={16} />
-      {ui.toast.text}
+    <div class="toast" class:long={ui.toast.text.length > 70} class:alert={ui.toast.level !== "info"} role={ui.toast.level === "info" ? "status" : "alert"} style:--toast-ms="{ui.toast.ms}ms">
+      {#if ui.toast.level === "info"}<Icon name="check" size={16} />{/if}
+      <span>{ui.toast.text}</span>
+      {#if ui.toast.level !== "info"}
+        <button class="toast-x" aria-label="Dismiss" onclick={() => (ui.toast = null)}><Icon name="x" size={14} /></button>
+      {/if}
     </div>
   {/key}
 {/if}
@@ -230,7 +233,33 @@
     font-weight: 600;
     font-size: 13.5px;
     box-shadow: var(--shadow);
-    animation: toast 2.4s var(--ease) forwards;
+    max-width: min(560px, calc(100vw - 48px));
+    animation: toast var(--toast-ms, 2.4s) var(--ease) forwards;
+  }
+  .toast.long {
+    border-radius: 14px;
+    padding: 11px 14px 11px 16px;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+  .toast.alert {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  }
+  .toast-x {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    margin-left: 4px;
+    border-radius: 50%;
+    color: var(--mute);
+  }
+  .toast-x:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 10%, transparent);
   }
   @keyframes pop {
     from {
@@ -243,8 +272,8 @@
       opacity: 0;
       transform: translate(-50%, 8px);
     }
-    8%,
-    85% {
+    4%,
+    92% {
       opacity: 1;
       transform: translate(-50%, 0);
     }
