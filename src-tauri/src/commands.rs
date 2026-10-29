@@ -53,8 +53,13 @@ fn strip_page(p: &mut Page) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn bootstrap(core: S<'_>) -> Result<Bootstrap> {
+pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
     tracing::info!("command: bootstrap");
+    use tauri::Manager;
+    let Some(core) = app.try_state::<Arc<Core>>() else {
+        let why = app.try_state::<crate::core::StartupFailure>().map(|f| f.0.clone()).unwrap_or_else(|| "Encore is still starting.".into());
+        return Err(AppError::internal(why));
+    };
     Ok(Bootstrap {
         version: env!("CARGO_PKG_VERSION").to_string(),
         auth: core.accounts.state(),

@@ -189,7 +189,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let resp = match art::parse_request(&uri) {
                     Some((key, size)) => {
-                        let core = app.state::<Arc<Core>>().inner().clone();
+                        let Some(core) = app.try_state::<Arc<Core>>().map(|c| c.inner().clone()) else {
+                            responder.respond(tauri::http::Response::new(Vec::new()));
+                            return;
+                        };
                         match core.art.get(&key, size).await {
                             Ok((bytes, mime)) => tauri::http::Response::builder().status(200).header("Content-Type", mime).header("Cache-Control", "max-age=604800").body(bytes),
                             Err(e) => {
@@ -209,7 +212,16 @@ pub fn run() {
             window::create_main(app.handle())?;
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
-            let core = tauri::async_runtime::block_on(async { Core::new() }).map_err(|e| e.message)?;
+            let core = match tauri::async_runtime::block_on(async { Core::new() }) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Failing here used to close Encore without a word. Keep
+                    // the window up and let the UI say what went wrong.
+                    tracing::error!(error = %e.message, "Encore could not start");
+                    app.manage(core::StartupFailure(core::startup_failure_message(&e.message)));
+                    return Ok(());
+                }
+            };
             tracing::info!(ms = t0.elapsed().as_millis() as u64, "core ready");
             app.manage(core.clone());
             let handle = app.handle().clone();

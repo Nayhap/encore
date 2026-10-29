@@ -220,7 +220,9 @@
               <button class="pill" onclick={() => location.reload()}>Retry</button>
             </div>
           {/if}
-          {#if nav.view.name === "home"}
+          {#if connectError}
+            <!-- Nothing else can load without the backend. -->
+          {:else if nav.view.name === "home"}
             <Home />
           {:else if nav.view.name === "explore"}
             <Explore />

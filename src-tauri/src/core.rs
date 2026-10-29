@@ -20,6 +20,14 @@ use serde::{Deserialize, Serialize};
 pub const SETTINGS: &str = "settings";
 pub const REPORT_HISTORY: &str = "report_history";
 
+/// Why the backend couldn't start, for the UI (see `bootstrap`).
+pub struct StartupFailure(pub String);
+
+pub fn startup_failure_message(detail: &str) -> String {
+    let logs = Paths::new().logs.join("encore.log");
+    format!("{detail}. Check that the disk isn't full and that Encore can write to its data folder, then restart Encore. Details are in {}.", logs.display())
+}
+
 pub struct Paths {
     pub data: PathBuf,
     pub cache: PathBuf,
