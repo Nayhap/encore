@@ -54,6 +54,9 @@ struct State {
     /// during loading).
     pending_pos: f64,
     skips: u32,
+    /// The current song stopped because the player components weren't
+    /// installed; it starts once they are (D22).
+    awaiting_setup: bool,
     radio_cursor: Option<String>,
     radio_loading: bool,
     radio_empty: u32,
@@ -112,6 +115,7 @@ impl Player {
                 preloading: false,
                 pending_pos: 0.0,
                 skips: 0,
+                awaiting_setup: false,
                 radio_cursor: None,
                 radio_loading: false,
                 radio_empty: 0,
@@ -343,6 +347,7 @@ impl Player {
             st.seek_gen += 1;
             st.phase = Phase::Loading;
             st.error = None;
+            st.awaiting_setup = false;
             st.pending_pos = start;
             st.loaded = None;
             st.last_duration = cur.track.duration;
@@ -427,6 +432,19 @@ impl Player {
     }
 
     async fn fail_current(self: &Arc<Self>, f: PlayFailure) {
+        // Not the song's fault: keep it, paused, and ask for the setup.
+        if f.kind == PlayFailureKind::SetupNeeded {
+            {
+                let mut st = self.st.lock();
+                st.error = None;
+                st.phase = Phase::Paused;
+                st.loaded = None;
+                st.awaiting_setup = true;
+            }
+            self.publish(false);
+            let _ = self.tx.send(PlayerEvent::SetupNeeded);
+            return;
+        }
         let (title, skips, autoskip) = {
             let mut st = self.st.lock();
             st.error = Some(f.clone());
@@ -879,6 +897,19 @@ impl Player {
         }
         self.publish(false);
         self.send_anchor();
+    }
+
+    /// The player components were just installed: start the song that was
+    /// waiting for them, if any.
+    pub fn resume_after_setup(self: &Arc<Self>) {
+        let pos = {
+            let mut st = self.st.lock();
+            if !std::mem::take(&mut st.awaiting_setup) || st.phase != Phase::Paused || st.queue.current().is_none() {
+                return;
+            }
+            st.pending_pos
+        };
+        self.play_current(pos);
     }
 
     pub fn resume(&self) {

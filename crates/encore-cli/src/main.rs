@@ -93,7 +93,10 @@ enum Cmd {
         more: bool,
     },
     /// Resolve a stream URL for a video (prints format details, never the URL query).
+    /// Installs the player components first if they are missing.
     Resolve { video_id: String },
+    /// The player components (Python, Deno, yt-dlp): `status`, `install`, `remove`.
+    Runtimes { action: Option<String> },
     /// Stream a video through the engine (resolver + range cache + preload).
     Play {
         video_id: String,
@@ -508,13 +511,30 @@ async fn run(cli: Cli) -> Result<()> {
             let ctx = svc.context();
             library(&svc, &ctx, LibrarySection::Playlists, true, m, j).await?;
         }
+        Cmd::Runtimes { action } => {
+            let r = cli_resolver(false).await?;
+            match action.as_deref().unwrap_or("status") {
+                "status" => {}
+                "install" => install_runtimes(r.runtimes()).await?,
+                "remove" => r.runtimes().remove(false).await.map_err(|e| anyhow!("{}", e.message))?,
+                other => bail!("unknown action {other}; use status, install or remove"),
+            }
+            let st = r.runtimes().status_measured();
+            println!("location: {}", st.location);
+            println!("ready={} usable={} approved={} download={:.1} MB disk≈{:.0} MB used={:.1} MB", st.ready, st.usable, st.approved, st.download_bytes / 1e6, st.disk_bytes / 1e6, st.used_bytes / 1e6);
+            for c in &st.components {
+                println!("  {} {} (installed: {}){}", c.name, c.version, c.installed.as_deref().unwrap_or("none"), if c.ready { "" } else { " needs install" });
+            }
+            if let Some(m) = st.message {
+                println!("{m}");
+            }
+        }
         Cmd::Resolve { video_id } => {
             use encore_core::service::StreamResolver;
-            let r = encore_resolver::YtDlpResolver::new(encore_resolver::ResolverConfig::default_paths());
             let t0 = Instant::now();
-            r.ensure_ready().await.map_err(anyhow::Error::msg)?;
-            let st = r.status();
-            println!("resolver: ready={} python={} js={} yt-dlp={} (bootstrap {:.1}s)", st.ready, st.python.as_deref().unwrap_or("?"), st.js_runtime.as_deref().unwrap_or("?"), st.yt_dlp, t0.elapsed().as_secs_f64());
+            let r = cli_resolver(true).await?;
+            let st = r.runtimes().status();
+            println!("components: {} (setup {:.1}s)", st.components.iter().map(|c| format!("{} {}", c.name, c.installed.as_deref().unwrap_or("?"))).collect::<Vec<_>>().join(", "), t0.elapsed().as_secs_f64());
             let t1 = Instant::now();
             let s = r.resolve(&ItemId::parse(&video_id).remote().to_string(), None).await.map_err(|e| anyhow!("{} ({:?})", e.message, e.kind))?;
             let host = url::Url::parse(s.url.expose()).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_default();
@@ -793,8 +813,7 @@ impl encore_core::service::PlayReport for ShowReport {
 
 async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option<&str>, secs: f64, report: bool) -> Result<()> {
     use encore_player::{Player, PlayerEvent};
-    let resolver = encore_resolver::YtDlpResolver::new(encore_resolver::ResolverConfig::default_paths());
-    resolver.ensure_ready().await.map_err(anyhow::Error::msg)?;
+    let resolver = cli_resolver(true).await?;
     let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
@@ -883,6 +902,35 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
 }
 
 /// Cookies for the resolver from the signed-in session, if any.
+/// The resolver on the app's own component folder. With `install`, missing
+/// components are downloaded first (running the CLI is the approval).
+async fn cli_resolver(install: bool) -> Result<Arc<encore_resolver::YtDlpResolver>> {
+    let cfg = encore_resolver::ResolverConfig::default_paths();
+    let rt = encore_resolver::Runtimes::new(cfg.runtimes());
+    let r = encore_resolver::YtDlpResolver::new(cfg, rt.clone());
+    if install && !rt.ready() {
+        install_runtimes(&rt).await?;
+    }
+    Ok(r)
+}
+
+async fn install_runtimes(rt: &Arc<encore_resolver::Runtimes>) -> Result<()> {
+    let st = rt.status();
+    eprintln!("installing player components into {} ({:.1} MB to download)", st.location, st.download_bytes / 1e6);
+    let last = Arc::new(parking_lot::Mutex::new((None, -1i64)));
+    rt.on_change(move |s| {
+        let Some(p) = &s.progress else { return };
+        let pct = (p.fraction * 100.0) as i64;
+        let mut l = last.lock();
+        if l.0 != Some(p.phase) || pct >= l.1 + 10 {
+            *l = (Some(p.phase), pct);
+            eprintln!("  {:?} {}% {}", p.phase, pct, p.component.as_deref().unwrap_or(""));
+        }
+    });
+    rt.approve().map_err(|e| anyhow!("{}", e.message))?;
+    rt.install().await.map_err(|e| anyhow!("{} ({:?})", e.message, e.kind))
+}
+
 fn encore_cli_auth(it: &InnerTube) -> Option<encore_core::service::ResolveAuth> {
     let s = it.session()?;
     let ch = s.channel.as_ref()?;
