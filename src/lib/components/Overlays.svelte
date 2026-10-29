@@ -261,6 +261,13 @@
     color: var(--text);
     background: color-mix(in srgb, var(--text) 10%, transparent);
   }
+  /* With reduced motion every animation is cut to nothing, and this one
+     ends invisible: show the message still; the timer removes it. */
+  @media (prefers-reduced-motion: reduce) {
+    .toast {
+      animation: none !important;
+    }
+  }
   @keyframes pop {
     from {
       opacity: 0;

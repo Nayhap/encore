@@ -250,6 +250,12 @@
     border-top-color: var(--text);
     animation: spin 0.9s linear infinite;
   }
+  @media (prefers-reduced-motion: reduce) {
+    .play.loading::after {
+      animation: none !important;
+      border-right-color: var(--text);
+    }
+  }
   @keyframes spin {
     to {
       transform: rotate(360deg);
