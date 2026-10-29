@@ -307,11 +307,13 @@ async fn create_venv(python: &Path, venv: &Path) -> Result<(), String> {
     // The first line says what went wrong; the last is often just a
     // traceback footer such as "<no Python frame>".
     let first = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    // Debian and Ubuntu ship venv separately.
-    if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
+    // Debian and Ubuntu ship venv separately, and say so on stdout.
+    let both = format!("{err}\n{}", String::from_utf8_lossy(&out.stdout));
+    if cfg!(target_os = "linux") && (both.contains("ensurepip") || both.contains("python3-venv")) {
         return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
     }
-    Err(format!("creating the resolver venv failed: {first}"))
+    let first = if first.is_empty() { both.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details") } else { first };
+    Err(format!("Setting up Python for playback failed: {first}"))
 }
 
 struct PipError {
@@ -496,6 +498,7 @@ impl YtDlpResolver {
                     st.message = None;
                 }
                 Err(e) => {
+                    tracing::warn!(error = %e, "playback setup failed");
                     st.ready = false;
                     st.message = Some(e.clone());
                 }
