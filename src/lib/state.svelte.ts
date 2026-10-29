@@ -1,5 +1,5 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
 import { catalog } from "./catalog.svelte";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
@@ -464,11 +464,81 @@ class Account {
   name = $derived(this.state.state === "signedIn" ? this.state.channel.name : null);
 }
 
+/** The player components (D22): the setup sheet, its progress, and the
+ *  quiet notice for updates. Rust owns the state; this mirrors it. */
+class Setup {
+  status = $state<RuntimeStatus | null>(null);
+  /** The setup sheet is showing. */
+  open = $state(false);
+  /** "Not now" this session; pressing play asks again. */
+  dismissed = $state(false);
+  error = $state<string | null>(null);
+
+  installing = $derived(!!this.status?.installing);
+  progress = $derived(this.status?.progress ?? null);
+  /** An update of components that already work (shown quietly). */
+  updating = $derived(this.installing && !!this.status?.usable);
+  needed = $derived(!!this.status && this.status.supported && !this.status.usable);
+
+  apply(st: RuntimeStatus) {
+    const before = this.status;
+    this.status = st;
+    if (!before?.installing || st.installing) return;
+    // An install just ended.
+    const phase = st.progress?.phase;
+    const update = !!st.progress?.update;
+    if (phase === "done" && !this.open) ui.say(update ? "Player components updated" : "Playback is set up");
+    if (phase === "failed") {
+      if (update) ui.say("Couldn't update the player components. Encore keeps using the current ones.");
+      else this.open = true;
+    }
+  }
+
+  /** At launch: offer the setup when playback can't work yet. */
+  launch(st: RuntimeStatus) {
+    this.apply(st);
+    if (st.supported && !st.usable) this.open = true;
+  }
+
+  show() {
+    this.error = null;
+    this.open = true;
+  }
+
+  hide() {
+    if (!this.installing && this.needed) this.dismissed = true;
+    this.open = false;
+  }
+
+  async install(reinstall = false) {
+    this.error = null;
+    try {
+      this.apply(await call((a) => a.runtimesInstall(reinstall)));
+    } catch (e: any) {
+      this.error = e?.message ?? String(e);
+    }
+  }
+
+  cancel() {
+    call((a) => a.runtimesCancel()).catch(() => {});
+  }
+
+  async remove() {
+    try {
+      this.apply(await call((a) => a.runtimesRemove()));
+      ui.say("Player components removed");
+    } catch (e: any) {
+      ui.say(e?.message ?? String(e));
+    }
+  }
+}
+
 export const player = new Player();
 export const nav = new Nav();
 export const ui = new UI();
 export const account = new Account();
 export const playlists = new Playlists();
+export const setup = new Setup();
 
 const remote = (id: string) => id.replace(/^(ytm|mock):/, "");
 
@@ -669,11 +739,14 @@ export async function connect() {
       signin: (s) => (account.signin = { stage: s.stage, message: s.message }),
       playlists: (e) => playlists.changed(e.playlistId),
       history: () => ui.historyRev++,
+      runtimes: (st) => setup.apply(st),
+      setupNeeded: () => setup.show(),
     }),
   );
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  setup.launch(b.runtimes);
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);
   // Lyrics for a restored track.

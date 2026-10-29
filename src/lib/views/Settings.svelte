@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { call, isTauri, type AccountChannel, type BrowserProfile, type CacheInfo, type ResolverStatus } from "$lib/backend";
-  import { account, openExternal, player, ui, type Theme } from "$lib/state.svelte";
+  import { call, isTauri, type AccountChannel, type BrowserProfile, type CacheInfo } from "$lib/backend";
+  import { account, openExternal, player, setup, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { commands } from "$lib/backend/bindings";
   import { isMac, os, secretStore } from "$lib/platform";
@@ -28,7 +28,6 @@
   let pickKey = $state<string | null>(null);
   let switching = $state(false);
   let channels = $state<AccountChannel[]>([]);
-  let resolver = $state<ResolverStatus | null>(null);
   let cache = $state<CacheInfo | null>(null);
   let err = $state<string | null>(null);
 
@@ -37,7 +36,9 @@
     // Windows: Firefox is the browser import can actually read (D8).
     const prefer = os === "windows" ? "firefox:" : "edge:";
     profile = profiles.find((p) => p.id.startsWith(prefer))?.id ?? profiles[0]?.id ?? "";
-    resolver = (await call((a) => a.bootstrap()).catch(() => null))?.resolver ?? null;
+    // Measured once here: the size of the components folder.
+    const rt = await call((a) => a.runtimesStatus()).catch(() => null);
+    if (rt) setup.apply(rt);
     cache = await call((a) => a.cacheInfo()).catch(() => null);
   });
 
@@ -90,7 +91,17 @@
       ui.say(`Could not change that: ${e.message}`);
     });
   }
-  const setupResolver = () => run("resolver", async () => (resolver = await call((a) => a.resolverSetup())));
+  const rt = $derived(setup.status);
+  const versions = $derived((rt?.components ?? []).map((c) => `${c.name} ${c.installed ?? c.version}`).join(" · "));
+  function removeComponents() {
+    ui.confirm = {
+      title: "Remove player components?",
+      text: `This frees about ${mb(rt?.usedBytes || rt?.diskBytes || 0)}. Songs won't play until you set up playback again.`,
+      confirm: "Remove",
+      danger: true,
+      run: () => void run("runtimes", () => setup.remove()),
+    };
+  }
   const clear = (w: "audio" | "art" | "lyrics") =>
     run("cache", async () => {
       await call((a) => a.cacheClear(w));
@@ -240,14 +251,25 @@
     </div>
     <div class="row">
       <div>
-        <b>Stream resolver</b>
+        <b>Player components</b>
         <p>
-          {#if resolver?.ready}Ready · yt-dlp {resolver.ytDlp} · Python {resolver.python ?? "?"} · {resolver.jsRuntime ?? "no JS runtime"}
-          {:else if resolver?.message}{resolver.message}
-          {:else}Set up on first play (creates a private Python environment with yt-dlp).{/if}
+          {#if !rt}Checking…
+          {:else if !rt.supported}{rt.message}
+          {:else if rt.installing}{rt.usable ? "Updating" : "Setting up"} · {Math.floor((rt.progress?.fraction ?? 0) * 100)}%
+          {:else if rt.usable}{versions}{rt.usedBytes ? ` · ${mb(rt.usedBytes)}` : ""}{rt.ready ? "" : " · an update is waiting"}
+          {:else}Not installed. Playback needs Python, Deno and yt-dlp, about {mb(rt.downloadBytes ?? 0)} to download.{/if}
         </p>
       </div>
-      {#if !resolver?.ready}<button class="pill" disabled={!!busy} onclick={setupResolver}>{busy === "resolver" ? "Setting up…" : "Set up now"}</button>{/if}
+      <div class="btns">
+        {#if rt?.installing}
+          <button class="pill" onclick={() => setup.show()}>Show progress</button>
+        {:else if rt?.usable}
+          <button class="pill" disabled={!!busy} onclick={() => setup.install(true).then(() => setup.show())}>Reinstall components</button>
+          <button class="pill" disabled={!!busy} onclick={removeComponents}>Remove downloaded components</button>
+        {:else if rt?.supported}
+          <button class="pill primary" onclick={() => setup.show()}>Set up playback</button>
+        {/if}
+      </div>
     </div>
   </section>
 
