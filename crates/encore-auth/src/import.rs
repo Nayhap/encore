@@ -351,25 +351,18 @@ mod linux_keys {
         use dbus_secret_service::{EncryptionType, SecretService};
         let ss = SecretService::connect(EncryptionType::Dh).ok()?;
         let label = b.safe_storage().0;
+        let secret = |it: &dbus_secret_service::Item<'_>| -> Option<Vec<u8>> {
+            it.ensure_unlocked().ok()?;
+            it.get_secret().ok().filter(|s| !s.is_empty())
+        };
         let found = ss.search_items(HashMap::from([("application", b.libsecret_app())])).ok()?;
-        let mut items: Vec<_> = found.unlocked.into_iter().chain(found.locked).collect();
-        if items.is_empty() {
-            // Older Chromium items carry only the label.
-            if let Ok(c) = ss.get_default_collection() {
-                items = c.get_all_items().ok()?.into_iter().filter(|i| i.get_label().ok().as_deref() == Some(label)).collect();
-            }
+        if let Some(s) = found.unlocked.iter().chain(found.locked.iter()).find_map(|i| secret(i)) {
+            return Some(s);
         }
-        for it in items {
-            if it.ensure_unlocked().is_err() {
-                continue;
-            }
-            if let Ok(s) = it.get_secret() {
-                if !s.is_empty() {
-                    return Some(s);
-                }
-            }
-        }
-        None
+        // Older Chromium items carry only the label.
+        let c = ss.get_default_collection().ok()?;
+        let items = c.get_all_items().ok()?;
+        items.iter().filter(|i| i.get_label().ok().as_deref() == Some(label)).find_map(|i| secret(i))
     }
 
     fn kwallet(b: Browser) -> Option<Vec<u8>> {
