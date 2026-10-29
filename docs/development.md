@@ -7,14 +7,16 @@ On every system:
 - [Rust](https://rustup.rs) 1.95 or newer
 - [Bun](https://bun.sh)
 - `cmake`, used to build the bundled Opus decoder
-- Python 3.10+ and Node.js, Deno or Bun, used at runtime to resolve streams
+
+Playback needs no Python or Node.js on the system: Encore downloads its own
+(see [Player components](#player-components)).
 
 ### macOS
 
 Apple silicon or Intel, with the Xcode Command Line Tools.
 
 ```sh
-brew install cmake python node
+brew install cmake
 ```
 
 ### Windows
@@ -25,7 +27,7 @@ Windows 10 or 11 with the
 already has. Install Rust with the `x86_64-pc-windows-msvc` toolchain.
 
 ```powershell
-winget install Kitware.CMake Python.Python.3.13 OpenJS.NodeJS.LTS Oven-sh.Bun
+winget install Kitware.CMake Oven-sh.Bun
 ```
 
 Smart App Control blocks unsigned programs, and that includes Cargo's build
@@ -39,7 +41,7 @@ libraries):
 ```sh
 sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-  libasound2-dev libdbus-1-dev patchelf python3 python3-venv nodejs
+  libasound2-dev libdbus-1-dev patchelf
 ```
 
 A Secret Service (GNOME Keyring or KWallet) is needed to stay signed in.
@@ -56,6 +58,11 @@ bun run dev                          # the UI alone in a browser, on mock data
 you can work on the design without a YouTube session. Add `?signedin` to the
 URL to start with a signed-in mock library, and `?os=windows` or `?os=linux` to
 see the window buttons and key labels of the other systems.
+
+The mock starts without the player components, so the setup sheet shows
+and plays a simulated install. Add `?ready` to start with them installed,
+`?setupfail` to see the first install fail, or `?updating` to see a quiet
+update.
 
 ## Build
 
@@ -91,7 +98,8 @@ C=target/debug/encore-cli
 $C search "daft punk" --filter songs
 $C album MPREb_7ltM34kr0mH
 $C playlist VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3 --all
-$C resolve 4D7u5KF7SP8               # sets up the yt-dlp environment on first run
+$C runtimes                          # player components: status, install, remove
+$C resolve 4D7u5KF7SP8               # installs the components first if missing
 $C play 4D7u5KF7SP8 --seek 60 --secs 20
 $C lyrics 4D7u5KF7SP8
 
@@ -120,12 +128,22 @@ cookies, tokens or tracking URLs.
 | What | macOS | Windows | Linux |
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
-| Library cache, settings, queue, lyrics cache, yt-dlp (`resolver/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Library cache, settings, queue, lyrics cache, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
 | Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
 URLs must never reach it; `cargo test` includes a check for this.
+
+## Player components
+
+Playback runs yt-dlp on a Python and a Deno that Encore downloads itself
+(D22 in [decisions.md](decisions.md)). The versions, URLs, sizes and SHA-256
+checksums are pinned in `crates/encore-resolver/src/runtimes/manifest.rs`.
+To move to newer ones, change all four together, taking each checksum from
+the project's own release (python-build-standalone's `SHA256SUMS`, Deno's
+`.sha256sum` files, PyPI's `sha256` digests), and run `cargo test`. Users who
+already set up playback get the new versions on their next launch.
 
 ## Known issues
 
