@@ -79,6 +79,39 @@
         />
       </div>
     </div>
+  {:else}
+    <!-- Nothing loaded yet (a fresh install, a cleared queue): keep the bar's
+         shape so the window doesn't look broken, and say how to start. -->
+    <div class="now idle">
+      <span class="art-empty" aria-hidden="true"><Icon name="lyrics" size={22} /></span>
+      <div class="meta">
+        <span class="title">Nothing playing</span>
+        <button class="artist hint" onclick={() => (ui.palette = true)}>Search with {mod("K")} to start</button>
+      </div>
+    </div>
+    <div class="transport idle" aria-hidden="true">
+      <div class="buttons">
+        <span class="icon-btn"><Icon name="shuffle" size={18} /></span>
+        <span class="icon-btn"><Icon name="prev" size={20} /></span>
+        <span class="play"><Icon name="play" size={20} /></span>
+        <span class="icon-btn"><Icon name="next" size={20} /></span>
+        <span class="icon-btn"><Icon name="repeat" size={18} /></span>
+      </div>
+      <div class="scrub">
+        <span class="mono time">0:00</span>
+        <span class="track-empty"></span>
+        <span class="mono time">0:00</span>
+      </div>
+    </div>
+    <div class="tools">
+      <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel ({mod('\\')})" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
+      <div class="volume">
+        <button class="icon-btn" aria-label={player.muted ? "Unmute" : "Mute"} onclick={() => player.setMuted(!player.muted)}>
+          <Icon name={vol === 0 ? "mute" : vol < 0.5 ? "volumeLow" : "volume"} size={19} />
+        </button>
+        <input type="range" min="0" max="1" step="0.01" value={vol} aria-label="Volume" style:--v="{vol * 100}%" oninput={(e) => player.setVolume(+e.currentTarget.value)} />
+      </div>
+    </div>
   {/if}
 </footer>
 
@@ -95,6 +128,34 @@
     background: var(--panel);
     position: relative;
     z-index: 3;
+  }
+
+  .art-empty {
+    display: grid;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    flex: none;
+    border-radius: 6px;
+    color: var(--mute);
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--text) 16%, transparent);
+  }
+  .idle .title {
+    color: var(--mute);
+  }
+  .hint {
+    text-align: left;
+  }
+  .transport.idle {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .track-empty {
+    flex: 1;
+    height: 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--text) 18%, transparent);
   }
 
   .now {

@@ -232,8 +232,9 @@ function replace(tracks: T.Track[], start: number, source: T.QueueSource | null,
   go(start);
 }
 
-// Start with a queue loaded but paused, like reopening the app.
-{
+// Start with a queue loaded but paused, like reopening the app (`?empty`
+// starts with nothing queued, like a fresh install).
+if (!new URLSearchParams(location.search).has("empty")) {
   const c = M.collections.find((x) => x.id === "pl-late")!;
   P.entries = c.trackIds.map((id) => ({ uid: uid(), track: track(id), origin: "collection" as const }));
   P.canon = P.entries.map((e) => e.uid);
