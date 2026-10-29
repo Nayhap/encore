@@ -758,6 +758,10 @@ impl Player {
                 }
             }
             EngineEvent::DeviceChanged { .. } => self.publish(false),
+            EngineEvent::NoOutput { error } => {
+                tracing::warn!(%error, "no audio output");
+                let _ = self.tx.send(PlayerEvent::Notice("No audio output is available. Connect speakers or headphones, or check your sound settings; Encore starts playing as soon as one works.".into()));
+            }
         }
     }
 

@@ -8,6 +8,7 @@
 
   import { onMount } from "svelte";
   import { isTauri } from "./backend";
+  import { commands } from "./backend/bindings";
   import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
   import { account, connect, nav, player, ui } from "./state.svelte";
@@ -74,10 +75,18 @@
   const customChrome = $derived(!isMac && !ui.systemTitlebar);
   $effect(() => {
     document.documentElement.dataset.chrome = customChrome ? "custom" : "native";
-    if (isMac) return;
-    localStorage.setItem("titlebar", ui.systemTitlebar ? "system" : "encore");
-    if (isTauri) import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setDecorations(ui.systemTitlebar)).catch(() => {});
   });
+  // The backend decides the window's chrome when it creates the window, so
+  // its setting is the one to follow.
+  if (isTauri && !isMac)
+    commands
+      .getSystemTitlebar()
+      .then((r) => {
+        if (r.status !== "ok") return;
+        ui.systemTitlebar = r.data;
+        localStorage.setItem("titlebar", r.data ? "system" : "encore");
+      })
+      .catch(() => {});
 
   $effect(() => {
     localStorage.setItem("tint", ui.tint ? "on" : "off");

@@ -43,6 +43,8 @@ pub enum EngineEvent {
     /// Output starved while the decoder was still working.
     Buffering { id: u64, buffering: bool },
     DeviceChanged { name: String },
+    /// No audio output could be opened; playback waits until one appears.
+    NoOutput { error: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -235,8 +237,12 @@ impl Drop for Engine {
     }
 }
 
+/// Name of the placeholder used while no device can be opened.
+const NO_OUTPUT: &str = "No audio output";
+
 struct Output {
-    _stream: cpal::Stream,
+    /// `None` for the placeholder used while no device can be opened.
+    _stream: Option<cpal::Stream>,
     msgs: Producer<CbMsg>,
     retired: Consumer<Ring>,
     rate: u32,
@@ -262,7 +268,15 @@ fn build_output(atoms: &Arc<Atoms>) -> Result<Output, String> {
         other => return Err(format!("unsupported output sample format {other}")),
     };
     stream.play().map_err(|e| format!("cannot start output: {e}"))?;
-    Ok(Output { _stream: stream, msgs: msg_p, retired: ret_c, rate, channels, name })
+    Ok(Output { _stream: Some(stream), msgs: msg_p, retired: ret_c, rate, channels, name })
+}
+
+/// A stand-in output with no device behind it, so Encore can start on a
+/// machine with no working sound output and pick one up when it appears.
+fn silent_output() -> Output {
+    let (msg_p, _msg_c) = RingBuffer::<CbMsg>::new(64);
+    let (_ret_p, ret_c) = RingBuffer::<Ring>::new(64);
+    Output { _stream: None, msgs: msg_p, retired: ret_c, rate: 48_000, channels: 2, name: NO_OUTPUT.into() }
 }
 
 struct Cb {
@@ -449,11 +463,15 @@ fn actor(
     cache: Option<AudioCache>,
     ready: Sender<Result<(), String>>,
 ) {
+    // No working output (no sound card, audio server down, headset just
+    // unplugged) must not stop Encore from starting: run silent and retry.
+    let mut no_output: Option<String> = None;
     let mut out = match build_output(&atoms) {
         Ok(o) => o,
         Err(e) => {
-            let _ = ready.send(Err(e));
-            return;
+            tracing::warn!(error = %e, "no audio output; retrying in the background");
+            no_output = Some(e);
+            silent_output()
         }
     };
     {
@@ -496,6 +514,9 @@ fn actor(
                     return;
                 }
                 Cmd::Load { id, spec, start, gain_db, play } => {
+                    if let Some(e) = &no_output {
+                        let _ = events.send(EngineEvent::NoOutput { error: e.clone() });
+                    }
                     if let Some(d) = current.take() {
                         let _ = d.tx.send(WorkerCmd::Stop);
                     }
@@ -631,13 +652,14 @@ fn actor(
         // Device lost or changed: rebuild the stream and re-prime from the
         // last consumed position.
         if atoms.device_error.swap(false, Ordering::Relaxed) || last_dev_check.elapsed() > Duration::from_secs(2) {
-            let changed = last_dev_check.elapsed() > Duration::from_secs(2) && default_device_name().is_some_and(|n| n != out.name);
+            let changed = last_dev_check.elapsed() > Duration::from_secs(2) && (no_output.is_some() || default_device_name().is_some_and(|n| n != out.name));
             last_dev_check = Instant::now();
             if changed || atoms.device_error.load(Ordering::Relaxed) {
                 atoms.device_error.store(false, Ordering::Relaxed);
                 let pos = shared.lock().current.as_ref().map(|(_, base, fr, _)| base + fr.load(Ordering::Relaxed) as f64 / out.rate as f64);
                 if let Ok(o) = build_output(&atoms) {
                     out = o;
+                    no_output = None;
                     {
                         let mut s = shared.lock();
                         s.device = out.name.clone();

@@ -86,6 +86,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             begin_signin,
             cancel_signin,
             window::snap_layouts,
+            window::set_system_titlebar,
+            window::get_system_titlebar,
         ])
         .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent])
 }
@@ -202,6 +204,9 @@ pub fn run() {
             });
         })
         .setup(move |app| {
+            // Off macOS the window is built here, with the chosen title bar.
+            #[cfg(not(target_os = "macos"))]
+            window::create_main(app.handle())?;
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
             let core = tauri::async_runtime::block_on(async { Core::new() }).map_err(|e| e.message)?;
@@ -250,6 +255,7 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 window::round_corners(&w);
             }
+
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let h = app.handle().clone();
