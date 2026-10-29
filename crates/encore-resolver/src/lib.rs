@@ -106,11 +106,29 @@ fn search_paths() -> Vec<PathBuf> {
             v.push(PathBuf::from(pf).join("nodejs"));
         }
     }
+    #[cfg(unix)]
+    for p in [
+        // python.org installers on macOS, MacPorts, Linuxbrew, snaps.
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/opt/local/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+        "/snap/bin",
+    ] {
+        v.push(PathBuf::from(p));
+    }
     if let Some(h) = dirs::home_dir() {
         v.push(h.join(".deno/bin"));
         v.push(h.join(".bun/bin"));
         v.push(h.join(".local/bin"));
         v.push(h.join(".volta/bin"));
+        // Version managers put Node and Python under the home folder, and a
+        // program started from the desktop doesn't get their PATH changes.
+        v.push(h.join(".asdf/shims"));
+        v.push(h.join(".local/share/mise/shims"));
+        v.push(h.join(".pyenv/shims"));
+        v.push(h.join(".local/share/fnm/aliases/default/bin"));
+        v.push(h.join("Library/Application Support/fnm/aliases/default/bin"));
+        v.extend(newest_versions(&h.join(".nvm/versions/node"), "bin"));
     }
     #[cfg(windows)]
     if let Some(l) = dirs::data_local_dir() {
@@ -121,6 +139,16 @@ fn search_paths() -> Vec<PathBuf> {
     // running anything when Python isn't installed; try it last.
     v.sort_by_key(|p| p.to_string_lossy().to_ascii_lowercase().contains("windowsapps"));
     v
+}
+
+/// `<root>/<version>/<sub>` for each installed version, newest first
+/// (nvm keeps one directory per Node version, named like `v22.11.0`).
+fn newest_versions(root: &Path, sub: &str) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    let key = |n: &str| n.trim_start_matches('v').split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let mut dirs: Vec<(Vec<u64>, PathBuf)> = rd.filter_map(|e| e.ok()).map(|e| (key(&e.file_name().to_string_lossy()), e.path().join(sub))).collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.into_iter().map(|d| d.1).collect()
 }
 
 /// `name` plus the platform's executable suffix.
