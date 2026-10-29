@@ -43,7 +43,7 @@
           {#if player.shuffle}<i class="dot"></i>{/if}
         </button>
         <button class="icon-btn" aria-label="Previous" title="Previous ({mod('←')})" onclick={() => player.prev()}><Icon name="prev" size={20} /></button>
-        <button class="play" aria-label={player.playing ? "Pause" : "Play"} title="{player.playing ? 'Pause' : 'Play'} (Space)" onclick={() => player.toggle()}>
+        <button class="play" class:loading={player.phase === "loading" || player.phase === "buffering"} aria-label={player.playing ? "Pause" : "Play"} aria-busy={player.phase === "loading"} title="{player.phase === 'loading' ? 'Loading… ' : ''}{player.playing ? 'Pause' : 'Play'} (Space)" onclick={() => player.toggle()}>
           <Icon name={player.playing ? "pause" : "play"} size={20} />
         </button>
         <button class="icon-btn" aria-label="Next" title="Next ({mod('→')})" onclick={() => player.next()}><Icon name="next" size={20} /></button>
@@ -229,6 +229,7 @@
     position: relative;
   }
   .play {
+    position: relative;
     display: grid;
     place-items: center;
     width: 38px;
@@ -237,6 +238,22 @@
     background: var(--text);
     color: var(--ink);
     transition: transform 0.15s var(--ease);
+  }
+  /* Getting a stream can take several seconds: show that something is
+     happening instead of a play button that seems to do nothing. */
+  .play.loading::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--text);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .play:hover {
     transform: scale(1.06);
