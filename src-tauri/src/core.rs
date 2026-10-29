@@ -24,9 +24,17 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
-        let data = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
+        // Local (not roaming) data on Windows: the resolver venv lives here.
+        let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
-        let logs = dirs::home_dir().map(|h| h.join("Library/Logs/app.encore.desktop")).unwrap_or_else(|| cache.join("logs"));
+        let logs = if cfg!(target_os = "macos") {
+            dirs::home_dir().map(|h| h.join("Library/Logs/app.encore.desktop")).unwrap_or_else(|| cache.join("logs"))
+        } else if cfg!(windows) {
+            data.join("logs")
+        } else {
+            // ~/.local/state/app.encore.desktop
+            dirs::state_dir().unwrap_or_else(|| cache.clone()).join("app.encore.desktop")
+        };
         Paths { data, cache, logs }
     }
 }
@@ -72,7 +80,7 @@ impl Core {
         }
         let it = InnerTube::new("en", "US");
         let ytm = Arc::new(YtMusic::new(it.clone()));
-        let accounts = Accounts::new(ytm.clone(), Arc::new(encore_auth::store::KeychainStore::session()));
+        let accounts = Accounts::new(ytm.clone(), encore_auth::store::session_store());
         let resolver = YtDlpResolver::new(ResolverConfig { root: paths.data.join("resolver"), cache_dir: paths.cache.join("yt-dlp") });
         let audio_cache = AudioCache::new(paths.cache.join("audio"), encore_audio::cache::DEFAULT_LIMIT).map_err(|e| AppError::internal(format!("audio cache: {}", e.kind())))?;
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;

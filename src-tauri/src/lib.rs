@@ -7,6 +7,7 @@ mod events;
 mod logging;
 mod media;
 mod signin;
+mod window;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,6 +74,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             sign_out,
             begin_signin,
             cancel_signin,
+            window::snap_layouts,
         ])
         .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent])
 }
@@ -156,8 +158,17 @@ pub fn run() {
     let paths = core::Paths::new();
     logging::init(&paths.logs);
     let builder = specta_builder();
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let app = tauri::Builder::default();
+    // One Encore at a time: a second launch shows the running one.
+    #[cfg(not(target_os = "macos"))]
+    let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }));
+    app.plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
@@ -191,9 +202,9 @@ pub fn run() {
             core.art.on_hue(move |key, h1, h2v| {
                 let _ = ArtHueEvent { key: key.to_string(), h1, h2: h2v }.emit(&h2);
             });
-            // Session (one Keychain read, which may show a macOS prompt), then
-            // the queue for that account. Off the main thread so the window
-            // never waits on the Keychain.
+            // Session (one read of the OS credential store, which may show a
+            // macOS Keychain prompt), then the queue for that account. Off the
+            // main thread so the window never waits on it.
             core.restore_queue();
             core.install_persistence();
             let (c3, h3) = (core.clone(), handle.clone());
@@ -216,7 +227,24 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let _ = c2.resolver.ensure_ready().await;
             });
-            // Closing the window hides it; playback continues (D15).
+            // macOS: closing the window hides it and playback continues; the
+            // Dock icon brings it back (D15). Windows and Linux have no such
+            // way back without a tray icon, so closing quits there.
+            #[cfg(windows)]
+            if let Some(w) = app.get_webview_window("main") {
+                window::round_corners(&w);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(w) = app.get_webview_window("main") {
+                let h = app.handle().clone();
+                w.on_window_event(move |e| {
+                    if let WindowEvent::Destroyed = e {
+                        signin::close(&h);
+                        h.exit(0);
+                    }
+                });
+            }
+            #[cfg(target_os = "macos")]
             if let Some(w) = app.get_webview_window("main") {
                 let w2 = w.clone();
                 w.on_window_event(move |e| {

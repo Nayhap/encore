@@ -3,6 +3,17 @@
   import { call, isTauri, type AccountChannel, type BrowserProfile, type CacheInfo, type ResolverStatus } from "$lib/backend";
   import { account, player, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import { isMac, os, secretStore } from "$lib/platform";
+
+  // What browser import can and can't do on this OS (D8).
+  const importHelp =
+    os === "macos"
+      ? "Uses the YouTube session already signed in to your browser. For Edge, Chrome and Brave, macOS asks once to allow access to the browser's “Safe Storage” key in the Keychain; choose Always Allow."
+      : os === "windows"
+        ? "Uses the YouTube session already signed in to Firefox. Current Edge and Chrome lock their cookies while they run and protect them with app-bound encryption that other apps can't read, so importing from them usually fails. For those, use Sign in above."
+        : "Uses the YouTube session already signed in to your browser. For Chrome, Chromium, Edge and Brave, Encore reads the browser's key from GNOME Keyring or KWallet, which may ask you to unlock it.";
+  const browserNames: Record<string, string> = { edge: "Microsoft Edge", chrome: "Google Chrome", brave: "Brave", chromium: "Chromium", firefox: "Firefox", safari: "Safari", webview: "Encore sign-in" };
+  const sourceName = (s: string) => browserNames[s.split(":")[0]] ?? s;
 
   const themes: { v: Theme; label: string; icon: string }[] = [
     { v: "system", label: "Match system", icon: "settings" },
@@ -22,7 +33,9 @@
 
   onMount(async () => {
     profiles = await call((a) => a.browserProfiles()).catch(() => []);
-    profile = profiles.find((p) => p.id.startsWith("edge:"))?.id ?? profiles[0]?.id ?? "";
+    // Windows: Firefox is the browser import can actually read (D8).
+    const prefer = os === "windows" ? "firefox:" : "edge:";
+    profile = profiles.find((p) => p.id.startsWith(prefer))?.id ?? profiles[0]?.id ?? "";
     resolver = (await call((a) => a.bootstrap()).catch(() => null))?.resolver ?? null;
     cache = await call((a) => a.cacheInfo()).catch(() => null);
   });
@@ -96,7 +109,7 @@
       <div class="row">
         <div>
           <b>Signed in as {st.channel.name}</b>
-          <p>{st.channel.isBrand ? "Brand channel" : "Personal channel"}{st.channel.handle ? ` · ${st.channel.handle}` : ""} · from {st.source.startsWith("edge") ? "Microsoft Edge" : st.source === "webview" ? "Encore sign-in" : st.source}</p>
+          <p>{st.channel.isBrand ? "Brand channel" : "Personal channel"}{st.channel.handle ? ` · ${st.channel.handle}` : ""} · from {sourceName(st.source)}</p>
         </div>
         <div class="btns">
           <button class="pill" disabled={!!busy} onclick={startSwitch}>Switch channel</button>
@@ -109,7 +122,10 @@
           <b>Session expired</b>
           <p>{st.reason} Imported sessions stop working when the browser rotates its cookies. Import again, or sign in inside Encore.</p>
         </div>
-        <button class="pill" disabled={!!busy} onclick={signOut}>Sign out</button>
+        <div class="btns">
+          <button class="pill primary" disabled={!!busy || !isTauri} onclick={signIn}>{busy === "signin" ? "Opening…" : "Sign in"}</button>
+          <button class="pill" disabled={!!busy} onclick={signOut}>Sign out</button>
+        </div>
       </div>
     {:else if st.state === "anonymous"}
       <div class="row">
@@ -125,7 +141,7 @@
       <div class="row">
         <div>
           <b>Import from browser</b>
-          <p>Uses the YouTube session already signed in to your browser. For Edge, Chrome and Brave, macOS asks once to allow access to the browser's “Safe Storage” key in the Keychain; choose Always Allow. Cookies are stored only in the Keychain.</p>
+          <p>{importHelp} Your session is stored only in {secretStore}.</p>
         </div>
         <div class="btns">
           <select bind:value={profile} aria-label="Browser profile" disabled={!profiles.length}>
@@ -178,6 +194,15 @@
       </div>
       <input type="checkbox" role="switch" bind:checked={ui.tint} />
     </label>
+    {#if !isMac}
+      <label class="row">
+        <div>
+          <b>Use the system title bar</b>
+          <p>Show your desktop's own title bar and window buttons instead of Encore's.</p>
+        </div>
+        <input type="checkbox" role="switch" bind:checked={ui.systemTitlebar} />
+      </label>
+    {/if}
   </section>
 
   <section>

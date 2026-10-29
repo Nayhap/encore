@@ -58,6 +58,13 @@ export const commands = {
 	signOut: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sign_out")),
 	beginSignin: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("begin_signin")),
 	cancelSignin: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("cancel_signin")),
+	/**
+	 *  Windows 11 snap layouts: the flyout normally appears when the pointer
+	 *  rests on the native maximise button, which Encore doesn't have. Pressing
+	 *  Win+Z opens the same flyout for the active window. The UI calls this after
+	 *  the pointer has rested on its maximise button while the window is focused.
+	 */
+	snapLayouts: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("snap_layouts")),
 };
 
 /** Events */

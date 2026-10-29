@@ -140,11 +140,11 @@ enum Cmd {
 enum AuthCmd {
     /// List browser profiles that can be imported (no cookie store is opened).
     Profiles,
-    /// Import the YouTube session from Microsoft Edge (Keychain prompt).
+    /// Import the YouTube session from Microsoft Edge (macOS asks for Keychain access).
     ImportEdge {
         #[arg(long, default_value = "Default")]
         profile: String,
-        /// Seconds to wait for the Keychain prompt.
+        /// Seconds to wait for a Keychain prompt (macOS).
         #[arg(long, default_value_t = 18)]
         timeout: u64,
     },
@@ -291,7 +291,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Lyrics { video_id, fresh } => {
             let id = ItemId::parse(&video_id);
             let track = svc.track(&ctx, &id).await.map_err(e)?;
-            let db = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/encore.sqlite");
+            let db = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/encore.sqlite");
             let store = Arc::new(encore_core::store::Store::open(&db).map_err(e)?);
             let ls = encore_lyrics::LyricsService::new(svc.clone(), Some(store.clone()));
             if fresh {
@@ -436,7 +436,7 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn accounts(svc: &Arc<YtMusic>) -> Arc<encore_ytm::account::Accounts> {
-    encore_ytm::account::Accounts::new(svc.clone(), Arc::new(encore_auth::store::KeychainStore::session()))
+    encore_ytm::account::Accounts::new(svc.clone(), encore_auth::store::session_store())
 }
 
 async fn library(svc: &Arc<YtMusic>, ctx: &encore_core::service::RequestContext, sec: LibrarySection, all: bool, m: usize, j: bool) -> Result<()> {
@@ -481,10 +481,12 @@ async fn auth(svc: &Arc<YtMusic>, cmd: AuthCmd) -> Result<()> {
             }
         }
         AuthCmd::ImportEdge { profile, timeout } => {
-            println!("Reading the \"Microsoft Edge Safe Storage\" key from the Keychain (macOS may ask you to allow this)…");
+            if cfg!(target_os = "macos") {
+                println!("Reading the \"Microsoft Edge Safe Storage\" key from the Keychain (macOS may ask you to allow this)…");
+            }
             let st = acc.import_browser(&format!("edge:{profile}"), Duration::from_secs(timeout)).await.map_err(e)?;
             let n = svc.session().map(|s| s.jar.len()).unwrap_or(0);
-            println!("imported {n} cookies (values hidden), saved to the Keychain item \"app.encore.desktop\"");
+            println!("imported {n} cookies (values hidden), saved to {} under \"app.encore.desktop\"", encore_auth::store::STORE_NAME);
             print_state(&st);
         }
         AuthCmd::Import { profile_id, timeout } => {
@@ -503,7 +505,7 @@ async fn auth(svc: &Arc<YtMusic>, cmd: AuthCmd) -> Result<()> {
         }
         AuthCmd::SignOut => {
             acc.sign_out().map_err(e)?;
-            println!("signed out; Keychain item deleted");
+            println!("signed out; removed from {}", encore_auth::store::STORE_NAME);
         }
     }
     Ok(())

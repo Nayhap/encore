@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { mod } from "$lib/platform";
   import { artistLine, fmt } from "$lib/data";
   import { nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
@@ -41,11 +42,11 @@
           <Icon name="shuffle" size={18} />
           {#if player.shuffle}<i class="dot"></i>{/if}
         </button>
-        <button class="icon-btn" aria-label="Previous" title="Previous (⌘←)" onclick={() => player.prev()}><Icon name="prev" size={20} /></button>
+        <button class="icon-btn" aria-label="Previous" title="Previous ({mod('←')})" onclick={() => player.prev()}><Icon name="prev" size={20} /></button>
         <button class="play" aria-label={player.playing ? "Pause" : "Play"} title="{player.playing ? 'Pause' : 'Play'} (Space)" onclick={() => player.toggle()}>
           <Icon name={player.playing ? "pause" : "play"} size={20} />
         </button>
-        <button class="icon-btn" aria-label="Next" title="Next (⌘→)" onclick={() => player.next()}><Icon name="next" size={20} /></button>
+        <button class="icon-btn" aria-label="Next" title="Next ({mod('→')})" onclick={() => player.next()}><Icon name="next" size={20} /></button>
         <button class="icon-btn" class:on={player.repeat !== "off"} aria-label={repeatLabel} title="{repeatLabel} (R)" onclick={() => player.cycleRepeat()}>
           <Icon name="repeat" size={18} />
           {#if player.repeat === "one"}<b class="one">1</b>{:else if player.repeat === "all"}<i class="dot"></i>{/if}
@@ -60,7 +61,7 @@
 
     <div class="tools">
       <button class="icon-btn" class:on={ui.theater} aria-label="Full-screen lyrics" title="Full-screen lyrics (F)" onclick={() => (ui.theater = !ui.theater)}><Icon name="lyrics" size={19} /></button>
-      <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel (⌘\)" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
+      <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel ({mod('\\')})" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
       <div class="volume">
         <button class="icon-btn" aria-label={player.muted ? "Unmute" : "Mute"} onclick={() => player.setMuted(!player.muted)}>
           <Icon name={vol === 0 ? "mute" : vol < 0.5 ? "volumeLow" : "volume"} size={19} />

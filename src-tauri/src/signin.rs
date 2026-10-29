@@ -1,5 +1,7 @@
-//! In-app sign-in (D7): a `WebviewWindow` with a non-persistent WebKit data
-//! store (`incognito`) and a Safari UA. Cookies are read with
+//! In-app sign-in (D7): a `WebviewWindow` with a non-persistent data store
+//! (`incognito`: WebKit's ephemeral store, WebView2's InPrivate). WebKit
+//! engines (macOS, WebKitGTK) present a Safari UA; WebView2 keeps its own,
+//! which is current Edge's. Cookies are read with
 //! `cookies_for_url`; the window closes only after the session validates
 //! (the account list loads). Channel selection happens in Encore afterwards.
 
@@ -36,11 +38,9 @@ pub fn open(app: &AppHandle) -> Result<()> {
     }
     let url = SIGNIN_URL.parse().map_err(|_| AppError::internal("bad sign-in URL"))?;
     let app2 = app.clone();
-    let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
-        .title("Sign in to YouTube Music")
-        .inner_size(480.0, 720.0)
-        .incognito(true)
-        .user_agent(SAFARI_UA)
+    let b = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url)).title("Sign in to YouTube Music").inner_size(480.0, 720.0).incognito(true);
+    let b = if cfg!(windows) { b } else { b.user_agent(SAFARI_UA) };
+    let w = b
         .on_navigation(move |u| {
             if u.host_str() == Some("accounts.google.com") && u.path().contains("/signin/rejected") {
                 stage(&app2, "rejected", Some("Google refused to sign in inside Encore. Use “Import from browser” instead.".into()));

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { protocolUrl } from "$lib/platform";
   import { isTauri, type AnyArt } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { hashHue } from "$lib/data";
@@ -99,7 +100,7 @@
     class="cover"
     class:round
     style:border-radius={round ? "50%" : `${radius}px`}
-    src={`art://localhost/${real}?s=${size}`}
+    src={protocolUrl("art", `${real}?s=${size}`)}
     alt=""
     loading="lazy"
     decoding="async"

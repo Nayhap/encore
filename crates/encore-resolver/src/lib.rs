@@ -41,7 +41,7 @@ pub struct ResolverConfig {
 
 impl ResolverConfig {
     pub fn default_paths() -> Self {
-        let data = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
+        let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         ResolverConfig { root: data.join("resolver"), cache_dir: cache.join("yt-dlp") }
     }
@@ -96,8 +96,15 @@ struct Env {
 fn search_paths() -> Vec<PathBuf> {
     // GUI apps get a minimal PATH, so look in the usual places as well.
     let mut v: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    #[cfg(unix)]
     for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         v.push(PathBuf::from(p));
+    }
+    #[cfg(windows)]
+    for k in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(pf) = std::env::var_os(k) {
+            v.push(PathBuf::from(pf).join("nodejs"));
+        }
     }
     if let Some(h) = dirs::home_dir() {
         v.push(h.join(".deno/bin"));
@@ -105,11 +112,25 @@ fn search_paths() -> Vec<PathBuf> {
         v.push(h.join(".local/bin"));
         v.push(h.join(".volta/bin"));
     }
+    #[cfg(windows)]
+    if let Some(l) = dirs::data_local_dir() {
+        v.push(l.join("Programs\\nodejs"));
+        v.push(l.join("Volta\\bin"));
+    }
+    // The Microsoft Store "python.exe" alias opens the Store instead of
+    // running anything when Python isn't installed; try it last.
+    v.sort_by_key(|p| p.to_string_lossy().to_ascii_lowercase().contains("windowsapps"));
     v
 }
 
+/// `name` plus the platform's executable suffix.
+fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
 fn find_exe(name: &str) -> Option<PathBuf> {
-    search_paths().into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    let n = exe(name);
+    search_paths().into_iter().map(|d| d.join(&n)).find(|p| p.is_file())
 }
 
 /// The first available JS runtime (deno, node, bun).
@@ -122,35 +143,128 @@ pub fn find_js_runtime() -> Option<(String, PathBuf)> {
     None
 }
 
-async fn python_ok(p: &Path) -> Option<String> {
-    let out = Command::new(p).args(["-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"]).output().await.ok()?;
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+/// No console window for helper processes on Windows.
+fn quiet(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
+/// `major.minor` if `p` runs a Python 3.10 or newer. `args` go before `-I`
+/// (the `py` launcher takes `-3`).
+async fn python_version(p: &Path, args: &[&str]) -> Option<String> {
+    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.lines().next()?.trim().to_string();
     let (maj, min) = v.split_once('.')?;
     let ok = maj.parse::<u32>().ok()? == 3 && min.parse::<u32>().ok()? >= 10;
     ok.then_some(v)
 }
 
-async fn find_python() -> Option<(PathBuf, String)> {
-    let mut cands = Vec::new();
+async fn python_ok(p: &Path) -> Option<String> {
+    python_version(p, &[]).await
+}
+
+/// The real interpreter behind a launcher (`py`, the Store alias).
+async fn python_executable(p: &Path, args: &[&str]) -> Option<PathBuf> {
+    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print(sys.executable)"])).output().await.ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let pb = PathBuf::from(s);
+    pb.is_file().then_some(pb)
+}
+
+/// Candidate Python interpreters, best first: (path, launcher args).
+fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
+    let mut cands: Vec<(PathBuf, Vec<&'static str>)> = Vec::new();
+    let mut push = |p: PathBuf, a: Vec<&'static str>| {
+        if p.is_file() && !cands.iter().any(|c| c.0 == p) {
+            cands.push((p, a));
+        }
+    };
+    #[cfg(windows)]
+    {
+        // The py launcher picks the newest installed Python 3.
+        let mut py_dirs = vec![];
+        if let Some(l) = dirs::data_local_dir() {
+            py_dirs.push(l.join("Programs\\Python\\Launcher"));
+        }
+        if let Some(w) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir")) {
+            py_dirs.push(PathBuf::from(w));
+        }
+        for d in search_paths().into_iter().chain(py_dirs) {
+            push(d.join("py.exe"), vec!["-3"]);
+        }
+        // python.org installs, per user and for all users, newest first.
+        let mut roots = vec![];
+        if let Some(l) = dirs::data_local_dir() {
+            roots.push(l.join("Programs\\Python"));
+        }
+        for k in ["ProgramFiles", "ProgramW6432"] {
+            if let Some(pf) = std::env::var_os(k) {
+                roots.push(PathBuf::from(pf));
+            }
+        }
+        for minor in (10..=14).rev() {
+            for r in &roots {
+                push(r.join(format!("Python3{minor}")).join("python.exe"), vec![]);
+            }
+        }
+        for d in search_paths() {
+            push(d.join("python.exe"), vec![]);
+            push(d.join("python3.exe"), vec![]);
+        }
+    }
+    #[cfg(unix)]
     for n in ["python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3"] {
         for d in search_paths() {
-            let p = d.join(n);
-            if p.is_file() && !cands.contains(&p) {
-                cands.push(p);
+            push(d.join(n), vec![]);
+        }
+    }
+    cands
+}
+
+async fn find_python() -> Option<(PathBuf, String)> {
+    for (p, args) in python_candidates() {
+        // /usr/bin/python3 is a shim that may prompt to install the
+        // Command Line Tools; only use it if they are present.
+        if cfg!(target_os = "macos") && p == Path::new("/usr/bin/python3") && !Path::new("/Library/Developer/CommandLineTools/usr/bin/python3").exists() && !Path::new("/Applications/Xcode.app").exists() {
+            continue;
+        }
+        if let Some(v) = python_version(&p, &args).await {
+            // Create the venv from the real interpreter, not a launcher.
+            let real = if args.is_empty() && !p.to_string_lossy().to_ascii_lowercase().contains("windowsapps") { Some(p.clone()) } else { python_executable(&p, &args).await };
+            if let Some(real) = real {
+                return Some((real, v));
             }
         }
     }
-    for p in cands {
-        // /usr/bin/python3 is a shim that may prompt to install the
-        // Command Line Tools; only use it if they are present.
-        if p == Path::new("/usr/bin/python3") && !Path::new("/Library/Developer/CommandLineTools/usr/bin/python3").exists() && !Path::new("/Applications/Xcode.app").exists() {
-            continue;
-        }
-        if let Some(v) = python_ok(&p).await {
-            return Some((p, v));
-        }
-    }
     None
+}
+
+/// The venv interpreter (`Scripts/python.exe` on Windows).
+pub fn venv_python(venv: &Path) -> PathBuf {
+    if cfg!(windows) { venv.join("Scripts").join("python.exe") } else { venv.join("bin").join("python3") }
+}
+
+/// What to install, for the first-run message.
+pub fn missing_python_message() -> &'static str {
+    if cfg!(windows) {
+        "Python 3.10 or newer was not found. Install it from python.org (or run “winget install Python.Python.3.13”), then restart Encore to enable playback."
+    } else if cfg!(target_os = "macos") {
+        "Python 3.10 or newer was not found. Install Python 3 (for example with “brew install python”), then restart Encore to enable playback."
+    } else {
+        "Python 3.10 or newer was not found. Install python3 and python3-venv with your package manager, then restart Encore to enable playback."
+    }
+}
+
+pub fn missing_js_message() -> &'static str {
+    if cfg!(windows) {
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js from nodejs.org (or “winget install OpenJS.NodeJS.LTS”), Deno or Bun, then restart Encore."
+    } else if cfg!(target_os = "macos") {
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js, Deno or Bun (for example with “brew install node”), then restart Encore."
+    } else {
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js (nodejs), Deno or Bun, then restart Encore."
+    }
 }
 
 fn marker() -> String {
@@ -238,21 +352,27 @@ impl YtDlpResolver {
         let root = &self.cfg.root;
         std::fs::create_dir_all(root).map_err(|e| format!("cannot create {}: {}", root.display(), e.kind()))?;
         let venv = root.join("venv");
-        let py = venv.join("bin/python3");
+        let py = venv_python(&venv);
         let mark = venv.join(".encore-ready");
         let want = marker();
         let helper = root.join("encore_resolver.py");
         let ready = py.is_file() && std::fs::read_to_string(&mark).ok().as_deref() == Some(want.as_str());
         if !ready {
-            let (sys_py, ver) = find_python().await.ok_or("Python 3.10 or newer was not found. Install Python 3 (for example with Homebrew) to enable playback.")?;
+            let (sys_py, ver) = find_python().await.ok_or(missing_python_message())?;
             self.status.lock().python = Some(ver);
             if !py.is_file() {
-                let out = Command::new(&sys_py).args(["-m", "venv", "--clear"]).arg(&venv).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
+                let out = quiet(Command::new(&sys_py).args(["-m", "venv", "--clear"]).arg(&venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
                 if !out.status.success() {
-                    return Err(format!("creating the resolver venv failed: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")));
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    // Debian and Ubuntu ship venv separately.
+                    if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
+                        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
+                    }
+                    return Err(format!("creating the resolver venv failed: {last}"));
                 }
             }
-            let out = Command::new(&py)
+            let out = quiet(&mut Command::new(&py))
                 .args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-q", "--upgrade"])
                 .arg(format!("yt-dlp=={YT_DLP_VERSION}"))
                 .arg(format!("yt-dlp-ejs=={YT_DLP_EJS_VERSION}"))
@@ -274,7 +394,7 @@ impl YtDlpResolver {
         }
         let js = find_js_runtime();
         if js.is_none() {
-            return Err("No JavaScript runtime (deno, node or bun) was found; YouTube's signature challenge needs one.".into());
+            return Err(missing_js_message().into());
         }
         Ok(Env { venv_python: py, helper, js })
     }
@@ -282,9 +402,16 @@ impl YtDlpResolver {
     async fn spawn(&self, env: &Env) -> Result<Helper, PlayFailure> {
         let mut cmd = Command::new(&env.venv_python);
         cmd.arg("-I").arg(&env.helper).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-        // Sanitised environment: no inherited proxies/credentials.
+        quiet(&mut cmd);
+        // Sanitised environment: no inherited proxies/credentials. Windows
+        // processes need a few system variables to start at all.
         cmd.env_clear();
-        for k in ["HOME", "PATH", "LANG", "TMPDIR"] {
+        const KEEP: &[&str] = if cfg!(windows) {
+            &["PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PATHEXT", "COMSPEC", "PROGRAMDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"]
+        } else {
+            &["HOME", "PATH", "LANG", "TMPDIR"]
+        };
+        for k in KEEP.iter().copied() {
             if let Some(v) = std::env::var_os(k) {
                 cmd.env(k, v);
             }

@@ -18,6 +18,8 @@
   --stage-w: 352px;
   --deck-h: 84px;
   --top-h: 52px;
+  /* Room kept clear for Encore's window buttons (Windows, Linux). */
+  --wc-w: 0px;
 
   --r-sm: 6px;
   --r-md: 10px;
@@ -63,6 +65,10 @@
   --tint-a: hsl(var(--h) 80% 70% / 0.32);
   --tint-b: hsl(var(--h2) 70% 75% / 0.3);
   --shadow: 0 18px 50px -16px rgb(15 23 42 / 0.28), 0 0 0 1px rgb(15 23 42 / 0.08);
+}
+
+:root[data-chrome="custom"] {
+  --wc-w: 146px;
 }
 
 :root[data-tint="off"] {
@@ -195,6 +201,10 @@ p {
 }
 .pill.primary:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.pill:disabled {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .chip {
