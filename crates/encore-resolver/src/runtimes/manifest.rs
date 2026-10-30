@@ -29,7 +29,7 @@ pub const TARGETS: &[&str] = &["aarch64-apple-darwin", "x86_64-apple-darwin", "x
 const PYTHON: &[(&str, &str, u64, u64)] = &[
     ("aarch64-apple-darwin", "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405", 25_265_774, 30_000_000),
     ("x86_64-apple-darwin", "7412c19d896c99431b74a18a5643e110449a7f9590fbab179c3e5ab27b9aa9e3", 25_055_263, 30_000_000),
-    ("x86_64-pc-windows-msvc", "7369f7a35f261222a6ac8b3a87c1c88eeebee8af945d85346202591a64038dd3", 22_023_022, 40_000_000),
+    ("x86_64-pc-windows-msvc", "7369f7a35f261222a6ac8b3a87c1c88eeebee8af945d85346202591a64038dd3", 22_023_022, 36_000_000),
     ("x86_64-unknown-linux-gnu", "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7", 35_395_906, 52_000_000),
     ("aarch64-unknown-linux-gnu", "578d9da1983463ffb0c8c98ab0da2f18177f44069328eb0af847860c1eb05c3e", 29_492_455, 48_000_000),
 ];
@@ -37,7 +37,7 @@ const PYTHON: &[(&str, &str, u64, u64)] = &[
 const DENO: &[(&str, &str, u64, u64)] = &[
     ("aarch64-apple-darwin", "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e", 38_770_795, 81_512_928),
     ("x86_64-apple-darwin", "4b2f5edd2639b7470f034238b321d7002d8dfb4726d8558f52c17afac370eb2c", 42_797_031, 90_000_000),
-    ("x86_64-pc-windows-msvc", "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf", 42_917_472, 95_000_000),
+    ("x86_64-pc-windows-msvc", "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf", 42_917_472, 98_000_000),
     ("x86_64-unknown-linux-gnu", "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609", 41_963_064, 96_000_000),
     ("aarch64-unknown-linux-gnu", "d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905", 40_120_596, 90_000_000),
 ];

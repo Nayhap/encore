@@ -75,7 +75,7 @@ Download the latest build from
 On first launch Encore offers to set up playback. With your OK it downloads
 the free components it plays music with, [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 and the Python and [Deno](https://deno.com) it runs on, into its own folder:
-about 70 MB to download and 125 MB on disk. You can keep browsing while they
+65 to 80 MB to download and 120 to 160 MB on disk, depending on the system. You can keep browsing while they
 install, and nothing else on your computer changes. Encore keeps them up to
 date when it updates. **Settings → Playback** shows them and can remove them
 to free the space.
