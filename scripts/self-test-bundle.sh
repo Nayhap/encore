@@ -28,6 +28,8 @@ case "$kind" in
       common='ca-certificates python3 python3-venv nodejs libegl1 libgl1 libgles2 libgbm1'
       apt-get install -y -qq --no-install-recommends \$common libgtk-3-0t64 libasound2t64 >/dev/null 2>&1 || \
       apt-get install -y -qq --no-install-recommends \$common libgtk-3-0 libasound2 >/dev/null
+      # yt-dlp needs Python 3.11; Ubuntu 22.04's python3 is 3.10.
+      python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || apt-get install -y -qq python3.11 python3.11-venv >/dev/null
       useradd -m qa && cd /home/qa
       su qa -c 'cp /encore.AppImage ./e.AppImage && ./e.AppImage --appimage-extract >/dev/null && ./squashfs-root/AppRun --self-test $v ${SELF_TEST_ARGS:-}'
     "
