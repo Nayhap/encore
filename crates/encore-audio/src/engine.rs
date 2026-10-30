@@ -489,6 +489,8 @@ fn actor(
     let mut last_dev_check = Instant::now();
     // An output error seen at this time, with the callback count then.
     let mut suspect: Option<(Instant, u64)> = None;
+    // When the callback count last changed, and its value then.
+    let mut stall: (Instant, u64) = (Instant::now(), 0);
 
     let publish = |shared: &Arc<Mutex<SharedStatus>>, current: &Option<DeckInfo>, next: &Option<DeckInfo>| {
         let mut s = shared.lock();
@@ -662,13 +664,23 @@ fn actor(
         if atoms.device_error.swap(false, Ordering::Relaxed) && suspect.is_none() {
             suspect = Some((Instant::now(), atoms.callbacks.load(Ordering::Relaxed)));
         }
-        let device_error = match suspect {
+        let mut device_error = match suspect {
             Some((at, cbs)) if at.elapsed() > Duration::from_millis(400) => {
                 suspect = None;
                 atoms.callbacks.load(Ordering::Relaxed) == cbs
             }
             _ => false,
         };
+        // A device that goes away can also just stop calling back without
+        // reporting an error: a real output whose callback count hasn't
+        // moved for 1.5 s is treated the same way.
+        let cbs = atoms.callbacks.load(Ordering::Relaxed);
+        if cbs != stall.1 {
+            stall = (Instant::now(), cbs);
+        } else if no_output.is_none() && stall.0.elapsed() > Duration::from_millis(1500) {
+            device_error = true;
+            stall = (Instant::now(), cbs);
+        }
         if device_error || last_dev_check.elapsed() > Duration::from_secs(2) {
             let changed = last_dev_check.elapsed() > Duration::from_secs(2) && (no_output.is_some() || default_device_name().is_some_and(|n| n != out.name));
             last_dev_check = Instant::now();
