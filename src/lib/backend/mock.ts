@@ -139,7 +139,7 @@ function snap(): T.PlayerSnapshot {
     current: cur, index: P.index, position: P.position, duration: cur?.track.duration ?? null,
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
-    error: null, skippedInARow: 0, queueLoading: false,
+    error: null, skippedInARow: 0, queueLoading: false, noOutput: false,
   };
 }
 function publish(queueChanged = false) {
@@ -232,8 +232,9 @@ function replace(tracks: T.Track[], start: number, source: T.QueueSource | null,
   go(start);
 }
 
-// Start with a queue loaded but paused, like reopening the app.
-{
+// Start with a queue loaded but paused, like reopening the app (`?empty`
+// starts with nothing queued, like a fresh install).
+if (!new URLSearchParams(location.search).has("empty")) {
   const c = M.collections.find((x) => x.id === "pl-late")!;
   P.entries = c.trackIds.map((id) => ({ uid: uid(), track: track(id), origin: "collection" as const }));
   P.canon = P.entries.map((e) => e.uid);
@@ -265,6 +266,7 @@ export const mockApi: Api = {
     return delay({
       version: "mock",
       reportHistory,
+      notice: null,
       auth,
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },

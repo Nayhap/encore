@@ -90,7 +90,28 @@
       ui.say(`Could not change that: ${e.message}`);
     });
   }
-  const setupResolver = () => run("resolver", async () => (resolver = await call((a) => a.resolverSetup())));
+  // Errors from setting up playback belong on the resolver's own row, not
+  // in the account section at the top (where `run` puts them).
+  async function setupResolver() {
+    busy = "resolver";
+    try {
+      resolver = await call((a) => a.resolverSetup());
+    } catch {
+      await refreshResolver();
+    } finally {
+      busy = null;
+    }
+  }
+  async function refreshResolver() {
+    resolver = (await call((a) => a.bootstrap()).catch(() => null))?.resolver ?? resolver;
+  }
+  // Playback may get set up while Settings is open (pressing play retries
+  // it), so don't keep showing an old error.
+  $effect(() => {
+    if (resolver?.ready) return;
+    const t = setInterval(refreshResolver, 4000);
+    return () => clearInterval(t);
+  });
   const clear = (w: "audio" | "art" | "lyrics") =>
     run("cache", async () => {
       await call((a) => a.cacheClear(w));
@@ -139,6 +160,14 @@
           <button class="pill primary" disabled={!!busy || !isTauri} onclick={signIn}>{busy === "signin" ? "Opening…" : "Sign in"}</button>
           <button class="pill" disabled={!!busy} onclick={signOut}>Sign out</button>
         </div>
+      </div>
+    {:else if st.state === "choosingChannel"}
+      <div class="row">
+        <div>
+          <b>Choose a channel</b>
+          <p>{st.channels.length ? "Pick the channel Encore should use below." : "YouTube Music didn't list a channel for this session; it's probably signed out. Sign out here, then sign in again or import from a browser where you're signed in."}</p>
+        </div>
+        <button class="pill" disabled={!!busy} onclick={signOut}>{st.channels.length ? "Cancel" : "Sign out"}</button>
       </div>
     {:else if st.state === "anonymous"}
       <div class="row">

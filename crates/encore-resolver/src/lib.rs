@@ -27,6 +27,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 pub const YT_DLP_VERSION: &str = "2026.10.26";
 pub const YT_DLP_EJS_VERSION: &str = "0.8.0";
+/// yt-dlp 2026.10.26 needs Python 3.11 or newer.
+const MIN_PYTHON_MINOR: u32 = 11;
 const HELPER_SRC: &str = include_str!("../helper/encore_resolver.py");
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(60);
 const POOL: usize = 2;
@@ -106,11 +108,29 @@ fn search_paths() -> Vec<PathBuf> {
             v.push(PathBuf::from(pf).join("nodejs"));
         }
     }
+    #[cfg(unix)]
+    for p in [
+        // python.org installers on macOS, MacPorts, Linuxbrew, snaps.
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/opt/local/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+        "/snap/bin",
+    ] {
+        v.push(PathBuf::from(p));
+    }
     if let Some(h) = dirs::home_dir() {
         v.push(h.join(".deno/bin"));
         v.push(h.join(".bun/bin"));
         v.push(h.join(".local/bin"));
         v.push(h.join(".volta/bin"));
+        // Version managers put Node and Python under the home folder, and a
+        // program started from the desktop doesn't get their PATH changes.
+        v.push(h.join(".asdf/shims"));
+        v.push(h.join(".local/share/mise/shims"));
+        v.push(h.join(".pyenv/shims"));
+        v.push(h.join(".local/share/fnm/aliases/default/bin"));
+        v.push(h.join("Library/Application Support/fnm/aliases/default/bin"));
+        v.extend(newest_versions(&h.join(".nvm/versions/node"), "bin"));
     }
     #[cfg(windows)]
     if let Some(l) = dirs::data_local_dir() {
@@ -121,6 +141,16 @@ fn search_paths() -> Vec<PathBuf> {
     // running anything when Python isn't installed; try it last.
     v.sort_by_key(|p| p.to_string_lossy().to_ascii_lowercase().contains("windowsapps"));
     v
+}
+
+/// `<root>/<version>/<sub>` for each installed version, newest first
+/// (nvm keeps one directory per Node version, named like `v22.11.0`).
+fn newest_versions(root: &Path, sub: &str) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    let key = |n: &str| n.trim_start_matches('v').split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let mut dirs: Vec<(Vec<u64>, PathBuf)> = rd.filter_map(|e| e.ok()).map(|e| (key(&e.file_name().to_string_lossy()), e.path().join(sub))).collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.into_iter().map(|d| d.1).collect()
 }
 
 /// `name` plus the platform's executable suffix.
@@ -176,14 +206,15 @@ fn host_library_path() -> Option<Option<std::ffi::OsString>> {
     Some(std::env::join_paths(kept).ok())
 }
 
-/// `major.minor` if `p` runs a Python 3.10 or newer. `args` go before `-I`
+/// `major.minor` if `p` runs a Python 3.11 or newer (the oldest yt-dlp
+/// supports). `args` go before `-I`
 /// (the `py` launcher takes `-3`).
 async fn python_version(p: &Path, args: &[&str]) -> Option<String> {
-    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
+    let out = quiet(Command::new(p).args(args).args(["-I", "-X", "utf8", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let v = text.lines().next()?.trim().to_string();
     let (maj, min) = v.split_once('.')?;
-    let ok = maj.parse::<u32>().ok()? == 3 && min.parse::<u32>().ok()? >= 10;
+    let ok = maj.parse::<u32>().ok()? == 3 && min.parse::<u32>().ok()? >= MIN_PYTHON_MINOR;
     ok.then_some(v)
 }
 
@@ -191,9 +222,11 @@ async fn python_ok(p: &Path) -> Option<String> {
     python_version(p, &[]).await
 }
 
-/// The real interpreter behind a launcher (`py`, the Store alias).
+/// The real interpreter behind a launcher (`py`, the Store alias). `-X utf8`
+/// makes Python print the path in UTF-8: by default Windows pipes use the
+/// ANSI code page, which garbles a path under C:\Users\José.
 async fn python_executable(p: &Path, args: &[&str]) -> Option<PathBuf> {
-    let out = quiet(Command::new(p).args(args).args(["-I", "-c", "import sys; print(sys.executable)"])).output().await.ok()?;
+    let out = quiet(Command::new(p).args(args).args(["-I", "-X", "utf8", "-c", "import sys; print(sys.executable)"])).output().await.ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let pb = PathBuf::from(s);
     pb.is_file().then_some(pb)
@@ -230,7 +263,7 @@ fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
                 roots.push(PathBuf::from(pf));
             }
         }
-        for minor in (10..=14).rev() {
+        for minor in (MIN_PYTHON_MINOR..=16).rev() {
             for r in &roots {
                 push(r.join(format!("Python3{minor}")).join("python.exe"), vec![]);
             }
@@ -241,7 +274,7 @@ fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
         }
     }
     #[cfg(unix)]
-    for n in ["python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3"] {
+    for n in ["python3.16", "python3.15", "python3.14", "python3.13", "python3.12", "python3.11", "python3"] {
         for d in search_paths() {
             push(d.join(n), vec![]);
         }
@@ -267,6 +300,55 @@ async fn find_python() -> Option<(PathBuf, String)> {
     None
 }
 
+/// (Re)create the venv with `python`, replacing whatever is there.
+async fn create_venv(python: &Path, venv: &Path) -> Result<(), String> {
+    let out = quiet(Command::new(python).args(["-I", "-m", "venv", "--clear"]).arg(venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    // The first line says what went wrong; the last is often just a
+    // traceback footer such as "<no Python frame>".
+    let first = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    // Debian and Ubuntu ship venv separately, and say so on stdout.
+    let both = format!("{err}\n{}", String::from_utf8_lossy(&out.stdout));
+    if cfg!(target_os = "linux") && (both.contains("ensurepip") || both.contains("python3-venv")) {
+        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then play the song again.".into());
+    }
+    let first = if first.is_empty() { both.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details") } else { first };
+    Err(format!("Setting up Python for playback failed: {first}"))
+}
+
+struct PipError {
+    text: String,
+    /// pip couldn't reach the package index.
+    offline: bool,
+}
+
+async fn pip_install(py: &Path) -> Result<(), PipError> {
+    let out = quiet(&mut Command::new(py))
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-q", "--upgrade", "--retries", "2", "--timeout", "20"])
+        .arg(format!("yt-dlp=={YT_DLP_VERSION}"))
+        .arg(format!("yt-dlp-ejs=={YT_DLP_EJS_VERSION}"))
+        .env("PIP_NO_INPUT", "1")
+        .output()
+        .await
+        .map_err(|e| PipError { text: format!("could not run pip: {}", e.kind()), offline: false })?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(PipError { text: err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("pip error").trim().to_string(), offline: pip_offline(&err) })
+}
+
+/// pip's output when the package index can't be reached.
+fn pip_offline(stderr: &str) -> bool {
+    let e = stderr.to_ascii_lowercase();
+    ["newconnectionerror", "connection refused", "temporary failure in name resolution", "name or service not known", "nodename nor servname", "getaddrinfo failed", "network is unreachable", "read timed out", "connecttimeouterror", "max retries exceeded"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
 /// The venv interpreter (`Scripts/python.exe` on Windows).
 pub fn venv_python(venv: &Path) -> PathBuf {
     if cfg!(windows) { venv.join("Scripts").join("python.exe") } else { venv.join("bin").join("python3") }
@@ -275,26 +357,35 @@ pub fn venv_python(venv: &Path) -> PathBuf {
 /// What to install, for the first-run message.
 pub fn missing_python_message() -> &'static str {
     if cfg!(windows) {
-        "Python 3.10 or newer was not found. Install it from python.org (or run “winget install Python.Python.3.13”), then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install it from python.org (or run “winget install Python.Python.3.13”), then play the song again."
     } else if cfg!(target_os = "macos") {
-        "Python 3.10 or newer was not found. Install Python 3 (for example with “brew install python”), then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install Python 3 (for example with “brew install python”), then play the song again."
     } else {
-        "Python 3.10 or newer was not found. Install python3 and python3-venv with your package manager, then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install Python 3 with your package manager (python3 and python3-venv on Debian and Ubuntu; python3.11 and python3.11-venv on Ubuntu 22.04), then play the song again."
     }
 }
 
 pub fn missing_js_message() -> &'static str {
     if cfg!(windows) {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js from nodejs.org (or “winget install OpenJS.NodeJS.LTS”), Deno or Bun, then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js from nodejs.org (or “winget install OpenJS.NodeJS.LTS”), Deno or Bun, then play the song again."
     } else if cfg!(target_os = "macos") {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js, Deno or Bun (for example with “brew install node”), then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js, Deno or Bun (for example with “brew install node”), then play the song again."
     } else {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js (nodejs), Deno or Bun, then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js (nodejs), Deno or Bun, then play the song again."
     }
 }
 
+/// What the venv must have installed. The helper script isn't part of it: it
+/// is rewritten whenever it changes, without reinstalling anything (so an
+/// update that only changes the helper works offline).
 fn marker() -> String {
-    format!("yt-dlp=={YT_DLP_VERSION} yt-dlp-ejs=={YT_DLP_EJS_VERSION} helper={:x}", fxhash(HELPER_SRC))
+    format!("yt-dlp=={YT_DLP_VERSION} yt-dlp-ejs=={YT_DLP_EJS_VERSION}")
+}
+
+/// Whether a `.encore-ready` marker (this version's, or an older one that
+/// also recorded a helper hash) says the right packages are installed.
+fn marker_ok(found: &str) -> bool {
+    found.split(" helper=").next() == Some(marker().as_str())
 }
 
 fn fxhash(s: &str) -> u64 {
@@ -316,6 +407,61 @@ struct HelperFormat {
     #[serde(default)]
     available_at: Option<f64>,
     authenticated: bool,
+}
+
+/// yt-dlp's error text ("ERROR: [youtube] abc: Sign in to confirm your
+/// age…") turned into a sentence for people. The original goes to the log.
+pub fn friendly_message(kind: PlayFailureKind, raw: &str, signed_in: bool) -> String {
+    let m = raw.to_ascii_lowercase();
+    match kind {
+        PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::Unknown => {
+            if m.contains("confirm your age") || m.contains("age-restricted") || m.contains("inappropriate for some users") {
+                return if signed_in { "YouTube won't play this age-restricted song for this account.".into() } else { "This song is age-restricted. Sign in from Settings to play it.".into() };
+            }
+            if m.contains("country") || m.contains("region") || m.contains("geo") {
+                return "This song isn't available in your country.".into();
+            }
+            if m.contains("premium") || m.contains("members-only") || m.contains("members only") || m.contains("join this channel") {
+                return "This song needs a YouTube Music Premium or channel membership.".into();
+            }
+            if m.contains("private video") {
+                return "This song is private on YouTube.".into();
+            }
+            if m.contains("removed") || m.contains("terminated") || m.contains("copyright") || m.contains("no longer available") || m.contains("video unavailable") || m.contains("not available") || m.contains("unavailable") {
+                return "This song is no longer available on YouTube.".into();
+            }
+            if m.contains("drm") {
+                return "This song is protected (DRM) and Encore can't play it.".into();
+            }
+            if kind == PlayFailureKind::SessionExpired {
+                return "Your YouTube Music session expired. Sign in again from Settings.".into();
+            }
+            if m.contains("no audio formats") {
+                return "YouTube offered no audio for this song.".into();
+            }
+        }
+        PlayFailureKind::Challenged => {
+            return if signed_in {
+                "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again.".into()
+            } else {
+                "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again, or sign in from Settings.".into()
+            };
+        }
+        PlayFailureKind::Network => return "Couldn't reach YouTube. Check your internet connection.".into(),
+        PlayFailureKind::Setup => return raw.to_string(),
+    }
+    // Something unrecognised: keep yt-dlp's words, without its prefixes.
+    let short = raw.trim().trim_start_matches("ERROR:").trim();
+    let short = match short.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map(|(_, r)| r).unwrap_or(short),
+        None => short,
+    };
+    // "abc123xyz_-: message" → "message"
+    let short = match short.split_once(": ") {
+        Some((id, r)) if id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => r,
+        _ => short,
+    };
+    format!("YouTube refused to play it: {short}")
 }
 
 fn fail(kind: PlayFailureKind, m: impl Into<String>) -> PlayFailure {
@@ -355,6 +501,7 @@ impl YtDlpResolver {
                     st.message = None;
                 }
                 Err(e) => {
+                    tracing::warn!(error = %e, "playback setup failed");
                     st.ready = false;
                     st.message = Some(e.clone());
                 }
@@ -382,35 +529,30 @@ impl YtDlpResolver {
         let mark = venv.join(".encore-ready");
         let want = marker();
         let helper = root.join("encore_resolver.py");
-        let ready = py.is_file() && std::fs::read_to_string(&mark).ok().as_deref() == Some(want.as_str());
+        let ready = py.is_file() && std::fs::read_to_string(&mark).is_ok_and(|m| marker_ok(&m));
         if !ready {
             let (sys_py, ver) = find_python().await.ok_or(missing_python_message())?;
             self.status.lock().python = Some(ver);
             if !py.is_file() {
-                let out = quiet(Command::new(&sys_py).args(["-I", "-m", "venv", "--clear"]).arg(&venv)).output().await.map_err(|e| format!("could not start Python: {}", e.kind()))?;
-                if !out.status.success() {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    // The first line says what went wrong; the last is often
-                    // just a traceback footer such as "<no Python frame>".
-                    let last = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-                    // Debian and Ubuntu ship venv separately.
-                    if cfg!(target_os = "linux") && (err.contains("ensurepip") || err.contains("python3-venv")) {
-                        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
-                    }
-                    return Err(format!("creating the resolver venv failed: {last}"));
+                create_venv(&sys_py, &venv).await?;
+            }
+            // A venv left half-made (Encore quit during setup, a Python that
+            // was upgraded or removed) may have no working pip: start it
+            // again from scratch once before giving up.
+            let mut pip = pip_install(&py).await;
+            if let Err(e) = &pip {
+                if !e.offline {
+                    tracing::warn!(error = %e.text, "yt-dlp install failed; recreating the venv");
+                    create_venv(&sys_py, &venv).await?;
+                    pip = pip_install(&py).await;
                 }
             }
-            let out = quiet(&mut Command::new(&py))
-                .args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-q", "--upgrade"])
-                .arg(format!("yt-dlp=={YT_DLP_VERSION}"))
-                .arg(format!("yt-dlp-ejs=={YT_DLP_EJS_VERSION}"))
-                .env("PIP_NO_INPUT", "1")
-                .output()
-                .await
-                .map_err(|e| format!("could not run pip: {}", e.kind()))?;
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(format!("installing yt-dlp failed: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("pip error")));
+            if let Err(e) = pip {
+                return Err(if e.offline {
+                    "Encore couldn't download yt-dlp, which it needs to play songs. Check your internet connection; Encore tries again when you press play.".to_string()
+                } else {
+                    format!("Installing yt-dlp failed: {}", e.text)
+                });
             }
             std::fs::write(&helper, HELPER_SRC).map_err(|e| format!("cannot write helper: {}", e.kind()))?;
             std::fs::write(&mark, &want).map_err(|e| format!("cannot write marker: {}", e.kind()))?;
@@ -471,7 +613,7 @@ impl YtDlpResolver {
     }
 
     async fn call(&self, req: Value) -> Result<Value, PlayFailure> {
-        let env = self.env().await.map_err(|e| fail(PlayFailureKind::Unknown, e))?;
+        let env = self.env().await.map_err(|e| fail(PlayFailureKind::Setup, e))?;
         // Pick a free helper slot, else wait on the first.
         let mut slot = None;
         for m in &self.pool {
@@ -517,7 +659,7 @@ impl YtDlpResolver {
             }
             Err(_) => {
                 *guard = None; // kill on drop
-                Err(fail(PlayFailureKind::Network, "resolving the stream timed out"))
+                Err(fail(PlayFailureKind::Network, "Getting the song from YouTube took too long. Check your internet connection and try again."))
             }
         }
     }
@@ -541,7 +683,8 @@ impl YtDlpResolver {
                 Some("network") => PlayFailureKind::Network,
                 _ => PlayFailure::classify(msg, auth.is_some()).kind,
             };
-            return Err(fail(kind, msg.to_string()));
+            tracing::info!(video = video_id, ?kind, error = msg, "yt-dlp could not resolve");
+            return Err(fail(kind, friendly_message(kind, msg, auth.is_some())));
         }
         let f: HelperFormat = serde_json::from_value(v.get("format").cloned().unwrap_or_default()).map_err(|_| fail(PlayFailureKind::Unknown, "the resolver returned an unreadable format"))?;
         // Honour the server's "not before" time for this URL (TV client URLs
@@ -593,7 +736,7 @@ impl YtDlpResolver {
             }
             rb.send()
         };
-        let r = get("bytes=0-1023".into()).await.map_err(|e| fail(PlayFailureKind::Network, if e.is_timeout() { "media server timed out" } else { "could not reach the media server" }))?;
+        let r = get("bytes=0-1023".into()).await.map_err(|e| fail(PlayFailureKind::Network, if e.is_timeout() { "YouTube's media server didn't answer in time. Check your internet connection." } else { "Couldn't reach YouTube's media server. Check your internet connection." }))?;
         let st = r.status().as_u16();
         if st == 403 || st == 410 {
             return Err(fail(PlayFailureKind::Challenged, format!("the media server refused the stream ({st})")));
@@ -643,7 +786,10 @@ impl StreamResolver for YtDlpResolver {
         for attempt in 0..2 {
             let mut s = match self.extract(video_id, auth).await {
                 Ok(s) => s,
-                Err(e) if e.kind == PlayFailureKind::Unavailable || e.kind == PlayFailureKind::SessionExpired => return Err(e),
+                Err(e) if matches!(e.kind, PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::Setup) => {
+                    self.inflight.lock().remove(&key);
+                    return Err(e);
+                }
                 Err(e) => {
                     last = Some(e);
                     continue;
@@ -672,5 +818,49 @@ impl StreamResolver for YtDlpResolver {
 
     fn forget(&self, video_id: &str) {
         self.cache.lock().retain(|k, _| !k.starts_with(&format!("{video_id}|")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markers_from_older_versions_still_count() {
+        assert!(marker_ok(&marker()));
+        assert!(marker_ok(&format!("{} helper=774be87ab3f445a3", marker())));
+        assert!(!marker_ok("yt-dlp==2020.01.01 yt-dlp-ejs==0.1.0 helper=1"));
+    }
+
+    #[test]
+    fn pip_offline_is_recognised() {
+        assert!(pip_offline("WARNING: Retrying (Retry(total=1...)) after connection broken by 'NewConnectionError(...: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')'"));
+        assert!(pip_offline("ERROR: Could not find a version... (from versions: none)\nWARNING: ... getaddrinfo failed"));
+        assert!(!pip_offline("ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device"));
+    }
+
+    #[test]
+    fn yt_dlp_errors_read_as_sentences() {
+        let age = "ERROR: [youtube] 4D7u5KF7SP8: Sign in to confirm your age. This video may be inappropriate for some users.";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, age, false), "This song is age-restricted. Sign in from Settings to play it.");
+        let geo = "ERROR: [youtube] 4D7u5KF7SP8: Video unavailable. The uploader has not made this video available in your country";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, geo, false), "This song isn't available in your country.");
+        let gone = "ERROR: [youtube] 4D7u5KF7SP8: Video unavailable. This video has been removed by the uploader";
+        assert_eq!(friendly_message(PlayFailureKind::Unavailable, gone, true), "This song is no longer available on YouTube.");
+        let odd = "ERROR: [youtube] 4D7u5KF7SP8: Something new happened";
+        assert_eq!(friendly_message(PlayFailureKind::Unknown, odd, false), "YouTube refused to play it: Something new happened");
+        assert!(!friendly_message(PlayFailureKind::Challenged, "Sign in to confirm you're not a bot", false).contains("ERROR"));
+    }
+
+    #[test]
+    fn nvm_versions_newest_first() {
+        let root = std::env::temp_dir().join(format!("encore-nvm-{}", std::process::id()));
+        for v in ["v9.11.2", "v22.11.0", "v20.18.1"] {
+            std::fs::create_dir_all(root.join(v).join("bin")).unwrap();
+        }
+        let got = newest_versions(&root, "bin");
+        assert_eq!(got[0], root.join("v22.11.0").join("bin"));
+        assert_eq!(got[2], root.join("v9.11.2").join("bin"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

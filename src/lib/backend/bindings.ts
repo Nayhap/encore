@@ -267,6 +267,8 @@ export type Bootstrap_Deserialize = {
 	resolver: ResolverStatus_Deserialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Something from startup the user should know (shown once). */
+	notice?: string | null,
 };
 
 export type Bootstrap_Serialize = {
@@ -277,6 +279,8 @@ export type Bootstrap_Serialize = {
 	resolver: ResolverStatus_Serialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Something from startup the user should know (shown once). */
+	notice: string | null,
 };
 
 export type BrowserProfile = {
@@ -725,7 +729,13 @@ export type PlayFailure = {
 	message: string,
 };
 
-export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown";
+export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown" | 
+/**
+ *  Playback isn't set up on this computer (no Python, no JS runtime, the
+ *  yt-dlp download failed). No song can play until that's fixed, so the
+ *  player doesn't skip through the queue.
+ */
+"setup";
 
 /**  `player:position`, a 2 Hz anchor (also right after seek/pause). */
 export type PlayerPositionEvent = PlayerPositionEvent_Serialize | PlayerPositionEvent_Deserialize;
@@ -759,6 +769,8 @@ export type PlayerSnapshot_Deserialize = {
 	/**  Auto-skips in a row (D4: at most 3). */
 	skippedInARow: number,
 	queueLoading: boolean,
+	/**  No audio output could be opened: playback runs silent until one works. */
+	noOutput: boolean,
 };
 
 export type PlayerSnapshot_Serialize = {
@@ -782,6 +794,8 @@ export type PlayerSnapshot_Serialize = {
 	/**  Auto-skips in a row (D4: at most 3). */
 	skippedInARow: number,
 	queueLoading: boolean,
+	/**  No audio output could be opened: playback runs silent until one works. */
+	noOutput: boolean,
 };
 
 /**  `player:state`, sent on every change. */

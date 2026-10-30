@@ -1528,6 +1528,7 @@ dependencies = [
  "sha2 0.11.1",
  "specta",
  "thiserror 2.0.21",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -1574,6 +1575,7 @@ dependencies = [
  "serde_json",
  "specta",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@ mod core;
 mod events;
 mod logging;
 mod media;
+mod selftest;
 mod signin;
 mod window;
 
@@ -170,10 +171,15 @@ fn keepalive(app: tauri::AppHandle, core: Arc<Core>) {
 pub fn run() {
     let paths = core::Paths::new();
     logging::init(&paths.logs);
+    if selftest::wanted() {
+        selftest::run();
+    }
     let builder = specta_builder();
     let app = tauri::Builder::default();
-    // One Encore at a time: a second launch shows the running one.
-    #[cfg(not(target_os = "macos"))]
+    // One Encore at a time: a second launch shows the running one. macOS
+    // usually prevents a second copy itself, but not for a copy started from
+    // another place (the disk image, Downloads) or with `open -n`; two
+    // instances would share one database and play over each other.
     let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.unminimize();
@@ -189,7 +195,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let resp = match art::parse_request(&uri) {
                     Some((key, size)) => {
-                        let core = app.state::<Arc<Core>>().inner().clone();
+                        let Some(core) = app.try_state::<Arc<Core>>().map(|c| c.inner().clone()) else {
+                            responder.respond(tauri::http::Response::new(Vec::new()));
+                            return;
+                        };
                         match core.art.get(&key, size).await {
                             Ok((bytes, mime)) => tauri::http::Response::builder().status(200).header("Content-Type", mime).header("Cache-Control", "max-age=604800").body(bytes),
                             Err(e) => {
@@ -209,7 +218,16 @@ pub fn run() {
             window::create_main(app.handle())?;
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
-            let core = tauri::async_runtime::block_on(async { Core::new() }).map_err(|e| e.message)?;
+            let core = match tauri::async_runtime::block_on(async { Core::new() }) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Failing here used to close Encore without a word. Keep
+                    // the window up and let the UI say what went wrong.
+                    tracing::error!(error = %e.message, "Encore could not start");
+                    app.manage(core::StartupFailure(core::startup_failure_message(&e.message)));
+                    return Ok(());
+                }
+            };
             tracing::info!(ms = t0.elapsed().as_millis() as u64, "core ready");
             app.manage(core.clone());
             let handle = app.handle().clone();
@@ -227,12 +245,28 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let acc = c3.accounts.clone();
                 let r = tokio::task::spawn_blocking(move || acc.restore()).await;
-                if let Ok(Ok(st)) = r {
-                    if !matches!(st, encore_core::model::AuthState::Anonymous) {
-                        c3.player.stop();
-                        c3.switch_queue();
+                match r {
+                    Ok(Ok(st)) => {
+                        if !matches!(st, encore_core::model::AuthState::Anonymous) {
+                            c3.player.stop();
+                            c3.switch_queue();
+                        }
+                        let _ = AuthEvent(st).emit(&h3);
                     }
-                    let _ = AuthEvent(st).emit(&h3);
+                    Ok(Err(e)) => {
+                        // Access denied at the Keychain prompt, a locked keyring:
+                        // say why the account is gone instead of silently
+                        // starting signed out. (No Secret Service at all just
+                        // means there is nothing saved.)
+                        tracing::warn!(error = %e.message, "could not restore the session");
+                        if !e.message.starts_with("No Secret Service") {
+                            let text = format!("Encore couldn't read your saved sign-in: {} You're signed out for now. Restart Encore and allow access, or sign in again from Settings.", e.message);
+                            if let Some(text) = c3.startup_notice(text) {
+                                let _ = NoticeEvent { text, level: "error".into(), action: None }.emit(&h3);
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
             });
             forward_player_events(handle.clone(), core.clone());

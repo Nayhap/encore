@@ -7,7 +7,7 @@ On every system:
 - [Rust](https://rustup.rs) 1.95 or newer
 - [Bun](https://bun.sh)
 - `cmake`, used to build the bundled Opus decoder
-- Python 3.10+ and Node.js, Deno or Bun, used at runtime to resolve streams
+- Python 3.11+ and Node.js, Deno or Bun, used at runtime to resolve streams
 
 ### macOS
 
@@ -54,7 +54,8 @@ bun run dev                          # the UI alone in a browser, on mock data
 
 `bun run dev` serves the UI at <http://localhost:1420> with a mock backend, so
 you can work on the design without a YouTube session. Add `?signedin` to the
-URL to start with a signed-in mock library, and `?os=windows` or `?os=linux` to
+URL to start with a signed-in mock library, `?empty` to start with nothing
+queued (a fresh install), and `?os=windows` or `?os=linux` to
 see the window buttons and key labels of the other systems.
 
 ## Build
@@ -78,6 +79,21 @@ bun run check                        # svelte-check
 Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
 Personal fields are scrubbed when they are recorded; never commit a recording
 made with your own session without running it through `encore-cli record`.
+
+### Testing a built bundle
+
+`encore --self-test [VIDEO_ID]` checks, without opening a window, what
+depends on the machine: the data folder and database, the audio output,
+the yt-dlp setup (Python, the venv, a JavaScript runtime) and, given a video
+id, resolving and decoding a real stream. It prints a JSON report and exits
+non-zero if playback can't work. YouTube's bot checks don't count as a
+failure unless you add `--strict`; on Windows add `--out report.json`, since
+release builds have no console.
+
+`scripts/self-test-bundle.sh` (`appimage`, `appimage-in <docker image>`,
+`deb`, `app`) and `scripts/self-test-bundle.ps1` (the NSIS installer) run it
+from the installed artifact, as users get it. CI runs them on every pull
+request and the release workflow before it drafts a release.
 
 ## The command-line tool
 

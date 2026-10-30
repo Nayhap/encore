@@ -102,11 +102,28 @@ impl Accounts {
     /// Take a fresh cookie jar (import or in-app sign-in) and move to the
     /// channel picker.
     pub async fn adopt(&self, session: Session) -> Result<AuthState> {
-        *self.expired.lock() = None;
+        let previous = self.it().session();
+        let was_expired = self.expired.lock().take();
         self.it().set_session(Some(session));
         // D8: sync rotated cookies right away, before the first InnerTube call.
+        // (Rotated cookies are saved as they arrive, see `new`.)
         let _ = self.it().verify_session().await;
-        self.load_channels().await?;
+        if let Err(e) = self.load_channels().await {
+            // A signed-out or stale session must not replace the one the
+            // user had: it was already saved by the rotation hook, and after a
+            // restart Encore was stuck on "Choose a channel" with none.
+            self.it().set_session(previous.clone());
+            *self.expired.lock() = was_expired;
+            self.channels.lock().clear();
+            let _ = match &previous {
+                Some(p) => save_session(self.store.as_ref(), p),
+                None => self.store.delete(),
+            };
+            if previous.is_some() {
+                let _ = self.load_channels().await;
+            }
+            return Err(e);
+        }
         let s = self.it().session().ok_or_else(AppError::auth_required)?;
         if let Err(e) = save_session(self.store.as_ref(), &s) {
             // Never keep a session that can't be stored safely (no plaintext fallback).

@@ -21,7 +21,32 @@ pub fn system_titlebar() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn create_main(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let cfg = app.config().app.windows.first().cloned().unwrap_or_default();
-    tauri::WebviewWindowBuilder::from_config(app, &cfg)?.decorations(system_titlebar()).build()
+    let w = tauri::WebviewWindowBuilder::from_config(app, &cfg)?.decorations(system_titlebar()).build()?;
+    fit_to_screen(&w);
+    Ok(w)
+}
+
+/// The default 1360×860 window is taller than a 1366×768 laptop screen and,
+/// on a 1080p screen, its player bar ended up behind the taskbar. Shrink it
+/// to the screen's work area (not below the minimum size) and center it.
+#[cfg(not(target_os = "macos"))]
+fn fit_to_screen(w: &tauri::WebviewWindow) {
+    let Ok(Some(m)) = w.current_monitor() else { return };
+    let area = m.work_area();
+    let Ok(size) = w.outer_size() else { return };
+    let margin = (24.0 * m.scale_factor()) as u32;
+    let (aw, ah) = (area.size.width.saturating_sub(margin), area.size.height.saturating_sub(margin));
+    if size.width <= aw && size.height <= ah {
+        let _ = w.center();
+        return;
+    }
+    let (min_w, min_h) = ((880.0 * m.scale_factor()) as u32, (600.0 * m.scale_factor()) as u32);
+    let inner = w.inner_size().unwrap_or(size);
+    let (dw, dh) = (size.width.saturating_sub(inner.width), size.height.saturating_sub(inner.height));
+    let width = size.width.min(aw).max(min_w).saturating_sub(dw);
+    let height = size.height.min(ah).max(min_h).saturating_sub(dh);
+    let _ = w.set_size(tauri::PhysicalSize::new(width, height));
+    let _ = w.center();
 }
 
 /// Whether the system title bar is on. The window's chrome follows this, so

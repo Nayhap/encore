@@ -51,6 +51,8 @@ pub struct PlayerSnapshot {
     /// Auto-skips in a row (D4: at most 3).
     pub skipped_in_a_row: u32,
     pub queue_loading: bool,
+    /// No audio output could be opened: playback runs silent until one works.
+    pub no_output: bool,
 }
 
 /// A queue change as a splice of the previous revision (D13). `base` is the

@@ -64,15 +64,24 @@ Download the latest build from
 [Releases](https://github.com/Nayhap/encore/releases/latest), or
 [build it yourself](docs/development.md).
 
-- **macOS**: `Encore.app`. Apple silicon and Intel.
-- **Windows 10 and 11**: the `-setup.exe` installer (or the `.msi`). It
-  installs for your user and needs no admin rights. Builds are not code-signed
+- **macOS**: the `.dmg`, for Apple silicon and Intel. Open it and drag Encore
+  to Applications. Builds are not code-signed yet, so the first time you open
+  Encore, macOS says “Encore” Not Opened: choose **Done**, then go to
+  **System Settings → Privacy & Security** and choose **Open Anyway**. Once you sign in, macOS asks for access to your saved
+  session in the Keychain; choose **Always Allow**.
+- **Windows 10 and 11**: the `-setup.exe` installer, which installs for your
+  user and needs no admin rights. The `.msi` installs for all users and
+  needs an administrator. Builds are not code-signed
   yet: SmartScreen warns on first run (choose **More info**, then **Run
   anyway**), and if Smart App Control is on, Windows blocks them.
-- **Linux**: the `.deb` for Debian and Ubuntu, or the `.AppImage`. Needs
-  WebKitGTK 4.1, and GNOME Keyring or KWallet to stay signed in.
+- **Linux**: the `.deb` for Debian 12 and Ubuntu 22.04 or newer, or the
+  `.AppImage` for other distributions with glibc 2.35 or newer. The AppImage
+  uses the system's OpenGL and sound libraries, which desktops have; on a
+  minimal system install them first (`libegl1 libgl1 libgles2 libgbm1
+  libasound2` on Debian and Ubuntu, `libglvnd-gles alsa-lib` on Fedora). To
+  stay signed in you need GNOME Keyring or KWallet.
 
-Playback needs **Python 3.10 or newer** and **Node.js, Deno or Bun**. Encore
+Playback needs **Python 3.11 or newer** and **Node.js, Deno or Bun**. Encore
 sets up its own copy of [yt-dlp](https://github.com/yt-dlp/yt-dlp) on first
 launch and uses it to get audio streams.
 
@@ -80,8 +89,16 @@ launch and uses it to get audio streams.
 |---|---|
 | macOS | `brew install python node` |
 | Windows | Python from [python.org](https://www.python.org/downloads/) and Node.js from [nodejs.org](https://nodejs.org), or `winget install Python.Python.3.13 OpenJS.NodeJS.LTS` |
-| Debian, Ubuntu | `sudo apt install python3 python3-venv nodejs` |
+| Debian 12+, Ubuntu 24.04+ | `sudo apt install python3 python3-venv nodejs` |
+| Ubuntu 22.04 | `sudo apt install python3.11 python3.11-venv`, and Node.js 20 or newer from [nodejs.org](https://nodejs.org) (Ubuntu's own is too old) |
 | Fedora | `sudo dnf install python3 nodejs` |
+| Arch | `sudo pacman -S python nodejs` |
+
+Uninstalling keeps Encore's caches, settings and its copy of yt-dlp (a few
+hundred MB at most) unless you tick **Delete the application data** in the
+Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
+lists the folders to delete by hand on macOS and Linux, and the saved session
+in the system's credential store.
 
 ## Signing in
 

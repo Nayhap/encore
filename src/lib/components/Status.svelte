@@ -6,6 +6,19 @@
   // Loading, empty and error states shared by the views.
   let { loading = false, error = null, empty = null, onretry }: { loading?: boolean; error?: BackendError | null; empty?: string | null; onretry?: () => void } = $props();
   const info = $derived(error ? explain(error) : null);
+
+  // Offline pages come back by themselves once the connection does: when
+  // the system says it's online again, and every 20 s in case it doesn't.
+  $effect(() => {
+    if (error?.code !== "network" || !onretry) return;
+    const retry = onretry;
+    addEventListener("online", retry);
+    const t = setInterval(retry, 20000);
+    return () => {
+      removeEventListener("online", retry);
+      clearInterval(t);
+    };
+  });
 </script>
 
 {#if error && info}
