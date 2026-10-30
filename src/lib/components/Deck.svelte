@@ -24,7 +24,15 @@
       </button>
       <div class="meta">
         <button class="title ell" onclick={() => tr.album?.id && nav.go({ name: "collection", id: tr.album.id })} title={tr.title}>{tr.title}</button>
-        <button class="artist ell" onclick={() => artistId && nav.go({ name: "artist", id: artistId })}>{artistLine(tr)}</button>
+        {#if player.noOutput || (player.phase === "error" && player.error)}
+          <!-- Say why nothing is heard, for as long as it's true (the
+               notice that also says so goes away after a few seconds). -->
+          <span class="status ell" role="status" title={player.noOutput ? "No audio output" : player.error}>
+            {player.noOutput ? "No audio output: connect speakers or headphones" : player.error}
+          </span>
+        {:else}
+          <button class="artist ell" onclick={() => artistId && nav.go({ name: "artist", id: artistId })}>{artistLine(tr)}</button>
+        {/if}
       </div>
       <button
         class="icon-btn"
@@ -43,7 +51,7 @@
           {#if player.shuffle}<i class="dot"></i>{/if}
         </button>
         <button class="icon-btn" aria-label="Previous" title="Previous ({mod('←')})" onclick={() => player.prev()}><Icon name="prev" size={20} /></button>
-        <button class="play" aria-label={player.playing ? "Pause" : "Play"} title="{player.playing ? 'Pause' : 'Play'} (Space)" onclick={() => player.toggle()}>
+        <button class="play" class:loading={player.phase === "loading" || player.phase === "buffering"} aria-label={player.playing ? "Pause" : "Play"} aria-busy={player.phase === "loading"} title="{player.phase === 'loading' ? 'Loading… ' : ''}{player.playing ? 'Pause' : 'Play'} (Space)" onclick={() => player.toggle()}>
           <Icon name={player.playing ? "pause" : "play"} size={20} />
         </button>
         <button class="icon-btn" aria-label="Next" title="Next ({mod('→')})" onclick={() => player.next()}><Icon name="next" size={20} /></button>
@@ -79,6 +87,39 @@
         />
       </div>
     </div>
+  {:else}
+    <!-- Nothing loaded yet (a fresh install, a cleared queue): keep the bar's
+         shape so the window doesn't look broken, and say how to start. -->
+    <div class="now idle">
+      <span class="art-empty" aria-hidden="true"><Icon name="lyrics" size={22} /></span>
+      <div class="meta">
+        <span class="title">Nothing playing</span>
+        <button class="artist hint" onclick={() => (ui.palette = true)}>Search with {mod("K")} to start</button>
+      </div>
+    </div>
+    <div class="transport idle" aria-hidden="true">
+      <div class="buttons">
+        <span class="icon-btn"><Icon name="shuffle" size={18} /></span>
+        <span class="icon-btn"><Icon name="prev" size={20} /></span>
+        <span class="play"><Icon name="play" size={20} /></span>
+        <span class="icon-btn"><Icon name="next" size={20} /></span>
+        <span class="icon-btn"><Icon name="repeat" size={18} /></span>
+      </div>
+      <div class="scrub">
+        <span class="mono time">0:00</span>
+        <span class="track-empty"></span>
+        <span class="mono time">0:00</span>
+      </div>
+    </div>
+    <div class="tools">
+      <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel ({mod('\\')})" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
+      <div class="volume">
+        <button class="icon-btn" aria-label={player.muted ? "Unmute" : "Mute"} onclick={() => player.setMuted(!player.muted)}>
+          <Icon name={vol === 0 ? "mute" : vol < 0.5 ? "volumeLow" : "volume"} size={19} />
+        </button>
+        <input type="range" min="0" max="1" step="0.01" value={vol} aria-label="Volume" style:--v="{vol * 100}%" oninput={(e) => player.setVolume(+e.currentTarget.value)} />
+      </div>
+    </div>
   {/if}
 </footer>
 
@@ -95,6 +136,34 @@
     background: var(--panel);
     position: relative;
     z-index: 3;
+  }
+
+  .art-empty {
+    display: grid;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    flex: none;
+    border-radius: 6px;
+    color: var(--mute);
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--text) 16%, transparent);
+  }
+  .idle .title {
+    color: var(--mute);
+  }
+  .hint {
+    text-align: left;
+  }
+  .transport.idle {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .track-empty {
+    flex: 1;
+    height: 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--text) 18%, transparent);
   }
 
   .now {
@@ -145,6 +214,10 @@
     font-size: 13px;
     color: var(--mute);
   }
+  .status {
+    font-size: 12.5px;
+    color: color-mix(in srgb, var(--accent) 70%, var(--text));
+  }
   .now .more {
     opacity: 0;
   }
@@ -168,6 +241,7 @@
     position: relative;
   }
   .play {
+    position: relative;
     display: grid;
     place-items: center;
     width: 38px;
@@ -176,6 +250,30 @@
     background: var(--text);
     color: var(--ink);
     transition: transform 0.15s var(--ease);
+  }
+  /* Getting a stream can take several seconds: show that something is
+     happening instead of a play button that seems to do nothing. */
+  .play.loading::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--text);
+    animation: spin 0.9s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .play.loading::after {
+      animation: none !important;
+      border-color: color-mix(in srgb, var(--text) 35%, transparent);
+      border-top-color: var(--text);
+      border-right-color: var(--text);
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .play:hover {
     transform: scale(1.06);

@@ -98,6 +98,12 @@ fn map(e: keyring::Error) -> StoreError {
             return StoreError::Unavailable;
         }
     }
+    // macOS reports "Deny" at the Keychain prompt as a platform failure
+    // ("User canceled the operation"), not as a refusal.
+    let t = text.to_ascii_lowercase();
+    if ["user canceled", "user cancelled", "interaction is not allowed", "authorization was denied", "auth failed"].iter().any(|k| t.contains(k)) {
+        return StoreError::Denied;
+    }
     match e {
         keyring::Error::NoStorageAccess(_) => StoreError::Denied,
         _ => StoreError::Other(encore_core::redact::redact(&text)),

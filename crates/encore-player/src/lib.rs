@@ -25,6 +25,9 @@ pub const PRELOAD_LEAD: f64 = 20.0;
 const MAX_AUTO_SKIPS: u32 = 3;
 const RADIO_LOW_WATER: usize = 3;
 const SHUFFLE_ENUM_LIMIT: usize = 10_000;
+/// How long a newly chosen song must stay chosen before its stream is
+/// resolved (see `play_current`).
+const SKIP_SETTLE: Duration = Duration::from_millis(400);
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
 
@@ -54,6 +57,9 @@ struct State {
     /// during loading).
     pending_pos: f64,
     skips: u32,
+    /// The current song stopped because the player components weren't
+    /// installed; it starts once they are (D22).
+    awaiting_setup: bool,
     radio_cursor: Option<String>,
     radio_loading: bool,
     radio_empty: u32,
@@ -112,6 +118,7 @@ impl Player {
                 preloading: false,
                 pending_pos: 0.0,
                 skips: 0,
+                awaiting_setup: false,
                 radio_cursor: None,
                 radio_loading: false,
                 radio_empty: 0,
@@ -253,6 +260,7 @@ impl Player {
             }),
             error: st.error.clone(),
             skipped_in_a_row: st.skips,
+            no_output: es.device == encore_audio::engine::NO_OUTPUT,
             queue_loading: st.queue_loading,
         }
     }
@@ -343,6 +351,7 @@ impl Player {
             st.seek_gen += 1;
             st.phase = Phase::Loading;
             st.error = None;
+            st.awaiting_setup = false;
             st.pending_pos = start;
             st.loaded = None;
             st.last_duration = cur.track.duration;
@@ -370,6 +379,16 @@ impl Player {
             let t0 = Instant::now();
             // A fully cached file plays at once, without resolving a URL.
             let cached = me.cache.as_ref().and_then(|c| c.find_video(&vid));
+            // Pressing Next several times in a row used to resolve every song
+            // passed over, one after another (seconds each, two at a time),
+            // so the song the user stopped on started last. Wait a moment
+            // and give up if another song was chosen meanwhile.
+            if cached.is_none() && promoted.is_none() {
+                tokio::time::sleep(SKIP_SETTLE).await;
+                if me.st.lock().track_gen != my_gen {
+                    return;
+                }
+            }
             let res = match cached {
                 Some((path, itag)) => Ok(ResolvedStream {
                     video_id: vid.clone(),
@@ -427,13 +446,29 @@ impl Player {
     }
 
     async fn fail_current(self: &Arc<Self>, f: PlayFailure) {
+        // Not the song's fault: keep it, paused, and ask for the setup.
+        if f.kind == PlayFailureKind::SetupNeeded {
+            {
+                let mut st = self.st.lock();
+                st.error = None;
+                st.phase = Phase::Paused;
+                st.loaded = None;
+                st.awaiting_setup = true;
+            }
+            self.publish(false);
+            let _ = self.tx.send(PlayerEvent::SetupNeeded);
+            return;
+        }
         let (title, skips, autoskip) = {
             let mut st = self.st.lock();
             st.error = Some(f.clone());
             st.phase = Phase::Error;
             st.loaded = None;
             let title = st.queue.current().map(|c| c.track.title.clone()).unwrap_or_default();
-            let autoskip = matches!(f.kind, PlayFailureKind::Unavailable | PlayFailureKind::Unknown | PlayFailureKind::Challenged | PlayFailureKind::Network) && st.skips < MAX_AUTO_SKIPS;
+            // Only skip what is about this song. With no connection, or
+            // YouTube asking for a bot check, the next songs fail the same
+            // way: skipping took a minute or more and lost the user's place.
+            let autoskip = matches!(f.kind, PlayFailureKind::Unavailable | PlayFailureKind::Unknown) && st.skips < MAX_AUTO_SKIPS;
             if autoskip {
                 st.skips += 1;
             }
@@ -443,7 +478,9 @@ impl Player {
             let _ = self.tx.send(PlayerEvent::SessionExpired);
         }
         self.publish(false);
-        if autoskip {
+        if matches!(f.kind, PlayFailureKind::SetupNeeded | PlayFailureKind::Network | PlayFailureKind::Challenged) {
+            let _ = self.tx.send(PlayerEvent::Notice(f.message.clone()));
+        } else if autoskip {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Skipped “{title}”: {}", f.message)));
             tokio::time::sleep(Duration::from_millis(600)).await;
             let step = self.st.lock().queue.next();
@@ -760,6 +797,7 @@ impl Player {
             EngineEvent::DeviceChanged { .. } => self.publish(false),
             EngineEvent::NoOutput { error } => {
                 tracing::warn!(%error, "no audio output");
+                self.publish(false);
                 let _ = self.tx.send(PlayerEvent::Notice("No audio output is available. Connect speakers or headphones, or check your sound settings; Encore starts playing as soon as one works.".into()));
             }
         }
@@ -879,6 +917,19 @@ impl Player {
         }
         self.publish(false);
         self.send_anchor();
+    }
+
+    /// The player components were just installed: start the song that was
+    /// waiting for them, if any.
+    pub fn resume_after_setup(self: &Arc<Self>) {
+        let pos = {
+            let mut st = self.st.lock();
+            if !std::mem::take(&mut st.awaiting_setup) || st.phase != Phase::Paused || st.queue.current().is_none() {
+                return;
+            }
+            st.pending_pos
+        };
+        self.play_current(pos);
     }
 
     pub fn resume(&self) {

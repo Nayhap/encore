@@ -317,7 +317,8 @@
     .pin .txt,
     .account .txt,
     .account > :global(svg),
-    .eq {
+    .eq,
+    .hint {
       display: none;
     }
     .search {

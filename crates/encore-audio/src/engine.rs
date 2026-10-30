@@ -238,7 +238,7 @@ impl Drop for Engine {
 }
 
 /// Name of the placeholder used while no device can be opened.
-const NO_OUTPUT: &str = "No audio output";
+pub const NO_OUTPUT: &str = "No audio output";
 
 struct Output {
     /// `None` for the placeholder used while no device can be opened.
@@ -487,6 +487,10 @@ fn actor(
     let mut durations: HashMap<u64, Option<f64>> = HashMap::new();
     let mut was_starving = false;
     let mut last_dev_check = Instant::now();
+    // An output error seen at this time, with the callback count then.
+    let mut suspect: Option<(Instant, u64)> = None;
+    // When the callback count last changed, and its value then.
+    let mut stall: (Instant, u64) = (Instant::now(), 0);
 
     let publish = |shared: &Arc<Mutex<SharedStatus>>, current: &Option<DeckInfo>, next: &Option<DeckInfo>| {
         let mut s = shared.lock();
@@ -651,13 +655,51 @@ fn actor(
 
         // Device lost or changed: rebuild the stream and re-prime from the
         // last consumed position.
-        if atoms.device_error.swap(false, Ordering::Relaxed) || last_dev_check.elapsed() > Duration::from_secs(2) {
+        // (The error flag is read once: checking it again after the swap
+        // always saw false, so a disabled or unplugged device that came back
+        // under the same name was never reopened and playback stayed silent.)
+        // Some backends report recoverable hiccups through the same error
+        // callback, so only act on an error if the device then stops asking
+        // for audio.
+        if atoms.device_error.swap(false, Ordering::Relaxed) && suspect.is_none() {
+            suspect = Some((Instant::now(), atoms.callbacks.load(Ordering::Relaxed)));
+        }
+        let mut device_error = match suspect {
+            Some((at, cbs)) if at.elapsed() > Duration::from_millis(400) => {
+                suspect = None;
+                atoms.callbacks.load(Ordering::Relaxed) == cbs
+            }
+            _ => false,
+        };
+        // A device that goes away can also just stop calling back without
+        // reporting an error: a real output whose callback count hasn't
+        // moved for 1.5 s is treated the same way.
+        let cbs = atoms.callbacks.load(Ordering::Relaxed);
+        if cbs != stall.1 {
+            stall = (Instant::now(), cbs);
+        } else if no_output.is_none() && stall.0.elapsed() > Duration::from_millis(1500) {
+            device_error = true;
+            stall = (Instant::now(), cbs);
+        }
+        if device_error || last_dev_check.elapsed() > Duration::from_secs(2) {
             let changed = last_dev_check.elapsed() > Duration::from_secs(2) && (no_output.is_some() || default_device_name().is_some_and(|n| n != out.name));
             last_dev_check = Instant::now();
-            if changed || atoms.device_error.load(Ordering::Relaxed) {
-                atoms.device_error.store(false, Ordering::Relaxed);
+            if changed || device_error {
                 let pos = shared.lock().current.as_ref().map(|(_, base, fr, _)| base + fr.load(Ordering::Relaxed) as f64 / out.rate as f64);
-                if let Ok(o) = build_output(&atoms) {
+                let built = build_output(&atoms);
+                if let Err(e) = &built {
+                    // Lost the output and none to replace it: run silent, say
+                    // so once, and keep trying (no_output makes every check
+                    // try again).
+                    if no_output.is_none() {
+                        tracing::warn!(error = %e, "audio output lost");
+                        no_output = Some(e.clone());
+                        out = silent_output();
+                        shared.lock().device = out.name.clone();
+                        let _ = events.send(EngineEvent::NoOutput { error: e.clone() });
+                    }
+                }
+                if let Ok(o) = built {
                     out = o;
                     no_output = None;
                     {

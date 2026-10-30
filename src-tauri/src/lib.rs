@@ -6,6 +6,7 @@ mod core;
 mod events;
 mod logging;
 mod media;
+mod selftest;
 mod signin;
 mod window;
 
@@ -24,7 +25,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             bootstrap,
-            resolver_setup,
+            runtimes_status,
+            runtimes_install,
+            runtimes_cancel,
+            runtimes_remove,
             cache_info,
             cache_clear,
             home,
@@ -89,7 +93,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             window::set_system_titlebar,
             window::get_system_titlebar,
         ])
-        .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent])
+        .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent, RuntimesEvent, SetupNeededEvent])
 }
 
 /// Forward player events to the webview and drive lyrics.
@@ -137,6 +141,10 @@ fn forward_player_events(app: tauri::AppHandle, core: Arc<Core>) {
                 PlayerEvent::Notice(text) => {
                     let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&app);
                 }
+                PlayerEvent::SetupNeeded => {
+                    let track_id = core.player.snapshot().current.map(|c| c.track.id.0);
+                    let _ = SetupNeededEvent { track_id }.emit(&app);
+                }
                 PlayerEvent::SessionExpired => {
                     core.accounts.mark_expired("YouTube refused the signed-in stream.");
                     let _ = AuthEvent(core.accounts.state()).emit(&app);
@@ -170,10 +178,15 @@ fn keepalive(app: tauri::AppHandle, core: Arc<Core>) {
 pub fn run() {
     let paths = core::Paths::new();
     logging::init(&paths.logs);
+    if selftest::wanted() {
+        selftest::run();
+    }
     let builder = specta_builder();
     let app = tauri::Builder::default();
-    // One Encore at a time: a second launch shows the running one.
-    #[cfg(not(target_os = "macos"))]
+    // One Encore at a time: a second launch shows the running one. macOS
+    // usually prevents a second copy itself, but not for a copy started from
+    // another place (the disk image, Downloads) or with `open -n`; two
+    // instances would share one database and play over each other.
     let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.unminimize();
@@ -189,7 +202,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let resp = match art::parse_request(&uri) {
                     Some((key, size)) => {
-                        let core = app.state::<Arc<Core>>().inner().clone();
+                        let Some(core) = app.try_state::<Arc<Core>>().map(|c| c.inner().clone()) else {
+                            responder.respond(tauri::http::Response::new(Vec::new()));
+                            return;
+                        };
                         match core.art.get(&key, size).await {
                             Ok((bytes, mime)) => tauri::http::Response::builder().status(200).header("Content-Type", mime).header("Cache-Control", "max-age=604800").body(bytes),
                             Err(e) => {
@@ -209,7 +225,16 @@ pub fn run() {
             window::create_main(app.handle())?;
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
-            let core = tauri::async_runtime::block_on(async { Core::new() }).map_err(|e| e.message)?;
+            let core = match tauri::async_runtime::block_on(async { Core::new() }) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Failing here used to close Encore without a word. Keep
+                    // the window up and let the UI say what went wrong.
+                    tracing::error!(error = %e.message, "Encore could not start");
+                    app.manage(core::StartupFailure(core::startup_failure_message(&e.message)));
+                    return Ok(());
+                }
+            };
             tracing::info!(ms = t0.elapsed().as_millis() as u64, "core ready");
             app.manage(core.clone());
             let handle = app.handle().clone();
@@ -227,12 +252,28 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let acc = c3.accounts.clone();
                 let r = tokio::task::spawn_blocking(move || acc.restore()).await;
-                if let Ok(Ok(st)) = r {
-                    if !matches!(st, encore_core::model::AuthState::Anonymous) {
-                        c3.player.stop();
-                        c3.switch_queue();
+                match r {
+                    Ok(Ok(st)) => {
+                        if !matches!(st, encore_core::model::AuthState::Anonymous) {
+                            c3.player.stop();
+                            c3.switch_queue();
+                        }
+                        let _ = AuthEvent(st).emit(&h3);
                     }
-                    let _ = AuthEvent(st).emit(&h3);
+                    Ok(Err(e)) => {
+                        // Access denied at the Keychain prompt, a locked keyring:
+                        // say why the account is gone instead of silently
+                        // starting signed out. (No Secret Service at all just
+                        // means there is nothing saved.)
+                        tracing::warn!(error = %e.message, "could not restore the session");
+                        if !e.message.starts_with("No Secret Service") {
+                            let text = format!("Encore couldn't read your saved sign-in: {} You're signed out for now. Restart Encore and allow access, or sign in again from Settings.", e.message);
+                            if let Some(text) = c3.startup_notice(text) {
+                                let _ = NoticeEvent { text, level: "error".into(), action: None }.emit(&h3);
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
             });
             forward_player_events(handle.clone(), core.clone());
@@ -243,10 +284,26 @@ pub fn run() {
             }));
             media::install(&handle, core.clone());
             keepalive(handle.clone(), core.clone());
-            // Bootstrap the stream resolver in the background (first run creates the venv).
-            let c2 = core.clone();
+            // Player components (D22): progress goes to the UI; a finished
+            // install starts the song that was waiting for it. Components the
+            // user already approved are updated (or finished) on launch
+            // without asking again; otherwise the UI offers the setup.
+            let (c2, h2) = (core.clone(), handle.clone());
+            let was_installing = std::sync::atomic::AtomicBool::new(false);
+            core.resolver.runtimes().on_change(move |st| {
+                let _ = RuntimesEvent(st.clone()).emit(&h2);
+                let before = was_installing.swap(st.installing, std::sync::atomic::Ordering::SeqCst);
+                if before && !st.installing && st.usable {
+                    c2.player.resume_after_setup();
+                }
+            });
+            let rt = core.resolver.runtimes().clone();
             tauri::async_runtime::spawn(async move {
-                let _ = c2.resolver.ensure_ready().await;
+                let st = rt.status();
+                tracing::info!(ready = st.ready, usable = st.usable, approved = st.approved, "player components");
+                if st.supported && st.approved && !st.ready {
+                    rt.start();
+                }
             });
             // macOS: closing the window hides it and playback continues; the
             // Dock icon brings it back (D15). Windows and Linux have no such

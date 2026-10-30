@@ -7,14 +7,16 @@ On every system:
 - [Rust](https://rustup.rs) 1.95 or newer
 - [Bun](https://bun.sh)
 - `cmake`, used to build the bundled Opus decoder
-- Python 3.10+ and Node.js, Deno or Bun, used at runtime to resolve streams
+
+Playback needs no Python or Node.js on the system: Encore downloads its own
+(see [Player components](#player-components)).
 
 ### macOS
 
 Apple silicon or Intel, with the Xcode Command Line Tools.
 
 ```sh
-brew install cmake python node
+brew install cmake
 ```
 
 ### Windows
@@ -25,7 +27,7 @@ Windows 10 or 11 with the
 already has. Install Rust with the `x86_64-pc-windows-msvc` toolchain.
 
 ```powershell
-winget install Kitware.CMake Python.Python.3.13 OpenJS.NodeJS.LTS Oven-sh.Bun
+winget install Kitware.CMake Oven-sh.Bun
 ```
 
 Smart App Control blocks unsigned programs, and that includes Cargo's build
@@ -39,7 +41,7 @@ libraries):
 ```sh
 sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-  libasound2-dev libdbus-1-dev patchelf python3 python3-venv nodejs
+  libasound2-dev libdbus-1-dev patchelf
 ```
 
 A Secret Service (GNOME Keyring or KWallet) is needed to stay signed in.
@@ -54,8 +56,14 @@ bun run dev                          # the UI alone in a browser, on mock data
 
 `bun run dev` serves the UI at <http://localhost:1420> with a mock backend, so
 you can work on the design without a YouTube session. Add `?signedin` to the
-URL to start with a signed-in mock library, and `?os=windows` or `?os=linux` to
+URL to start with a signed-in mock library, `?empty` to start with nothing
+queued (a fresh install), and `?os=windows` or `?os=linux` to
 see the window buttons and key labels of the other systems.
+
+The mock starts without the player components, so the setup sheet shows
+and plays a simulated install. Add `?ready` to start with them installed,
+`?setupfail` to see the first install fail, or `?updating` to see a quiet
+update.
 
 ## Build
 
@@ -79,6 +87,21 @@ Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
 Personal fields are scrubbed when they are recorded; never commit a recording
 made with your own session without running it through `encore-cli record`.
 
+### Testing a built bundle
+
+`encore --self-test [VIDEO_ID]` checks, without opening a window, what
+depends on the machine: the data folder and database, the audio output,
+the player components (installed first if missing, as the setup screen
+does) and, given a video id, resolving and decoding a real stream. It prints a JSON report and exits
+non-zero if playback can't work. YouTube's bot checks don't count as a
+failure unless you add `--strict`; on Windows add `--out report.json`, since
+release builds have no console.
+
+`scripts/self-test-bundle.sh` (`appimage`, `appimage-in <docker image>`,
+`deb`, `app`) and `scripts/self-test-bundle.ps1` (the NSIS installer) run it
+from the installed artifact, as users get it. CI runs them on every pull
+request and the release workflow before it drafts a release.
+
 ## The command-line tool
 
 `encore-cli` drives the backend without the app. It is the quickest way to
@@ -91,7 +114,8 @@ C=target/debug/encore-cli
 $C search "daft punk" --filter songs
 $C album MPREb_7ltM34kr0mH
 $C playlist VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3 --all
-$C resolve 4D7u5KF7SP8               # sets up the yt-dlp environment on first run
+$C runtimes                          # player components: status, install, remove
+$C resolve 4D7u5KF7SP8               # installs the components first if missing
 $C play 4D7u5KF7SP8 --seek 60 --secs 20
 $C lyrics 4D7u5KF7SP8
 
@@ -120,12 +144,22 @@ cookies, tokens or tracking URLs.
 | What | macOS | Windows | Linux |
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
-| Library cache, settings, queue, lyrics cache, yt-dlp (`resolver/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Library cache, settings, queue, lyrics cache, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
 | Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
 URLs must never reach it; `cargo test` includes a check for this.
+
+## Player components
+
+Playback runs yt-dlp on a Python and a Deno that Encore downloads itself
+(D22 in [decisions.md](decisions.md)). The versions, URLs, sizes and SHA-256
+checksums are pinned in `crates/encore-resolver/src/runtimes/manifest.rs`.
+To move to newer ones, change all four together, taking each checksum from
+the project's own release (python-build-standalone's `SHA256SUMS`, Deno's
+`.sha256sum` files, PyPI's `sha256` digests), and run `cargo test`. Users who
+already set up playback get the new versions on their next launch.
 
 ## Known issues
 

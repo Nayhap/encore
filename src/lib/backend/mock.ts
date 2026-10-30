@@ -139,7 +139,7 @@ function snap(): T.PlayerSnapshot {
     current: cur, index: P.index, position: P.position, duration: cur?.track.duration ?? null,
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
-    error: null, skippedInARow: 0, queueLoading: false,
+    error: null, skippedInARow: 0, queueLoading: false, noOutput: false,
   };
 }
 function publish(queueChanged = false) {
@@ -167,6 +167,7 @@ function shuffled<X>(xs: X[]) {
 function go(i: number, at = 0) {
   P.index = i;
   P.position = at;
+  if (!needsSetupBeforePlay()) return;
   P.playing = true;
   P.phase = "playing";
   tgen++;
@@ -232,8 +233,9 @@ function replace(tracks: T.Track[], start: number, source: T.QueueSource | null,
   go(start);
 }
 
-// Start with a queue loaded but paused, like reopening the app.
-{
+// Start with a queue loaded but paused, like reopening the app (`?empty`
+// starts with nothing queued, like a fresh install).
+if (!new URLSearchParams(location.search).has("empty")) {
   const c = M.collections.find((x) => x.id === "pl-late")!;
   P.entries = c.trackIds.map((id) => ({ uid: uid(), track: track(id), origin: "collection" as const }));
   P.canon = P.entries.map((e) => e.uid);
@@ -241,6 +243,99 @@ function replace(tracks: T.Track[], start: number, source: T.QueueSource | null,
   P.phase = "paused";
   P.source = { label: c.title, collectionId: mid(c.id), radioPlaylist: null };
 }
+
+// ---------- player components (D22) ----------
+// Starts not installed so the setup screen can be reviewed: `?ready` starts
+// installed, `?setupfail` fails the first install at 40% (offline),
+// `?updating` starts with an update running in the background.
+const q = new URLSearchParams(location.search);
+const MB = 1_000_000;
+const pins = [
+  { name: "Python", version: "3.13.18", dl: 25.3 * MB },
+  { name: "Deno", version: "2.9.8", dl: 38.8 * MB },
+  { name: "yt-dlp", version: "2026.10.26", dl: 3.4 * MB },
+];
+const DL = pins.reduce((a, p) => a + p.dl, 0);
+const rt = { approved: q.has("ready") || q.has("updating"), usable: q.has("ready") || q.has("updating"), ready: q.has("ready"), installing: false, failOnce: q.has("setupfail"), progress: null as T.SetupProgress | null, timer: 0, waiting: false };
+function rtStatus(measured = false): T.RuntimeStatus {
+  return {
+    supported: true,
+    approved: rt.approved,
+    ready: rt.ready,
+    usable: rt.usable,
+    installing: rt.installing,
+    progress: rt.progress,
+    components: pins.map((p) => ({ name: p.name, version: p.version, installed: rt.ready ? p.version : rt.usable ? (p.name === "yt-dlp" ? "2026.09.30" : p.version) : null, ready: rt.ready })),
+    downloadBytes: rt.ready ? 0 : rt.usable ? 3.4 * MB : DL,
+    diskBytes: 125 * MB,
+    usedBytes: measured && rt.usable ? 124.6 * MB : 0,
+    location: "~/Library/Application Support/app.encore.desktop/runtimes",
+    message: null,
+  };
+}
+const rtEmit = () => h?.runtimes(rtStatus());
+function rtInstall() {
+  if (rt.installing) return;
+  rt.approved = true;
+  rt.installing = true;
+  const update = rt.usable;
+  const total = update ? 3.4 * MB : DL;
+  const p: T.SetupProgress = { phase: "downloading", update, component: null, downloaded: 0, downloadTotal: total, unpacked: 0, unpackTotal: 125 * MB, fraction: 0, error: null };
+  rt.progress = p;
+  let t = 0;
+  clearInterval(rt.timer);
+  rt.timer = window.setInterval(() => {
+    t += 0.1;
+    const dlSecs = update ? 1.5 : 7;
+    if (t < dlSecs) {
+      p.phase = "downloading";
+      p.downloaded = Math.min(total, (total * t) / dlSecs);
+      let acc = 0;
+      const cur = update ? pins[2] : (pins.find((x) => (acc += x.dl) >= (p.downloaded ?? 0)) ?? pins[2]);
+      p.component = `${cur.name} ${cur.version}`;
+      p.fraction = 0.7 * ((p.downloaded ?? 0) / total);
+      if (rt.failOnce && p.fraction > 0.28) {
+        rt.failOnce = false;
+        return rtFinish({ kind: "offline", message: "Encore couldn't connect to the internet. Check your connection and try again." });
+      }
+    } else if (t < dlSecs + 0.8) {
+      Object.assign(p, { phase: "verifying", component: null, downloaded: total, fraction: 0.72 });
+    } else if (t < dlSecs + 2.6) {
+      const f = (t - dlSecs - 0.8) / 1.8;
+      Object.assign(p, { phase: "unpacking", component: f < 0.35 ? "Python 3.13.18" : f < 0.85 ? "Deno 2.9.8" : "yt-dlp 2026.10.26", unpacked: (p.unpackTotal ?? 0) * f, fraction: 0.75 + 0.2 * f });
+    } else if (t < dlSecs + 3.6) {
+      Object.assign(p, { phase: "settingUp", component: null, fraction: 0.97 });
+    } else return rtFinish(null);
+    rt.progress = { ...p };
+    rtEmit();
+  }, 100);
+  rtEmit();
+}
+function rtFinish(err: T.SetupError | null) {
+  clearInterval(rt.timer);
+  rt.installing = false;
+  if (rt.progress) rt.progress = { ...rt.progress, phase: err ? (err.kind === "cancelled" ? "cancelled" : "failed") : "done", error: err, fraction: err ? rt.progress.fraction : 1 };
+  if (!err) {
+    rt.usable = rt.ready = true;
+  }
+  rtEmit();
+  if (!err && rt.waiting) {
+    rt.waiting = false;
+    if (P.index != null) go(P.index, P.position);
+  }
+}
+/** Like the Rust player: without the components, ask for the setup. */
+function needsSetupBeforePlay() {
+  if (rt.usable) return true;
+  P.playing = false;
+  P.phase = "paused";
+  rt.waiting = true;
+  publish(true);
+  anchor();
+  setTimeout(() => h?.setupNeeded({ trackId: P.entries[P.index ?? -1]?.track.id ?? null }), 50);
+  return false;
+}
+if (q.has("updating")) setTimeout(rtInstall, 1500);
 
 const channels: T.AccountChannel[] = [
   { key: "0:primary", name: "Riley Park", handle: "@rileypark", pageId: null, authUser: 0, isBrand: false, photo: null },
@@ -265,13 +360,28 @@ export const mockApi: Api = {
     return delay({
       version: "mock",
       reportHistory,
+      notice: null,
       auth,
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
-      resolver: { ready: true, python: "mock", jsRuntime: "mock", ytDlp: "mock", message: null },
+      runtimes: rtStatus(),
     }, 10);
   },
-  resolverSetup: async () => ({ ready: true, python: "mock", jsRuntime: "mock", ytDlp: "mock", message: null }),
+  runtimesStatus: async () => rtStatus(true),
+  async runtimesInstall(reinstall) {
+    if (reinstall) rt.usable = rt.ready = false;
+    rtInstall();
+    return rtStatus();
+  },
+  async runtimesCancel() {
+    if (rt.installing) rtFinish({ kind: "cancelled", message: "Setup was cancelled." });
+  },
+  async runtimesRemove() {
+    clearInterval(rt.timer);
+    Object.assign(rt, { approved: false, usable: false, ready: false, installing: false, progress: null });
+    rtEmit();
+    return rtStatus(true);
+  },
   cacheInfo: async () => ({ audioBytes: 0, artBytes: 0, lyricsEntries: 0 }),
   cacheClear: async () => {},
   home: () =>
@@ -380,6 +490,7 @@ export const mockApi: Api = {
     const cur = P.index != null ? P.entries[P.index] : null;
     if (!cur) return;
     if (!P.playing && P.position >= (cur.track.duration ?? 0)) P.position = 0;
+    if (!P.playing && !needsSetupBeforePlay()) return;
     P.playing = !P.playing;
     P.phase = P.playing ? "playing" : "paused";
     publish();

@@ -10,7 +10,7 @@ use encore_core::service::{MusicService, ResolveAuth};
 use encore_core::store::Store;
 use encore_lyrics::LyricsService;
 use encore_player::Player;
-use encore_resolver::{ResolverConfig, YtDlpResolver};
+use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
 use encore_ytm::account::Accounts;
 use encore_ytm::{InnerTube, YtMusic};
 use serde::de::DeserializeOwned;
@@ -20,6 +20,14 @@ use serde::{Deserialize, Serialize};
 pub const SETTINGS: &str = "settings";
 pub const REPORT_HISTORY: &str = "report_history";
 
+/// Why the backend couldn't start, for the UI (see `bootstrap`).
+pub struct StartupFailure(pub String);
+
+pub fn startup_failure_message(detail: &str) -> String {
+    let logs = Paths::new().logs.join("encore.log");
+    format!("{detail}. Check that the disk isn't full and that Encore can write to its data folder, then restart Encore. Details are in {}.", logs.display())
+}
+
 pub struct Paths {
     pub data: PathBuf,
     pub cache: PathBuf,
@@ -28,7 +36,7 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
-        // Local (not roaming) data on Windows: the resolver venv lives here.
+        // Local (not roaming) data on Windows: the player components live here.
         let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let logs = if cfg!(target_os = "macos") {
@@ -54,6 +62,9 @@ pub struct Core {
     pub art: Arc<crate::art::ArtCache>,
     #[allow(dead_code)]
     pub paths: Paths,
+    /// A message from startup for the UI, and whether the UI is listening
+    /// yet (events sent before it subscribes are lost).
+    pub startup_notice: parking_lot::Mutex<(bool, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,15 +96,34 @@ impl Core {
         let it = InnerTube::new("en", "US");
         let ytm = Arc::new(YtMusic::new(it.clone()));
         let accounts = Accounts::new(ytm.clone(), encore_auth::store::session_store());
-        let resolver = YtDlpResolver::new(ResolverConfig { root: paths.data.join("resolver"), cache_dir: paths.cache.join("yt-dlp") });
+        let rcfg = ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() };
+        let runtimes = Runtimes::new(rcfg.runtimes());
+        let resolver = YtDlpResolver::new(rcfg, runtimes);
         let audio_cache = AudioCache::new(paths.cache.join("audio"), encore_audio::cache::DEFAULT_LIMIT).map_err(|e| AppError::internal(format!("audio cache: {}", e.kind())))?;
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;
         // On unless turned off (it only ever reports for a signed-in account).
         player.set_reporting(store.get::<bool>(SETTINGS, REPORT_HISTORY).ok().flatten().unwrap_or(true));
         let lyrics = Arc::new(LyricsService::new(ytm.clone(), Some(store.clone())));
         let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone()));
-        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths });
+        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths, startup_notice: parking_lot::Mutex::new((false, None)) });
         Ok(core)
+    }
+
+    /// Show `text` once the UI is up (now, if it already is). Returns the
+    /// text when it should be sent as an event right away.
+    pub fn startup_notice(&self, text: String) -> Option<String> {
+        let mut n = self.startup_notice.lock();
+        if n.0 { Some(text) } else {
+            n.1 = Some(text);
+            None
+        }
+    }
+
+    /// The UI is listening: hand over any notice saved for it.
+    pub fn take_startup_notice(&self) -> Option<String> {
+        let mut n = self.startup_notice.lock();
+        n.0 = true;
+        n.1.take()
     }
 
     pub fn service(&self) -> Arc<dyn MusicService> {

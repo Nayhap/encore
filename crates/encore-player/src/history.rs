@@ -489,7 +489,7 @@ mod tests {
         PlayerEvent::State(PlayerSnapshot {
             revision: "1".into(), track_gen: tg.to_string(), seek_gen: "0".into(), phase, playing: phase == Phase::Playing, current: Some(entry(id)), index: Some(0),
             position: pos, duration: Some(200.0), shuffle: false, repeat: Repeat::Off, autoplay: false, volume: 1.0, muted: false, source: None, stream: None,
-            error: None, skipped_in_a_row: 0, queue_loading: false,
+            error: None, skipped_in_a_row: 0, queue_loading: false, no_output: false,
         })
     }
     fn anchor(tg: u64, pos: f64) -> PlayerEvent {

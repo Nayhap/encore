@@ -125,6 +125,25 @@
         </label>
       </section>
     </div>
+  {:else}
+    <div class="scroll">
+      <div class="idle-card">
+        <div class="idle-art" aria-hidden="true"><Icon name="lyrics" size={34} /></div>
+        <h2>Nothing playing yet</h2>
+        <p>Play a song and it shows up here, with its lyrics and what's coming next.</p>
+        <div class="idle-actions">
+          <button class="pill primary" onclick={() => (ui.palette = true)}><Icon name="search" size={15} /> Search</button>
+          <button class="pill" onclick={() => nav.go({ name: "explore" })}><Icon name="compass" size={15} /> Explore</button>
+        </div>
+      </div>
+      <label class="autoplay">
+        <span>
+          <b>Autoplay</b>
+          <small>Keep playing similar songs when the queue ends</small>
+        </span>
+        <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
+      </label>
+    </div>
   {/if}
 </aside>
 
@@ -382,6 +401,49 @@
   .row:hover .dur {
     display: none;
   }
+  .idle-card {
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    padding: 36px 20px 28px;
+    border-radius: 14px;
+    text-align: center;
+    background: color-mix(in srgb, var(--text) 4%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--text) 14%, transparent);
+  }
+  .idle-art {
+    display: grid;
+    place-items: center;
+    width: 72px;
+    height: 72px;
+    margin-bottom: 4px;
+    border-radius: 18px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .idle-card h2 {
+    margin: 0;
+    font-size: 17px;
+  }
+  .idle-card p {
+    margin: 0;
+    max-width: 260px;
+    color: var(--mute);
+    font-size: 13px;
+    line-height: 1.45;
+    text-wrap: pretty;
+  }
+  .idle-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .idle-actions .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
   .empty {
     padding: 14px 8px;
     color: var(--mute);

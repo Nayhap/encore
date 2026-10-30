@@ -206,6 +206,9 @@ pub enum PlayFailureKind {
     SessionExpired,
     Network,
     Unknown,
+    /// The player components aren't installed yet (D22): not the song's
+    /// fault, so it isn't skipped; the app offers the setup instead.
+    SetupNeeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, thiserror::Error)]

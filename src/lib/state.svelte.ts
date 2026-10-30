@@ -1,5 +1,5 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
 import { catalog } from "./catalog.svelte";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
@@ -31,6 +31,8 @@ class Player {
   /** Where the queue came from, shown as "Playing from …". */
   source = $state<QueueSource | null>(null);
   error = $state<string | null>(null);
+  /** No audio output works: playback is silent until one does. */
+  noOutput = $state(false);
   ready = $state(false);
   liked = new SvelteSet<string>();
   lyrics = $state<Lyrics | null>(null);
@@ -94,6 +96,7 @@ class Player {
     this.source = s.source;
     this.duration = s.duration;
     this.error = s.error?.message ?? null;
+    this.noOutput = s.noOutput ?? false;
     const sg = big(s.seekGen);
     if (trackChanged || sg > this.#seekGen || this.#localSeek < 0n) {
       this.#seekGen = sg;
@@ -376,7 +379,7 @@ class UI {
   /** Windows and Linux: use the OS title bar instead of Encore's buttons. */
   systemTitlebar = $state(localStorage.getItem("titlebar") === "system");
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  toast = $state<{ text: string; id: number } | null>(null);
+  toast = $state<{ text: string; id: number; ms: number; level: "info" | "warn" | "error" } | null>(null);
   sheet = $state<PlaylistSheet | null>(null);
   confirm = $state<Confirm | null>(null);
   /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
@@ -384,12 +387,15 @@ class UI {
   /** Bumps when a play was reported, so History can refresh. */
   historyRev = $state(0);
 
-  say(text: string) {
+  /** A short message above the player bar. Longer messages (errors that
+   *  say what to do) stay up long enough to read. */
+  say(text: string, level: "info" | "warn" | "error" = "info") {
     const id = Date.now();
-    this.toast = { text, id };
+    const ms = Math.min(14000, Math.max(2400, 1200 + text.length * 55)) + (level === "info" ? 0 : 2000);
+    this.toast = { text, id, ms, level };
     setTimeout(() => {
       if (this.toast?.id === id) this.toast = null;
-    }, 3200);
+    }, ms + 400);
   }
 
   lastMenuAt = { x: 200, y: 200 };
@@ -464,11 +470,81 @@ class Account {
   name = $derived(this.state.state === "signedIn" ? this.state.channel.name : null);
 }
 
+/** The player components (D22): the setup sheet, its progress, and the
+ *  quiet notice for updates. Rust owns the state; this mirrors it. */
+class Setup {
+  status = $state<RuntimeStatus | null>(null);
+  /** The setup sheet is showing. */
+  open = $state(false);
+  /** "Not now" this session; pressing play asks again. */
+  dismissed = $state(false);
+  error = $state<string | null>(null);
+
+  installing = $derived(!!this.status?.installing);
+  progress = $derived(this.status?.progress ?? null);
+  /** An update of components that already work (shown quietly). */
+  updating = $derived(this.installing && !!this.status?.usable);
+  needed = $derived(!!this.status && this.status.supported && !this.status.usable);
+
+  apply(st: RuntimeStatus) {
+    const before = this.status;
+    this.status = st;
+    if (!before?.installing || st.installing) return;
+    // An install just ended.
+    const phase = st.progress?.phase;
+    const update = !!st.progress?.update;
+    if (phase === "done" && !this.open) ui.say(update ? "Player components updated" : "Playback is set up");
+    if (phase === "failed") {
+      if (update) ui.say("Couldn't update the player components. Encore keeps using the current ones.");
+      else this.open = true;
+    }
+  }
+
+  /** At launch: offer the setup when playback can't work yet. */
+  launch(st: RuntimeStatus) {
+    this.apply(st);
+    if (st.supported && !st.usable) this.open = true;
+  }
+
+  show() {
+    this.error = null;
+    this.open = true;
+  }
+
+  hide() {
+    if (!this.installing && this.needed) this.dismissed = true;
+    this.open = false;
+  }
+
+  async install(reinstall = false) {
+    this.error = null;
+    try {
+      this.apply(await call((a) => a.runtimesInstall(reinstall)));
+    } catch (e: any) {
+      this.error = e?.message ?? String(e);
+    }
+  }
+
+  cancel() {
+    call((a) => a.runtimesCancel()).catch(() => {});
+  }
+
+  async remove() {
+    try {
+      this.apply(await call((a) => a.runtimesRemove()));
+      ui.say("Player components removed");
+    } catch (e: any) {
+      ui.say(e?.message ?? String(e));
+    }
+  }
+}
+
 export const player = new Player();
 export const nav = new Nav();
 export const ui = new UI();
 export const account = new Account();
 export const playlists = new Playlists();
+export const setup = new Setup();
 
 const remote = (id: string) => id.replace(/^(ytm|mock):/, "");
 
@@ -665,15 +741,19 @@ export async function connect() {
       auth: (s) => (account.state = s),
       lyrics: (l) => player.setLyrics(l.trackId, l.lyrics),
       artHue: (h) => catalog.hues.set(h.key, [h.h1, h.h2]),
-      notice: (n) => ui.say(n.text),
+      notice: (n) => ui.say(n.text, n.level === "error" ? "error" : n.level === "warn" ? "warn" : "info"),
       signin: (s) => (account.signin = { stage: s.stage, message: s.message }),
       playlists: (e) => playlists.changed(e.playlistId),
       history: () => ui.historyRev++,
+      runtimes: (st) => setup.apply(st),
+      setupNeeded: () => setup.show(),
     }),
   );
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  if (b.notice) ui.say(b.notice, "error");
+  setup.launch(b.runtimes);
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);
   // Lyrics for a restored track.
