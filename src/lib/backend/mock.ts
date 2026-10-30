@@ -139,7 +139,7 @@ function snap(): T.PlayerSnapshot {
     current: cur, index: P.index, position: P.position, duration: cur?.track.duration ?? null,
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
-    error: null, skippedInARow: 0, queueLoading: false,
+    error: null, skippedInARow: 0, queueLoading: false, noOutput: false,
   };
 }
 function publish(queueChanged = false) {

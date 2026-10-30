@@ -31,6 +31,8 @@ class Player {
   /** Where the queue came from, shown as "Playing from …". */
   source = $state<QueueSource | null>(null);
   error = $state<string | null>(null);
+  /** No audio output works: playback is silent until one does. */
+  noOutput = $state(false);
   ready = $state(false);
   liked = new SvelteSet<string>();
   lyrics = $state<Lyrics | null>(null);
@@ -94,6 +96,7 @@ class Player {
     this.source = s.source;
     this.duration = s.duration;
     this.error = s.error?.message ?? null;
+    this.noOutput = s.noOutput ?? false;
     const sg = big(s.seekGen);
     if (trackChanged || sg > this.#seekGen || this.#localSeek < 0n) {
       this.#seekGen = sg;

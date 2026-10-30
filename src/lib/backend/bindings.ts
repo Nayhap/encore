@@ -769,6 +769,8 @@ export type PlayerSnapshot_Deserialize = {
 	/**  Auto-skips in a row (D4: at most 3). */
 	skippedInARow: number,
 	queueLoading: boolean,
+	/**  No audio output could be opened: playback runs silent until one works. */
+	noOutput: boolean,
 };
 
 export type PlayerSnapshot_Serialize = {
@@ -792,6 +794,8 @@ export type PlayerSnapshot_Serialize = {
 	/**  Auto-skips in a row (D4: at most 3). */
 	skippedInARow: number,
 	queueLoading: boolean,
+	/**  No audio output could be opened: playback runs silent until one works. */
+	noOutput: boolean,
 };
 
 /**  `player:state`, sent on every change. */

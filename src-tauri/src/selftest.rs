@@ -149,7 +149,7 @@ async fn stream(resolver: &Arc<YtDlpResolver>, engine: Option<&Engine>, id: &str
         }
         // Decoded, and either audio is reaching a device or there is none.
         let st = engine.status();
-        if decoded && (st.frames_out > st.sample_rate as u64 || st.device == "No audio output") {
+        if decoded && (st.frames_out > st.sample_rate as u64 || st.device == encore_audio::engine::NO_OUTPUT) {
             break;
         }
     }

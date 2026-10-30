@@ -24,7 +24,15 @@
       </button>
       <div class="meta">
         <button class="title ell" onclick={() => tr.album?.id && nav.go({ name: "collection", id: tr.album.id })} title={tr.title}>{tr.title}</button>
-        <button class="artist ell" onclick={() => artistId && nav.go({ name: "artist", id: artistId })}>{artistLine(tr)}</button>
+        {#if player.noOutput || (player.phase === "error" && player.error)}
+          <!-- Say why nothing is heard, for as long as it's true (the
+               notice that also says so goes away after a few seconds). -->
+          <span class="status ell" role="status" title={player.noOutput ? "No audio output" : player.error}>
+            {player.noOutput ? "No audio output: connect speakers or headphones" : player.error}
+          </span>
+        {:else}
+          <button class="artist ell" onclick={() => artistId && nav.go({ name: "artist", id: artistId })}>{artistLine(tr)}</button>
+        {/if}
       </div>
       <button
         class="icon-btn"
@@ -205,6 +213,10 @@
   .artist {
     font-size: 13px;
     color: var(--mute);
+  }
+  .status {
+    font-size: 12.5px;
+    color: color-mix(in srgb, var(--accent) 70%, var(--text));
   }
   .now .more {
     opacity: 0;

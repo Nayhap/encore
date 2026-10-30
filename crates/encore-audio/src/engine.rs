@@ -238,7 +238,7 @@ impl Drop for Engine {
 }
 
 /// Name of the placeholder used while no device can be opened.
-const NO_OUTPUT: &str = "No audio output";
+pub const NO_OUTPUT: &str = "No audio output";
 
 struct Output {
     /// `None` for the placeholder used while no device can be opened.
