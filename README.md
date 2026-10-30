@@ -77,7 +77,7 @@ Download the latest build from
 - **Linux**: the `.deb` for Debian and Ubuntu, or the `.AppImage`. Needs
   WebKitGTK 4.1, and GNOME Keyring or KWallet to stay signed in.
 
-Playback needs **Python 3.10 or newer** and **Node.js, Deno or Bun**. Encore
+Playback needs **Python 3.11 or newer** and **Node.js, Deno or Bun**. Encore
 sets up its own copy of [yt-dlp](https://github.com/yt-dlp/yt-dlp) on first
 launch and uses it to get audio streams.
 
@@ -85,7 +85,8 @@ launch and uses it to get audio streams.
 |---|---|
 | macOS | `brew install python node` |
 | Windows | Python from [python.org](https://www.python.org/downloads/) and Node.js from [nodejs.org](https://nodejs.org), or `winget install Python.Python.3.13 OpenJS.NodeJS.LTS` |
-| Debian, Ubuntu | `sudo apt install python3 python3-venv nodejs` |
+| Debian 12+, Ubuntu 24.04+ | `sudo apt install python3 python3-venv nodejs` |
+| Ubuntu 22.04 | `sudo apt install python3.11 python3.11-venv`, and Node.js 20 or newer from [nodejs.org](https://nodejs.org) (Ubuntu's own is too old) |
 | Fedora | `sudo dnf install python3 nodejs` |
 
 Uninstalling keeps Encore's caches, settings and its copy of yt-dlp (a few

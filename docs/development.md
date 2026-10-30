@@ -7,7 +7,7 @@ On every system:
 - [Rust](https://rustup.rs) 1.95 or newer
 - [Bun](https://bun.sh)
 - `cmake`, used to build the bundled Opus decoder
-- Python 3.10+ and Node.js, Deno or Bun, used at runtime to resolve streams
+- Python 3.11+ and Node.js, Deno or Bun, used at runtime to resolve streams
 
 ### macOS
 

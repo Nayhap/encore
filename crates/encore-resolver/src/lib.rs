@@ -27,6 +27,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 pub const YT_DLP_VERSION: &str = "2026.10.26";
 pub const YT_DLP_EJS_VERSION: &str = "0.8.0";
+/// yt-dlp 2026.10.26 needs Python 3.11 or newer.
+const MIN_PYTHON_MINOR: u32 = 11;
 const HELPER_SRC: &str = include_str!("../helper/encore_resolver.py");
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(60);
 const POOL: usize = 2;
@@ -204,14 +206,15 @@ fn host_library_path() -> Option<Option<std::ffi::OsString>> {
     Some(std::env::join_paths(kept).ok())
 }
 
-/// `major.minor` if `p` runs a Python 3.10 or newer. `args` go before `-I`
+/// `major.minor` if `p` runs a Python 3.11 or newer (the oldest yt-dlp
+/// supports). `args` go before `-I`
 /// (the `py` launcher takes `-3`).
 async fn python_version(p: &Path, args: &[&str]) -> Option<String> {
     let out = quiet(Command::new(p).args(args).args(["-I", "-X", "utf8", "-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"])).output().await.ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let v = text.lines().next()?.trim().to_string();
     let (maj, min) = v.split_once('.')?;
-    let ok = maj.parse::<u32>().ok()? == 3 && min.parse::<u32>().ok()? >= 10;
+    let ok = maj.parse::<u32>().ok()? == 3 && min.parse::<u32>().ok()? >= MIN_PYTHON_MINOR;
     ok.then_some(v)
 }
 
@@ -260,7 +263,7 @@ fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
                 roots.push(PathBuf::from(pf));
             }
         }
-        for minor in (10..=14).rev() {
+        for minor in (MIN_PYTHON_MINOR..=16).rev() {
             for r in &roots {
                 push(r.join(format!("Python3{minor}")).join("python.exe"), vec![]);
             }
@@ -271,7 +274,7 @@ fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
         }
     }
     #[cfg(unix)]
-    for n in ["python3.14", "python3.13", "python3.12", "python3.11", "python3.10", "python3"] {
+    for n in ["python3.16", "python3.15", "python3.14", "python3.13", "python3.12", "python3.11", "python3"] {
         for d in search_paths() {
             push(d.join(n), vec![]);
         }
@@ -310,7 +313,7 @@ async fn create_venv(python: &Path, venv: &Path) -> Result<(), String> {
     // Debian and Ubuntu ship venv separately, and say so on stdout.
     let both = format!("{err}\n{}", String::from_utf8_lossy(&out.stdout));
     if cfg!(target_os = "linux") && (both.contains("ensurepip") || both.contains("python3-venv")) {
-        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then restart Encore.".into());
+        return Err("Python's venv module is missing. Install python3-venv (for example “sudo apt install python3-venv”), then play the song again.".into());
     }
     let first = if first.is_empty() { both.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no details") } else { first };
     Err(format!("Setting up Python for playback failed: {first}"))
@@ -354,21 +357,21 @@ pub fn venv_python(venv: &Path) -> PathBuf {
 /// What to install, for the first-run message.
 pub fn missing_python_message() -> &'static str {
     if cfg!(windows) {
-        "Python 3.10 or newer was not found. Install it from python.org (or run “winget install Python.Python.3.13”), then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install it from python.org (or run “winget install Python.Python.3.13”), then play the song again."
     } else if cfg!(target_os = "macos") {
-        "Python 3.10 or newer was not found. Install Python 3 (for example with “brew install python”), then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install Python 3 (for example with “brew install python”), then play the song again."
     } else {
-        "Python 3.10 or newer was not found. Install python3 and python3-venv with your package manager, then restart Encore to enable playback."
+        "Python 3.11 or newer was not found. Install python3 and python3-venv with your package manager (on Ubuntu 22.04: python3.11 and python3.11-venv), then play the song again."
     }
 }
 
 pub fn missing_js_message() -> &'static str {
     if cfg!(windows) {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js from nodejs.org (or “winget install OpenJS.NodeJS.LTS”), Deno or Bun, then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js from nodejs.org (or “winget install OpenJS.NodeJS.LTS”), Deno or Bun, then play the song again."
     } else if cfg!(target_os = "macos") {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js, Deno or Bun (for example with “brew install node”), then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js, Deno or Bun (for example with “brew install node”), then play the song again."
     } else {
-        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js (nodejs), Deno or Bun, then restart Encore."
+        "No JavaScript runtime was found; YouTube's signature challenge needs one. Install Node.js (nodejs), Deno or Bun, then play the song again."
     }
 }
 
