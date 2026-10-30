@@ -36,6 +36,14 @@ fn hwnd(_app: &AppHandle) -> Option<*mut std::ffi::c_void> {
 
 /// Must be called on the main thread (Tauri `setup`).
 pub fn install(app: &AppHandle, core: Arc<Core>) {
+    // MPRIS connects to the session bus on its own thread and panics there
+    // when there is none (a bare X session, some window managers, a TTY),
+    // which aborted Encore at launch.
+    #[cfg(target_os = "linux")]
+    if !session_bus_reachable() {
+        tracing::warn!("no D-Bus session bus; media keys and MPRIS disabled");
+        return;
+    }
     let hwnd = hwnd(app);
     if cfg!(windows) && hwnd.is_none() {
         tracing::warn!("no window handle; media keys disabled");
@@ -228,4 +236,47 @@ fn app_nap(playing: bool) {
 /// Refresh Now Playing's elapsed time after a seek.
 pub fn position_changed(app: &AppHandle, s: PlayerSnapshot) {
     let _ = app.run_on_main_thread(move || update(&s, None, false));
+}
+
+/// Whether the D-Bus session bus can be reached, the way zbus looks for it:
+/// `DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`.
+#[cfg(target_os = "linux")]
+fn session_bus_reachable() -> bool {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixStream};
+    let Some(addr) = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").map(|a| a.to_string_lossy().into_owned()) else {
+        return std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| UnixStream::connect(std::path::Path::new(&d).join("bus")).is_ok());
+    };
+    addr.split(';').any(|entry| {
+        let Some(rest) = entry.strip_prefix("unix:") else {
+            // tcp:, launchd: and others: let zbus try.
+            return !entry.trim().is_empty();
+        };
+        rest.split(',').filter_map(|kv| kv.split_once('=')).any(|(k, v)| match k {
+            "path" => UnixStream::connect(unescape(v)).is_ok(),
+            "abstract" => SocketAddr::from_abstract_name(unescape(v).as_bytes()).is_ok_and(|a| UnixStream::connect_addr(&a).is_ok()),
+            // runtime=yes, dir=, tmpdir= are for servers; guess yes.
+            _ => false,
+        }) || rest.contains("runtime=yes")
+    })
+}
+
+/// D-Bus addresses escape bytes as %XX.
+#[cfg(target_os = "linux")]
+fn unescape(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(x) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
