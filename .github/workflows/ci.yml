@@ -29,6 +29,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Per runner image: C objects built against a newer glibc don't
+          # link on an older one.
+          key: ${{ matrix.os }}
       - uses: oven-sh/setup-bun@v2
       - name: System packages (Linux)
         if: runner.os == 'Linux'
