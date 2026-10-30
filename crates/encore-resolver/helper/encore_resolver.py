@@ -6,7 +6,7 @@
 # only; nothing secret is ever written to stderr.
 #
 # Request:  {"id": 1, "op": "resolve", "video_id": "...", "cookies": [...],
-#            "js_runtime": {"name": "node", "path": "/path/to/node"}}
+#            "js_runtime": {"name": "deno", "path": "/path/to/deno"}}
 # Response: {"id": 1, "ok": true, "format": {...}} or
 #           {"id": 1, "ok": false, "error": "...", "kind": "..."}
 
@@ -28,6 +28,10 @@ for _stream in (sys.stdin, sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+# Encore's own Python runs this in isolated mode (-I); yt-dlp comes from the
+# folder given with --site (D22).
+if len(sys.argv) > 2 and sys.argv[1] == "--site":
+    sys.path.insert(0, sys.argv[2])
 
 try:
     import yt_dlp

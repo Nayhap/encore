@@ -98,6 +98,8 @@ pub enum PlayerEvent {
     Notice(String),
     /// Resolution reported an expired session.
     SessionExpired,
+    /// A song couldn't start because the player components aren't installed.
+    SetupNeeded,
 }
 
 /// Compute the splice that turns `old` into `new` (by entry uid).

@@ -284,22 +284,19 @@
               </a>
               <a class="btn ghost" href="https://github.com/Nayhap/encore">Build from source</a>
             </div>
-            <p class="req">Playback needs Python 3.10 or newer and Node.js, Deno or Bun. Encore sets up its own copy of yt-dlp on first launch.</p>
+            <p class="req">Nothing else to install. On first launch Encore asks before downloading the player components it needs, about 70 MB, into its own folder.</p>
           </div>
 
           <ul class="platforms" id="platforms">
             <li data-os="macos">
               <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-macos"/></svg><b>macOS</b><span>.app · Apple silicon and Intel</span></a>
-              <code><span>brew install python node</span><button type="button" class="copy" aria-label="Copy the macOS requirements command">Copy</button></code>
             </li>
             <li data-os="windows">
               <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-windows"/></svg><b>Windows</b><span>-setup.exe or .msi · 10 and 11</span></a>
-              <code><span>winget install Python.Python.3.13 OpenJS.NodeJS.LTS</span><button type="button" class="copy" aria-label="Copy the Windows requirements command">Copy</button></code>
               <small>Builds aren’t code-signed yet, so SmartScreen warns on first run: choose More info, then Run anyway.</small>
             </li>
             <li data-os="linux">
               <a href="https://github.com/Nayhap/encore/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-linux"/></svg><b>Linux</b><span>.deb or .AppImage</span></a>
-              <code><span>sudo apt install python3 python3-venv nodejs</span><button type="button" class="copy" aria-label="Copy the Debian and Ubuntu requirements command">Copy</button></code>
               <small>Needs WebKitGTK 4.1, and GNOME Keyring or KWallet to stay signed in.</small>
             </li>
           </ul>

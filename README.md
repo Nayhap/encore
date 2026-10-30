@@ -81,20 +81,15 @@ Download the latest build from
   libasound2` on Debian and Ubuntu, `libglvnd-gles alsa-lib` on Fedora). To
   stay signed in you need GNOME Keyring or KWallet.
 
-Playback needs **Python 3.11 or newer** and **Node.js, Deno or Bun**. Encore
-sets up its own copy of [yt-dlp](https://github.com/yt-dlp/yt-dlp) on first
-launch and uses it to get audio streams.
+On first launch Encore offers to set up playback. With your OK it downloads
+the free components it plays music with, [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+and the Python and [Deno](https://deno.com) it runs on, into its own folder:
+65 to 80 MB to download and 120 to 160 MB on disk, depending on the system. You can keep browsing while they
+install, and nothing else on your computer changes. Encore keeps them up to
+date when it updates. **Settings → Playback** shows them and can remove them
+to free the space.
 
-| System | Install the requirements |
-|---|---|
-| macOS | `brew install python node` |
-| Windows | Python from [python.org](https://www.python.org/downloads/) and Node.js from [nodejs.org](https://nodejs.org), or `winget install Python.Python.3.13 OpenJS.NodeJS.LTS` |
-| Debian 12+, Ubuntu 24.04+ | `sudo apt install python3 python3-venv nodejs` |
-| Ubuntu 22.04 | `sudo apt install python3.11 python3.11-venv`, and Node.js 20 or newer from [nodejs.org](https://nodejs.org) (Ubuntu's own is too old) |
-| Fedora | `sudo dnf install python3 nodejs` |
-| Arch | `sudo pacman -S python nodejs` |
-
-Uninstalling keeps Encore's caches, settings and its copy of yt-dlp (a few
+Uninstalling keeps Encore's caches, settings and player components (a few
 hundred MB at most) unless you tick **Delete the application data** in the
 Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
 lists the folders to delete by hand on macOS and Linux, and the saved session

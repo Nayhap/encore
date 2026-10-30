@@ -18,7 +18,7 @@ not depend on Tauri, so they can be tested and run from the command line.
    encore-player ── queue, engine, resolver, radio, preload
      ├─ encore-ytm        YouTube Music API client and parsers
      ├─ encore-auth       cookies, browser import, Keychain
-     ├─ encore-resolver   stream URLs via a managed yt-dlp
+     ├─ encore-resolver   stream URLs via a managed yt-dlp + its runtimes
      ├─ encore-audio      decode and output
      ├─ encore-lyrics     lyrics sources, matching, cache
      └─ encore-core       shared types, queue model, storage
@@ -31,7 +31,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 | `encore-core` | Domain types, the `MusicService` and `StreamResolver` traits, the queue, the SQLite store, artwork keys, log redaction. |
 | `encore-ytm` | YouTube Music's internal API (`WEB_REMIX`, plus `ANDROID_MUSIC` for lyrics). Typed parsers for its responses, continuations, likes, playlist management, history, song/video pairs, play reporting to history, account and channel listing. |
 | `encore-auth` | The cookie jar, the `SAPISIDHASH` authorization header (including brand channels), cookie readers for Chromium browsers, Firefox and Safari, and the Keychain session store. |
-| `encore-resolver` | Runs a pinned yt-dlp in its own Python environment as a long-lived helper. Cookies are passed per request in memory, never written to disk. Each URL is probed before playback. |
+| `encore-resolver` | Downloads, verifies and keeps the player components (Python, Deno, yt-dlp; D22), and runs the pinned yt-dlp on them as a long-lived helper. Cookies are passed per request in memory, never written to disk. Each URL is probed before playback. |
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
 | `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. |
 | `encore-lyrics` | YouTube Music timed lyrics, then LRCLIB synced, then plain lyrics. Scores LRCLIB matches by title, artist and duration, and caches results. |

@@ -1,7 +1,8 @@
 //! `encore --self-test [VIDEO_ID] [--out FILE] [--strict]`: checks, without a
 //! window, the parts of Encore that depend on the machine it runs on: the
-//! data folder and database, the audio output, the yt-dlp setup (Python, the
-//! venv, a JS runtime) and, given a video id, resolving and decoding a stream.
+//! data folder and database, the audio output, the player components
+//! (installing them if needed, as the setup screen does) and, given a video
+//! id, resolving and decoding a stream.
 //!
 //! It runs the installed artifact the way users get it (inside the AppImage,
 //! from the .app, from the installed .exe), which is where the AppImage
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 use encore_audio::{Engine, EngineEvent, HttpSpec, SourceSpec};
 use encore_core::service::{PlayFailureKind, StreamResolver};
 use encore_core::store::Store;
-use encore_resolver::{ResolverConfig, YtDlpResolver};
+use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
 use serde_json::{Value, json};
 
 use crate::core::Paths;
@@ -80,12 +81,16 @@ async fn check(video: Option<String>, strict: bool) -> Value {
         }
     };
 
-    // yt-dlp: Python, the venv, the pinned packages, a JS runtime.
-    let resolver = YtDlpResolver::new(ResolverConfig { root: paths.data.join("resolver"), cache_dir: paths.cache.join("yt-dlp") });
+    // The player components (Python, Deno, yt-dlp), installed into the data
+    // folder the way the setup screen does it (D22), then the helper.
+    let rcfg = ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() };
+    let runtimes = Runtimes::new(rcfg.runtimes());
     let t0 = Instant::now();
-    let setup = resolver.ensure_ready().await;
-    let st = resolver.status();
-    r["resolver"] = json!({ "ok": setup.is_ok(), "python": st.python, "jsRuntime": st.js_runtime, "ytDlp": st.yt_dlp, "error": setup.as_ref().err(), "ms": t0.elapsed().as_millis() as u64 });
+    let setup = if runtimes.ready() { Ok(()) } else { runtimes.install().await.map_err(|e| e.message) };
+    let st = runtimes.status();
+    let comps: Vec<String> = st.components.iter().map(|c| format!("{} {}", c.name, c.installed.as_deref().unwrap_or("none"))).collect();
+    r["resolver"] = json!({ "ok": setup.is_ok(), "components": comps, "error": setup.as_ref().err(), "ms": t0.elapsed().as_millis() as u64 });
+    let resolver = YtDlpResolver::new(rcfg, runtimes);
     if setup.is_err() {
         ok = false;
     } else {
@@ -122,7 +127,7 @@ async fn stream(resolver: &Arc<YtDlpResolver>, engine: Option<&Engine>, id: &str
                 PlayFailureKind::Network => "network",
                 PlayFailureKind::Unavailable => "unavailable",
                 PlayFailureKind::SessionExpired => "sessionExpired",
-                PlayFailureKind::Setup => "setup",
+                PlayFailureKind::SetupNeeded => "setup",
                 PlayFailureKind::Unknown => "unknown",
             };
             return json!({ "ok": false, "kind": kind, "error": f.message });

@@ -206,10 +206,9 @@ pub enum PlayFailureKind {
     SessionExpired,
     Network,
     Unknown,
-    /// Playback isn't set up on this computer (no Python, no JS runtime, the
-    /// yt-dlp download failed). No song can play until that's fixed, so the
-    /// player doesn't skip through the queue.
-    Setup,
+    /// The player components aren't installed yet (D22): not the song's
+    /// fault, so it isn't skipped; the app offers the setup instead.
+    SetupNeeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, thiserror::Error)]

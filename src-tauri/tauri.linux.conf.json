@@ -22,12 +22,8 @@
     "linux": {
       "deb": {
         "depends": [
-          "python3-venv (>= 3.11) | python3.11-venv",
           "libasound2t64 | libasound2",
           "libdbus-1-3"
-        ],
-        "recommends": [
-          "nodejs"
         ]
       }
     }

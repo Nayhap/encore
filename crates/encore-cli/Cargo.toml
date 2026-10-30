@@ -24,3 +24,4 @@ encore-player.workspace = true
 dirs = "6"
 encore-lyrics.workspace = true
 async-trait.workspace = true
+parking_lot.workspace = true

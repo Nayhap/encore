@@ -10,7 +10,7 @@ use encore_core::service::{MusicService, ResolveAuth};
 use encore_core::store::Store;
 use encore_lyrics::LyricsService;
 use encore_player::Player;
-use encore_resolver::{ResolverConfig, YtDlpResolver};
+use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
 use encore_ytm::account::Accounts;
 use encore_ytm::{InnerTube, YtMusic};
 use serde::de::DeserializeOwned;
@@ -36,7 +36,7 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
-        // Local (not roaming) data on Windows: the resolver venv lives here.
+        // Local (not roaming) data on Windows: the player components live here.
         let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let logs = if cfg!(target_os = "macos") {
@@ -96,7 +96,9 @@ impl Core {
         let it = InnerTube::new("en", "US");
         let ytm = Arc::new(YtMusic::new(it.clone()));
         let accounts = Accounts::new(ytm.clone(), encore_auth::store::session_store());
-        let resolver = YtDlpResolver::new(ResolverConfig { root: paths.data.join("resolver"), cache_dir: paths.cache.join("yt-dlp") });
+        let rcfg = ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() };
+        let runtimes = Runtimes::new(rcfg.runtimes());
+        let resolver = YtDlpResolver::new(rcfg, runtimes);
         let audio_cache = AudioCache::new(paths.cache.join("audio"), encore_audio::cache::DEFAULT_LIMIT).map_err(|e| AppError::internal(format!("audio cache: {}", e.kind())))?;
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;
         // On unless turned off (it only ever reports for a signed-in account).

@@ -1,6 +1,6 @@
 [package]
 name = "encore"
-version = "0.2.1"
+version = "0.3.0"
 description = "Encore, a YouTube Music desktop client"
 authors = ["Encore"]
 edition = "2024"

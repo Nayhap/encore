@@ -24,11 +24,16 @@ export const tauriApi: Api = {
       events.signinEvent.listen((e) => h.signin(e.payload as any)),
       events.playlistsEvent.listen((e) => h.playlists(e.payload as any)),
       events.historyEvent.listen((e) => h.history(e.payload as any)),
+      events.runtimesEvent.listen((e) => h.runtimes(e.payload as any)),
+      events.setupNeededEvent.listen((e) => h.setupNeeded(e.payload as any)),
     ]);
     return () => offs.forEach((off) => off());
   },
   bootstrap: () => u(commands.bootstrap()) as any,
-  resolverSetup: () => u(commands.resolverSetup()) as any,
+  runtimesStatus: () => u(commands.runtimesStatus()) as any,
+  runtimesInstall: (r) => u(commands.runtimesInstall(r)) as any,
+  runtimesCancel: () => u(commands.runtimesCancel()) as any,
+  runtimesRemove: () => u(commands.runtimesRemove()) as any,
   cacheInfo: () => u(commands.cacheInfo()),
   cacheClear: (w) => u(commands.cacheClear(w)) as any,
   home: () => u(commands.home()) as any,
