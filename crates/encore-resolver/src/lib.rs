@@ -361,7 +361,7 @@ pub fn missing_python_message() -> &'static str {
     } else if cfg!(target_os = "macos") {
         "Python 3.11 or newer was not found. Install Python 3 (for example with “brew install python”), then play the song again."
     } else {
-        "Python 3.11 or newer was not found. Install python3 and python3-venv with your package manager (on Ubuntu 22.04: python3.11 and python3.11-venv), then play the song again."
+        "Python 3.11 or newer was not found. Install Python 3 with your package manager (python3 and python3-venv on Debian and Ubuntu; python3.11 and python3.11-venv on Ubuntu 22.04), then play the song again."
     }
 }
 

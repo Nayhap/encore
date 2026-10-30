@@ -74,8 +74,12 @@ Download the latest build from
   needs an administrator. Builds are not code-signed
   yet: SmartScreen warns on first run (choose **More info**, then **Run
   anyway**), and if Smart App Control is on, Windows blocks them.
-- **Linux**: the `.deb` for Debian and Ubuntu, or the `.AppImage`. Needs
-  WebKitGTK 4.1, and GNOME Keyring or KWallet to stay signed in.
+- **Linux**: the `.deb` for Debian 12 and Ubuntu 22.04 or newer, or the
+  `.AppImage` for other distributions with glibc 2.35 or newer. The AppImage
+  uses the system's OpenGL and sound libraries, which desktops have; on a
+  minimal system install them first (`libegl1 libgl1 libgles2 libgbm1
+  libasound2` on Debian and Ubuntu, `libglvnd-gles alsa-lib` on Fedora). To
+  stay signed in you need GNOME Keyring or KWallet.
 
 Playback needs **Python 3.11 or newer** and **Node.js, Deno or Bun**. Encore
 sets up its own copy of [yt-dlp](https://github.com/yt-dlp/yt-dlp) on first
@@ -88,6 +92,7 @@ launch and uses it to get audio streams.
 | Debian 12+, Ubuntu 24.04+ | `sudo apt install python3 python3-venv nodejs` |
 | Ubuntu 22.04 | `sudo apt install python3.11 python3.11-venv`, and Node.js 20 or newer from [nodejs.org](https://nodejs.org) (Ubuntu's own is too old) |
 | Fedora | `sudo dnf install python3 nodejs` |
+| Arch | `sudo pacman -S python nodejs` |
 
 Uninstalling keeps Encore's caches, settings and its copy of yt-dlp (a few
 hundred MB at most) unless you tick **Delete the application data** in the
