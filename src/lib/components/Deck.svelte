@@ -265,6 +265,8 @@
   @media (prefers-reduced-motion: reduce) {
     .play.loading::after {
       animation: none !important;
+      border-color: color-mix(in srgb, var(--text) 35%, transparent);
+      border-top-color: var(--text);
       border-right-color: var(--text);
     }
   }

@@ -37,6 +37,14 @@
   if (innerWidth < 1180) ui.stageOpen = false;
 
   let connectError = $state<string | null>(null);
+  // Pages shown from the offline cache have no error to retry from: when
+  // the connection comes back, load the current page again.
+  let onlineRev = $state(0);
+  onMount(() => {
+    const back = () => onlineRev++;
+    addEventListener("online", back);
+    return () => removeEventListener("online", back);
+  });
   onMount(() => {
     connect().catch((e) => (connectError = e?.message ?? String(e)));
   });
@@ -206,7 +214,7 @@
   <main>
     <TopBar title={viewTitle} {scrolled} />
     <div class="scroll" bind:this={scroller} onscroll={() => (scrolled = scroller.scrollTop > 24)}>
-      {#key JSON.stringify(nav.view)}
+      {#key JSON.stringify(nav.view) + onlineRev}
         <div class="view">
           {#if account.state.state === "expired"}
             <div class="banner" role="alert">
