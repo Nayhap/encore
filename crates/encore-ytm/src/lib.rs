@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use encore_auth::Session;
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
-use encore_core::service::{Capabilities, MusicService, PlayReport, PlayReporter, RequestContext};
+use encore_core::service::{Capabilities, LoudnessSource, More, MusicService, PlayReport, PlayReporter, RequestContext};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -402,16 +402,32 @@ impl MusicService for YtMusic {
     }
 
     async fn collection_more(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, Option<String>)> {
+        let (entries, more) = self.collection_more_checked(ctx, cursor).await?;
+        Ok((entries, match more {
+            More::Next(c) => Some(c),
+            More::Ended | More::Stalled => None,
+        }))
+    }
+
+    async fn collection_more_checked(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, More)> {
         self.check(ctx)?;
         let c = self.cursors.take(cursor, ctx.epoch)?;
         let CursorKind::Collection { offset } = c.kind else { return Err(AppError::invalid("Not a playlist cursor.")) };
         let v = self.continue_browse("browse", &c.cont, json!({})).await?;
         let p = pages::collection_continuation(&v, offset).map_err(parse_err)?;
         let n = offset + p.value.len();
-        // Stop if the server repeats the same token (no progress).
+        // Stop if the server repeats the same token or sends an empty page
+        // with another continuation (no progress): the list may go on.
         let same = matches!((&p.cont, &c.cont), (Some(a), b) if a == b);
-        let next = if same || p.value.is_empty() { None } else { self.cursors.put(CursorKind::Collection { offset: n }, p.cont, ctx.epoch) };
-        Ok((p.value, next))
+        let more = if same || (p.value.is_empty() && p.cont.is_some()) {
+            More::Stalled
+        } else {
+            match self.cursors.put(CursorKind::Collection { offset: n }, p.cont, ctx.epoch) {
+                Some(next) => More::Next(next),
+                None => More::Ended,
+            }
+        };
+        Ok((p.value, more))
     }
 
     async fn artist(&self, ctx: &RequestContext, id: &ItemId) -> Result<Artist> {
@@ -702,6 +718,23 @@ impl MusicService for YtMusic {
     }
 }
 
+/// `playerConfig.audioConfig.loudnessDb` of a `/player` answer.
+fn loudness_of(v: &Value) -> Option<f32> {
+    v.pointer("/playerConfig/audioConfig/loudnessDb").and_then(Value::as_f64).filter(|l| l.is_finite()).map(|l| l as f32)
+}
+
+/// For downloads (D23): the loudness YouTube measured, so a downloaded song
+/// is normalised like the app (D5). Asked as whoever is signed in; an
+/// answer without it is `None`, never an error.
+#[async_trait]
+impl LoudnessSource for YtMusic {
+    async fn loudness(&self, id: &ItemId) -> Result<Option<f32>> {
+        let body = json!({ "videoId": id.remote(), "contentCheckOk": true, "racyCheckOk": true });
+        let v = self.it.post(Client::WebRemix, "player", body, &[]).await?;
+        Ok(loudness_of(&v))
+    }
+}
+
 #[async_trait]
 impl PlayReporter for YtMusic {
     async fn open_report(&self, id: &ItemId) -> Result<Option<Arc<dyn PlayReport>>> {
@@ -730,6 +763,13 @@ impl PlayReporter for YtMusic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_loudness_from_the_player_answer() {
+        let v = json!({ "playerConfig": { "audioConfig": { "loudnessDb": -3.25, "perceptualLoudnessDb": -17.25 } } });
+        assert_eq!(loudness_of(&v), Some(-3.25));
+        assert_eq!(loudness_of(&json!({ "playabilityStatus": { "status": "OK" } })), None);
+    }
 
     #[test]
     fn titles_compare_without_version_labels() {

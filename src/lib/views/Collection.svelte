@@ -3,8 +3,9 @@
   import { catalog } from "$lib/catalog.svelte";
   import { kindLabel, totalDuration } from "$lib/data";
   import { Resource } from "$lib/load.svelte";
-  import { account, collectionMenu, editPlaylist, nav, player, playlists, ui } from "$lib/state.svelte";
+  import { account, collectionMenu, downloads, editPlaylist, keptNote, nav, player, playlists, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
+  import KeepButton from "$lib/components/KeepButton.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Shelves from "$lib/components/Shelves.svelte";
   import Status from "$lib/components/Status.svelte";
@@ -53,7 +54,19 @@
   });
 
   const tracks = $derived(entries.map((e) => e.track));
-  const mine = $derived(!!c?.editable && account.signedIn && !!c?.playlistId);
+  // Offline, only downloaded songs play: the header says so (D23).
+  const here = $derived(tracks.filter((t) => downloads.has(t.id)).length);
+  const partial = $derived(!ui.online && here < tracks.length);
+  const note = $derived(keptNote(downloads.keptFor(id), downloads.syncing(id)));
+
+  // Offline and not kept, the header plays the downloaded songs it shows.
+  function playHere(shuffle: boolean) {
+    if (ui.online || downloads.keptFor(id)) return player.playCollection(id, 0, shuffle);
+    const local = tracks.filter((t) => downloads.has(t.id));
+    player.playTracks(local, shuffle ? Math.floor(Math.random() * local.length) : 0, { label: c?.title ?? "Downloads", collectionId: id, radioPlaylist: null }, shuffle);
+  }
+  // Offline, edits wait (D23): the controls go until the connection is back.
+  const mine = $derived(!!c?.editable && account.signedIn && !!c?.playlistId && ui.online);
   const privacyLabel = { private: "Private", unlisted: "Unlisted", public: "Public" } as const;
   const privacyIcon = { private: "lock", unlisted: "link", public: "globe" } as const;
   // Reorder only a fully loaded list of rows that have entry ids (D10).
@@ -163,11 +176,12 @@
         </p>
         {#if c.description}<p class="desc">{c.description}</p>{/if}
         <div class="actions">
-          <button class="pill primary" disabled={!tracks.length} onclick={() => (cur ? player.toggle() : player.playCollection(id))}>
+          <button class="pill primary" disabled={!tracks.length || (partial && !here)} onclick={() => (cur ? player.toggle() : playHere(false))}>
             <Icon name={cur && player.playing ? "pause" : "play"} size={16} />
-            {cur && player.playing ? "Pause" : "Play"}
+            {cur && player.playing ? "Pause" : partial ? "Play downloaded" : "Play"}
           </button>
-          <button class="pill" disabled={!tracks.length} onclick={() => player.playCollection(id, 0, true)}><Icon name="shuffle" size={16} />Shuffle</button>
+          <button class="pill" disabled={!tracks.length || (partial && !here)} onclick={() => playHere(true)}><Icon name="shuffle" size={16} />{partial ? "Shuffle downloaded" : "Shuffle"}</button>
+          {#if tracks.length}<KeepButton {id} />{/if}
           {#if c.kind !== "liked" && !c.editable && c.playlistId}
             <button
               class="icon-btn big"
@@ -175,6 +189,7 @@
               aria-pressed={!!saved}
               aria-label={saved ? "Remove from library" : "Save to library"}
               title={saved ? "Remove from library" : "Save to library"}
+              disabled={!ui.online}
               onclick={toggleSave}
             ><Icon name={saved ? "check" : "plus"} size={20} /></button>
           {/if}
@@ -183,11 +198,13 @@
           {/if}
           <button class="icon-btn big" aria-label="More actions" onclick={(e) => ui.openMenu(e, collectionMenu(id))}><Icon name="more" size={19} /></button>
         </div>
+        {#if note}<p class="kept-note">{note}</p>{/if}
+        {#if !ui.online && !here && tracks.length}<p class="kept-note">You're offline, and none of these songs are downloaded.</p>{/if}
       </div>
     </header>
 
     {#if tracks.length}
-      <TrackTable {tracks} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum} onremove={c.editable && account.signedIn ? remove : undefined} endMenu={moveMenu} reorder={canReorder ? move : undefined} />
+      <TrackTable {tracks} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum} onremove={c.editable && account.signedIn && ui.online ? remove : undefined} endMenu={moveMenu} reorder={canReorder ? move : undefined} />
     {:else}
       <Status empty="This collection has no songs that can be played here." />
     {/if}
@@ -280,5 +297,9 @@
   .big {
     width: 38px;
     height: 38px;
+  }
+  .kept-note {
+    font-size: 13px;
+    color: var(--mute);
   }
 </style>

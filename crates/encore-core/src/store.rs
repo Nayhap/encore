@@ -1,7 +1,8 @@
 //! SQLite storage (D11): browse/library cache, play state, settings, lyrics
 //! cache and the artwork index. Rows are scoped (`account:<key>`, `lyrics`,
 //! `settings`, `art`, ...) so a sign-out or channel switch can purge exactly the
-//! personal data of that account. Nothing secret is stored here.
+//! personal data of that account. Nothing secret is stored here. The
+//! downloads index (D23) has its own tables, in [`crate::downloads`].
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,14 +15,14 @@ use serde::de::DeserializeOwned;
 use crate::error::{AppError, Result};
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-fn db_err(e: rusqlite::Error) -> AppError {
+pub(crate) fn db_err(e: rusqlite::Error) -> AppError {
     AppError::internal(format!("storage error: {e}"))
 }
 
@@ -44,6 +45,25 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE INDEX IF NOT EXISTS kv_expires ON kv(expires);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 "#;
+
+/// The schema this Encore writes. Each step in `migrate` brings an older
+/// database up by one version.
+const SCHEMA_VERSION: i64 = 2;
+
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    let v: Option<String> = conn.query_row("SELECT v FROM meta WHERE k = 'schema'", [], |r| r.get(0)).optional()?;
+    Ok(v.and_then(|v| v.parse().ok()).unwrap_or(1))
+}
+
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let v = schema_version(conn)?;
+    if v < 2 {
+        // 2: the downloads index (D23).
+        conn.execute_batch(crate::downloads::SCHEMA)?;
+    }
+    conn.execute("INSERT INTO meta (k, v) VALUES ('schema', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v", params![SCHEMA_VERSION.max(v).to_string()])?;
+    Ok(())
+}
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -74,7 +94,7 @@ impl Store {
         // not reported as "database is locked".
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
-        conn.execute("INSERT OR IGNORE INTO meta (k, v) VALUES ('schema', '1')", [])?;
+        migrate(&conn)?;
         let s = Self { conn: Mutex::new(conn) };
         s.purge_expired();
         Ok(s)
@@ -83,6 +103,7 @@ impl Store {
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        migrate(&conn).map_err(db_err)?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -177,6 +198,24 @@ mod tests {
         assert_eq!(s.get::<i32>("settings", "k").unwrap(), Some(1));
         let aside = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().contains("damaged"));
         assert!(aside, "the damaged file is kept for inspection");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_databases_are_migrated() {
+        let dir = std::env::temp_dir().join(format!("encore-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("encore.sqlite");
+        {
+            // A version 1 database, as Encore 0.3 left it.
+            let c = Connection::open(&db).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute("INSERT OR IGNORE INTO meta (k, v) VALUES ('schema', '1')", []).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        assert_eq!(schema_version(&s.conn.lock()).unwrap(), SCHEMA_VERSION);
+        assert!(s.download_rows().unwrap().is_empty());
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
     }

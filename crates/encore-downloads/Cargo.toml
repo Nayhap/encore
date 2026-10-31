@@ -1,0 +1,27 @@
+[package]
+name = "encore-downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encore-core.workspace = true
+encore-audio.workspace = true
+encore-lyrics.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+# Free space before each download (statvfs / GetDiskFreeSpaceExW).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

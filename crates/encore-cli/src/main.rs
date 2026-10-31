@@ -113,6 +113,16 @@ enum Cmd {
         /// that it shows up. Prints ping kinds and statuses, never URLs.
         #[arg(long)]
         report: bool,
+        /// Play downloaded songs only, as Encore does offline: everything
+        /// comes from the downloads index, with no player components and no
+        /// request to YouTube.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Downloads kept in the app's folder (D23).
+    Downloads {
+        #[command(subcommand)]
+        cmd: DownloadsCmd,
     },
     /// Sign-in and session commands.
     Auth {
@@ -232,6 +242,26 @@ enum PlaylistCmd {
         before: Option<usize>,
     },
     Delete { id: String },
+}
+
+#[derive(Subcommand)]
+enum DownloadsCmd {
+    /// Downloaded songs, kept collections and what is waiting.
+    List,
+    /// Download songs and wait until they are done (installs the player
+    /// components first if missing).
+    Add { videos: Vec<String> },
+    /// Keep a playlist, album or liked songs (LM) downloaded, and wait.
+    Keep { id: String },
+    /// Stop keeping a collection downloaded.
+    Unkeep { id: String },
+    /// Remove downloaded songs (kept collections keep theirs).
+    Remove { videos: Vec<String> },
+    /// Check kept collections for changes, and download what's new.
+    Sync { id: Option<String> },
+    Pause,
+    /// Resume, and try failed songs again.
+    Resume,
 }
 
 #[derive(Subcommand)]
@@ -390,9 +420,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Record { dir } => record(&svc, dir).await?,
-        Cmd::Play { video_id, seek, next, secs, report } => {
+        Cmd::Play { video_id, seek, next, secs, report, offline } => {
             let _ = accounts(&svc).restore();
-            play(svc.clone(), &video_id, seek, next.as_deref(), secs, report).await?
+            play(svc.clone(), &video_id, seek, next.as_deref(), secs, report, offline).await?
+        }
+        Cmd::Downloads { cmd } => {
+            let _ = accounts(&svc).restore();
+            downloads(svc.clone(), cmd, j).await?
         }
         Cmd::Auth { cmd } => auth(&svc, cmd).await?,
         Cmd::Lyrics { video_id, fresh } => {
@@ -811,9 +845,13 @@ impl encore_core::service::PlayReport for ShowReport {
     }
 }
 
-async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option<&str>, secs: f64, report: bool) -> Result<()> {
+async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option<&str>, secs: f64, report: bool, offline: bool) -> Result<()> {
     use encore_player::{Player, PlayerEvent};
-    let resolver = cli_resolver(true).await?;
+    if offline && report {
+        bail!("--report needs a connection; leave out --offline");
+    }
+    // Offline nothing is installed: downloaded songs need no components.
+    let resolver = cli_resolver(!offline).await?;
     let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
@@ -833,9 +871,28 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         player.set_reporting(true);
         player.report_history(Arc::new(ShowReporter(svc.clone())), Arc::new(|id: &ItemId| println!("history: play of {id} registered")));
     }
-    let mut tracks = vec![svc.track(&ctx, &ItemId::parse(video_id)).await.map_err(|e| anyhow!("{}", e.message))?];
-    if let Some(n) = next {
-        tracks.push(svc.track(&ctx, &ItemId::parse(n)).await.map_err(|e| anyhow!("{}", e.message))?);
+    let mut tracks = Vec::new();
+    if offline {
+        // Everything from the downloads index; nothing from YouTube.
+        let dl = cli_downloads(svc.clone(), resolver.clone(), Some(cache.clone())).await?;
+        for id in std::iter::once(video_id).chain(next) {
+            let id = ItemId::parse(id);
+            let row = dl.1.download_row(id.remote()).map_err(|e| anyhow!("{}", e.message))?;
+            match row {
+                Some(r) if r.state == encore_core::downloads::RowState::Ready => tracks.push(r.track),
+                _ => println!("not downloaded, left out: {id}"),
+            }
+        }
+        if tracks.is_empty() {
+            bail!("none of these songs are downloaded (encore-cli downloads add …)");
+        }
+        player.set_local_audio(dl.0);
+        player.set_online(false);
+    } else {
+        tracks.push(svc.track(&ctx, &ItemId::parse(video_id)).await.map_err(|e| anyhow!("{}", e.message))?);
+        if let Some(n) = next {
+            tracks.push(svc.track(&ctx, &ItemId::parse(n)).await.map_err(|e| anyhow!("{}", e.message))?);
+        }
     }
     for t in &tracks {
         println!("queue: {}", show::track(t));
@@ -862,7 +919,7 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         let snap = player.snapshot();
         if started_at.is_none() && snap.phase == encore_player::Phase::Playing {
             started_at = Some(Instant::now());
-            println!("audible after {:.2}s (stream itag={} codec={} cached={} authenticated={} seekable={})", t0.elapsed().as_secs_f64(), snap.stream.as_ref().map(|s| s.itag).unwrap_or(0), snap.stream.as_ref().map(|s| s.codec.as_str()).unwrap_or("?"), snap.stream.as_ref().is_some_and(|s| s.from_cache), snap.stream.as_ref().is_some_and(|s| s.authenticated), snap.stream.as_ref().is_some_and(|s| s.seekable));
+            println!("audible after {:.2}s{} (stream itag={} codec={} cached={} authenticated={} seekable={})", t0.elapsed().as_secs_f64(), if offline { " from downloads" } else { "" }, snap.stream.as_ref().map(|s| s.itag).unwrap_or(0), snap.stream.as_ref().map(|s| s.codec.as_str()).unwrap_or("?"), snap.stream.as_ref().is_some_and(|s| s.from_cache), snap.stream.as_ref().is_some_and(|s| s.authenticated), snap.stream.as_ref().is_some_and(|s| s.seekable));
         }
         if let (Some(target), false, Some(st)) = (seek, seeked, started_at) {
             if st.elapsed() > Duration::from_secs(3) {
@@ -897,6 +954,139 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         let first = h.groups.first();
         let yes = first.is_some_and(|g| g.rows.iter().take(3).any(|r| r.track.id == target));
         println!("history after: {target} near the top of \"{}\": {}{}", first.map(|g| g.title.as_str()).unwrap_or("-"), if yes { "yes" } else { "no" }, if was_there { " (it was already there before)" } else { "" });
+    }
+    Ok(())
+}
+
+/// The app's downloads (its folder and index), with nothing started: the
+/// caller starts the worker when it means to download.
+async fn cli_downloads(svc: Arc<YtMusic>, resolver: Arc<encore_resolver::YtDlpResolver>, cache: Option<encore_audio::AudioCache>) -> Result<(Arc<encore_downloads::DownloadManager>, Arc<encore_core::store::Store>)> {
+    // Never a temporary folder: downloads are kept for good.
+    let data = dirs::data_local_dir().ok_or_else(|| anyhow!("this system has no data folder for Encore's downloads"))?.join("app.encore.desktop");
+    let store = Arc::new(encore_core::store::Store::open(&data.join("encore.sqlite")).map_err(|e| anyhow!("{}", e.message))?);
+    let it = svc.it.clone();
+    let deps = encore_downloads::Deps {
+        store: store.clone(),
+        service: svc.clone(),
+        resolver,
+        auth: Arc::new(move || encore_cli_auth(&it)),
+        gate: Arc::new(encore_core::service::PlaybackGate::default()),
+        fetcher: Arc::new(encore_downloads::HttpFetcher::new()),
+        cache,
+        lyrics: Some(Arc::new(encore_lyrics::LyricsService::new(svc.clone(), Some(store.clone())))),
+        art: None,
+        loudness: Some(svc.clone()),
+        spacing: (Duration::from_secs(2), Duration::from_secs(4)),
+    };
+    let dl = encore_downloads::DownloadManager::open(data.join("downloads"), deps).map_err(|e| anyhow!("{}", e.message))?;
+    Ok((dl, store))
+}
+
+fn size(b: f64) -> String {
+    if b >= 1e9 { format!("{:.2} GB", b / 1e9) } else { format!("{:.1} MB", b / 1e6) }
+}
+
+async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<()> {
+    use encore_downloads::{DownloadState, DownloadsUpdate};
+    let fetching = matches!(cmd, DownloadsCmd::Add { .. } | DownloadsCmd::Keep { .. } | DownloadsCmd::Sync { .. } | DownloadsCmd::Resume);
+    let resolver = cli_resolver(fetching).await?;
+    // No playback cache here: opening it clears its partial files, which may
+    // be the running app's. Songs are fetched instead of copied from it.
+    let (dl, _) = cli_downloads(svc.clone(), resolver, None).await?;
+    let e = |e: encore_core::AppError| anyhow!("{} ({:?})", e.message, e.code);
+    let ids = |v: &[String]| v.iter().map(|x| ItemId::parse(x)).collect::<Vec<_>>();
+    match cmd {
+        DownloadsCmd::List => {
+            let snap = dl.snapshot();
+            out(json, &snap, |s| {
+                println!("{} songs, {} ({}){}", s.summary.songs, size(s.summary.bytes), dl.dir().display(), s.summary.message.as_ref().map(|m| format!(". {m}")).unwrap_or_default());
+                for i in &s.items {
+                    let fmt = match (&i.codec, i.kbps) {
+                        (Some(c), Some(k)) => format!("{c} {k} kbps"),
+                        (Some(c), None) => c.clone(),
+                        _ => String::new(),
+                    };
+                    println!("  {:<11} {}  {}  {}{}", format!("{:?}", i.state).to_lowercase(), show::track(&i.track), size(i.bytes), fmt, i.error.as_ref().map(|x| format!("  ({x})")).unwrap_or_default());
+                }
+                for c in &s.collections {
+                    let who = c.channel.as_deref().map(|n| format!(", kept by {n}")).unwrap_or_default();
+                    println!("kept: {}  {}  {}/{} songs{}{}", c.card.id, c.card.title, c.ready, c.songs, who, c.error.as_ref().map(|x| format!("  ({x})")).unwrap_or_default());
+                }
+            });
+            return Ok(());
+        }
+        DownloadsCmd::Add { videos } => {
+            let svc2 = svc.clone();
+            let ctx = svc2.context();
+            let mut tracks = Vec::new();
+            for id in ids(&videos) {
+                tracks.push(svc2.track(&ctx, &id).await.map_err(e)?);
+            }
+            let n = dl.add(tracks).map_err(e)?;
+            println!("{n} waiting");
+        }
+        DownloadsCmd::Keep { id } => {
+            let ctx = svc.context();
+            let c = svc.collection(&ctx, &ItemId::parse(&id)).await.map_err(e)?;
+            println!("keeping {} ({})", c.title, c.id);
+            dl.keep(c, ctx, None).map_err(e)?;
+        }
+        DownloadsCmd::Unkeep { id } => {
+            let r = dl.unkeep(&ItemId::parse(&id), None).map_err(e)?;
+            println!("no longer kept; {} songs removed", r.removed);
+            return Ok(());
+        }
+        DownloadsCmd::Remove { videos } => {
+            let r = dl.remove(&ids(&videos)).map_err(e)?;
+            println!("{} removed", r.removed);
+            for k in &r.kept {
+                match &k.collection {
+                    Some(c) => println!("  {} stays: \"{c}\" is kept downloaded and includes it", k.track_id),
+                    None => println!("  {} stays: another account downloaded it too", k.track_id),
+                }
+            }
+            return Ok(());
+        }
+        DownloadsCmd::Sync { id } => dl.sync(id.map(|x| ItemId::parse(&x)).as_ref()),
+        DownloadsCmd::Pause => {
+            // The running app follows the stored flag at its next song or piece.
+            dl.pause(true);
+            println!("paused");
+            return Ok(());
+        }
+        DownloadsCmd::Resume => {
+            dl.pause(false);
+            dl.retry();
+        }
+    }
+    // Fetch in the foreground until the queue is done, printing each song.
+    let mut rx = dl.subscribe();
+    tokio::spawn(async move {
+        while let Ok(u) = rx.recv().await {
+            if let DownloadsUpdate::Item { item, .. } = u {
+                let what = match item.state {
+                    DownloadState::Downloading => "downloading".to_string(),
+                    DownloadState::Ready => format!("done, {}", size(item.bytes)),
+                    DownloadState::Failed => format!("failed: {}", item.error.unwrap_or_default()),
+                    DownloadState::Queued => match item.error {
+                        Some(x) => format!("will try again: {x}"),
+                        None => continue,
+                    },
+                    DownloadState::Removed => "removed".to_string(),
+                };
+                println!("{} — {}: {what}", item.track.title, item.track.artist_line());
+            }
+        }
+    });
+    dl.start();
+    let t0 = Instant::now();
+    let wait = dl.settle().await;
+    let s = dl.summary();
+    println!("{} songs downloaded, {} waiting, {} failed ({:.0}s)", s.songs, s.waiting, s.failed, t0.elapsed().as_secs_f64());
+    if wait.is_some() {
+        if let Some(m) = s.message {
+            println!("{m}");
+        }
     }
     Ok(())
 }

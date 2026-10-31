@@ -33,6 +33,8 @@ pub use runtimes::manifest::{YT_DLP_EJS_VERSION, YT_DLP_VERSION};
 pub use runtimes::{RuntimeStatus, Runtimes, RuntimesConfig, SetupError, SetupErrorKind, SetupPhase, SetupProgress};
 
 const HELPER_SRC: &str = include_str!("../helper/encore_resolver.py");
+/// The helper's protocol version (`PROTOCOL` in the script).
+const PROTOCOL: u64 = 2;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(60);
 const POOL: usize = 2;
 
@@ -174,6 +176,12 @@ pub fn friendly_message(kind: PlayFailureKind, raw: &str, signed_in: bool) -> St
     format!("YouTube refused to play it: {short}")
 }
 
+/// Why a probe failed: refused (403/410) or anything else.
+enum Probe {
+    Refused(u16),
+    Failed(PlayFailure),
+}
+
 fn fxhash(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
@@ -228,6 +236,11 @@ impl YtDlpResolver {
         let v: Value = serde_json::from_str(&hello).map_err(|_| fail(PlayFailureKind::Unknown, "the resolver sent an unreadable greeting"))?;
         if v.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(fail(PlayFailureKind::Unknown, v.get("error").and_then(Value::as_str).unwrap_or("resolver failed to start").to_string()));
+        }
+        let protocol = v.get("hello").and_then(|h| h.get("protocol")).and_then(Value::as_u64);
+        if protocol != Some(PROTOCOL) {
+            tracing::warn!(?protocol, expected = PROTOCOL, "resolver helper speaks another protocol");
+            return Err(fail(PlayFailureKind::Unknown, "The resolver helper is out of date. Restart Encore."));
         }
         Ok(h)
     }
@@ -351,6 +364,13 @@ impl YtDlpResolver {
     /// Head + tail range probe (D4). Returns the verified content length and
     /// whether deep ranges work.
     pub async fn probe(&self, s: &ResolvedStream) -> Result<(u64, bool), PlayFailure> {
+        self.probe_checked(s).await.map_err(|p| match p {
+            Probe::Refused(st) => fail(PlayFailureKind::Unknown, format!("the media server refused the stream ({st})")),
+            Probe::Failed(f) => f,
+        })
+    }
+
+    async fn probe_checked(&self, s: &ResolvedStream) -> Result<(u64, bool), Probe> {
         let get = |range: String| {
             let mut rb = self.http.get(s.url.expose()).header("Range", range);
             for (k, v) in &s.headers {
@@ -358,20 +378,32 @@ impl YtDlpResolver {
             }
             rb.send()
         };
-        let r = get("bytes=0-1023".into()).await.map_err(|e| fail(PlayFailureKind::Network, if e.is_timeout() { "YouTube's media server didn't answer in time. Check your internet connection." } else { "Couldn't reach YouTube's media server. Check your internet connection." }))?;
+        let mut r = get("bytes=0-1023".into()).await.map_err(|e| Probe::Failed(fail(PlayFailureKind::Network, if e.is_timeout() { "YouTube's media server didn't answer in time. Check your internet connection." } else { "Couldn't reach YouTube's media server. Check your internet connection." })))?;
         let st = r.status().as_u16();
+        // Usually a URL that went stale or belongs to another client: the
+        // caller resolves once more (D23), it isn't a bot check.
         if st == 403 || st == 410 {
-            return Err(fail(PlayFailureKind::Challenged, format!("the media server refused the stream ({st})")));
+            return Err(Probe::Refused(st));
         }
         if st != 206 && st != 200 {
-            return Err(fail(PlayFailureKind::Network, format!("the media server answered {st}")));
+            return Err(Probe::Failed(fail(PlayFailureKind::Network, format!("the media server answered {st}"))));
         }
         let total = r.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit('/').next()).and_then(|t| t.parse::<u64>().ok()).or(s.content_length);
-        let head = r.bytes().await.map_err(|_| fail(PlayFailureKind::Network, "the media download was interrupted"))?;
+        // A server that ignores the range answers 200 with the whole file:
+        // read only the start of it.
+        let mut head: Vec<u8> = Vec::new();
+        while head.len() < 1024 {
+            match r.chunk().await {
+                Ok(Some(c)) => head.extend_from_slice(&c),
+                Ok(None) => break,
+                Err(_) => return Err(Probe::Failed(fail(PlayFailureKind::Network, "the media download was interrupted"))),
+            }
+        }
+        drop(r);
         // Check the bytes look like media (MP4 ftyp / WebM EBML).
         let looks = head.len() >= 8 && (&head[4..8] == b"ftyp" || head[..4] == [0x1a, 0x45, 0xdf, 0xa3]);
         if !looks {
-            return Err(fail(PlayFailureKind::Unknown, "the media server sent something that is not audio"));
+            return Err(Probe::Failed(fail(PlayFailureKind::Unknown, "the media server sent something that is not audio")));
         }
         let Some(total) = total else { return Ok((0, false)) };
         if total < 4096 {
@@ -405,10 +437,12 @@ impl StreamResolver for YtDlpResolver {
             }
         }
         let mut last = None;
-        for attempt in 0..2 {
+        for _ in 0..2 {
             let mut s = match self.extract(video_id, auth).await {
                 Ok(s) => s,
-                Err(e) if matches!(e.kind, PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::SetupNeeded) => {
+                // A bot check isn't asked again straight away: that is how
+                // an account gets flagged (D23).
+                Err(e) if matches!(e.kind, PlayFailureKind::Unavailable | PlayFailureKind::SessionExpired | PlayFailureKind::SetupNeeded | PlayFailureKind::Challenged) => {
                     self.inflight.lock().remove(&key);
                     return Err(e);
                 }
@@ -417,7 +451,7 @@ impl StreamResolver for YtDlpResolver {
                     continue;
                 }
             };
-            match self.probe(&s).await {
+            match self.probe_checked(&s).await {
                 Ok((len, range_ok)) => {
                     if len > 0 {
                         s.content_length = Some(len);
@@ -428,10 +462,14 @@ impl StreamResolver for YtDlpResolver {
                     self.cache.lock().insert(key.clone(), Cached { stream: s.clone(), until: Instant::now() + Duration::from_secs(ttl) });
                     return Ok(s);
                 }
-                Err(e) => {
-                    let _ = attempt;
-                    last = Some(e);
+                // Resolve once more for a fresh URL; refused twice, it is a
+                // failure of this song.
+                Err(Probe::Refused(st)) => {
+                    tracing::info!(video = video_id, status = st, "the media server refused a fresh URL");
+                    self.forget(video_id);
+                    last = Some(fail(PlayFailureKind::Unknown, "YouTube's media server refused this song. Try again later."));
                 }
+                Err(Probe::Failed(e)) => last = Some(e),
             }
         }
         self.inflight.lock().remove(&key);

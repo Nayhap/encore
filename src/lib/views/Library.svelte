@@ -6,6 +6,7 @@
   import { account, collectionMenu, nav, newPlaylist, player, playlists, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import KeepButton from "$lib/components/KeepButton.svelte";
   import Status from "$lib/components/Status.svelte";
   import Tile from "$lib/components/Tile.svelte";
   import TrackTable from "$lib/components/TrackTable.svelte";
@@ -83,6 +84,9 @@
           <button aria-pressed={layout === "list"} aria-label="List" onclick={() => (layout = "list")}><Icon name="list" size={15} /></button>
         </div>
       </div>
+    {:else if account.signedIn && songs.length}
+      <!-- Liked songs, kept downloaded and up to date (D23). -->
+      <KeepButton id="ytm:VLLM" />
     {/if}
   </div>
 

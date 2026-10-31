@@ -4,9 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use encore_core::error::{AppError, Result};
+use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
 use encore_core::queue::{QueueSource, Repeat};
+use encore_core::service::LocalAudio;
+use encore_downloads::{DownloadManager, DownloadRemoved, DownloadsSnapshot, DownloadsStorage};
 use encore_player::{PlayerSnapshot, QueueSnapshot};
 use encore_resolver::RuntimeStatus;
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,8 @@ pub struct Bootstrap {
     pub report_history: bool,
     /// Something from startup the user should know (shown once).
     pub notice: Option<String>,
+    /// Encore can reach YouTube (D23).
+    pub online: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -71,6 +75,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
         runtimes: core.resolver.runtimes().status(),
         report_history: core.player.reporting(),
         notice: core.take_startup_notice(),
+        online: core.connectivity.online(),
     })
 }
 
@@ -180,44 +185,58 @@ pub async fn browse_page(core: S<'_>, browse_id: String, params: Option<String>)
 #[specta::specta]
 pub async fn more_shelves(core: S<'_>, cursor: String) -> Result<Page> {
     let svc = core.service();
-    svc.more_shelves(&svc.context(), &cursor).await
+    core.net(svc.more_shelves(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn search(core: S<'_>, query: String, filter: Option<SearchFilter>) -> Result<SearchResults> {
+    core.require_online("search")?;
     let svc = core.service();
-    svc.search(&svc.context(), &query, filter).await
+    core.net(svc.search(&svc.context(), &query, filter).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn search_more(core: S<'_>, cursor: String) -> Result<SearchResults> {
     let svc = core.service();
-    svc.search_more(&svc.context(), &cursor).await
+    core.net(svc.search_more(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn suggestions(core: S<'_>, query: String) -> Result<Vec<String>> {
+    if !core.connectivity.online() {
+        return Ok(vec![]);
+    }
     let svc = core.service();
     svc.suggestions(&svc.context(), &query).await
 }
 
+/// Offline, a kept collection shows its saved order, all of it (D23).
 #[tauri::command]
 #[specta::specta]
 pub async fn collection(core: S<'_>, id: ItemId) -> Result<Collection> {
     let svc = core.service();
     let ctx = svc.context();
     let key = format!("collection:{id}");
-    core.cached(&key, || async { svc.collection(&ctx, &id).await }, |c: &mut Collection| c.cursor = None).await
+    let kept = || core.downloads.as_ref().and_then(|d| d.collection(&ctx.account, &id));
+    if !core.connectivity.online() {
+        if let Some(c) = kept() {
+            return Ok(c);
+        }
+    }
+    match core.cached(&key, || async { svc.collection(&ctx, &id).await }, |c: &mut Collection| c.cursor = None).await {
+        Err(e) if e.code == ErrorCode::Network => kept().ok_or(e),
+        r => r,
+    }
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn collection_more(core: S<'_>, cursor: String) -> Result<EntriesPage> {
     let svc = core.service();
-    let (entries, cursor) = svc.collection_more(&svc.context(), &cursor).await?;
+    let (entries, cursor) = core.net(svc.collection_more(&svc.context(), &cursor).await)?;
     Ok(EntriesPage { entries, cursor })
 }
 
@@ -243,7 +262,7 @@ pub async fn library(core: S<'_>, section: LibrarySection) -> Result<LibraryPage
 #[specta::specta]
 pub async fn library_more(core: S<'_>, section: LibrarySection, cursor: String) -> Result<LibraryPage> {
     let svc = core.service();
-    svc.library_more(&svc.context(), section, &cursor).await
+    core.net(svc.library_more(&svc.context(), section, &cursor).await)
 }
 
 #[tauri::command]
@@ -287,8 +306,9 @@ pub async fn play_track(core: S<'_>, track: Track) -> Result<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn start_radio(core: S<'_>, playlist_id: String, label: String) -> Result<()> {
+    core.require_online("start a radio")?;
     let svc = core.service();
-    let u = svc.up_next(&svc.context(), &RadioSeed::Playlist { playlist_id: playlist_id.clone() }, None).await?;
+    let u = core.net(svc.up_next(&svc.context(), &RadioSeed::Playlist { playlist_id: playlist_id.clone() }, None).await)?;
     core.player.play_tracks(u.tracks, 0, Some(QueueSource { label, collection_id: None, radio_playlist: u.playlist_id.or(Some(playlist_id)) }), false)
 }
 
@@ -399,10 +419,15 @@ pub async fn set_muted(core: S<'_>, muted: bool) -> Result<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_like(core: S<'_>, track_id: ItemId, liked: bool) -> Result<MutationOutcome> {
+    core.require_online("change your likes")?;
     let svc = core.service();
     let r = svc.set_like(&svc.context(), &track_id, liked).await?;
     if r == MutationOutcome::Done {
         core.player.update_track(track_id.as_str(), |t| t.liked = Some(liked));
+        // Liked songs kept downloaded follow (D23).
+        if let Some(d) = &core.downloads {
+            d.collection_changed(&ItemId::ytm("VLLM"));
+        }
     }
     Ok(r)
 }
@@ -410,6 +435,7 @@ pub async fn set_like(core: S<'_>, track_id: ItemId, liked: bool) -> Result<Muta
 #[tauri::command]
 #[specta::specta]
 pub async fn set_saved(core: S<'_>, playlist_id: String, saved: bool) -> Result<MutationOutcome> {
+    core.require_online("change your library")?;
     let svc = core.service();
     svc.set_saved(&svc.context(), &playlist_id, saved).await
 }
@@ -417,6 +443,7 @@ pub async fn set_saved(core: S<'_>, playlist_id: String, saved: bool) -> Result<
 #[tauri::command]
 #[specta::specta]
 pub async fn set_subscribed(core: S<'_>, channel_id: String, subscribed: bool) -> Result<MutationOutcome> {
+    core.require_online("change your subscriptions")?;
     let svc = core.service();
     svc.set_subscribed(&svc.context(), &channel_id, subscribed).await
 }
@@ -437,11 +464,16 @@ fn playlists_changed(app: &AppHandle, core: &Core, playlist_id: Option<&str>, ou
         }
     }
     let _ = PlaylistsEvent { playlist_id: playlist_id.map(|p| format!("ytm:VL{}", p.strip_prefix("VL").unwrap_or(p))) }.emit(app);
+    // A kept copy follows Encore's own changes (D23).
+    if let (Some(d), Some(p)) = (&core.downloads, playlist_id) {
+        d.collection_changed(&ItemId::ytm(&format!("VL{}", p.strip_prefix("VL").unwrap_or(p))));
+    }
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_add(app: AppHandle, core: S<'_>, playlist_id: String, track_ids: Vec<ItemId>, allow_duplicates: bool) -> Result<MutationOutcome> {
+    core.require_online("add to a playlist")?;
     let svc = core.service();
     let r = svc.playlist_add(&svc.context(), &playlist_id, &track_ids, allow_duplicates).await?;
     playlists_changed(&app, &core, Some(&playlist_id), r);
@@ -451,6 +483,7 @@ pub async fn playlist_add(app: AppHandle, core: S<'_>, playlist_id: String, trac
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_create(app: AppHandle, core: S<'_>, title: String, description: String, privacy: Privacy, track_ids: Vec<ItemId>) -> Result<PlaylistCreated> {
+    core.require_online("create a playlist")?;
     let svc = core.service();
     let r = svc.playlist_create(&svc.context(), &title, &description, privacy, &track_ids).await?;
     playlists_changed(&app, &core, r.playlist_id.as_deref(), r.outcome);
@@ -460,6 +493,7 @@ pub async fn playlist_create(app: AppHandle, core: S<'_>, title: String, descrip
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_edit(app: AppHandle, core: S<'_>, playlist_id: String, edit: PlaylistEdit) -> Result<MutationOutcome> {
+    core.require_online("change a playlist")?;
     let svc = core.service();
     let r = svc.playlist_edit(&svc.context(), &playlist_id, &edit).await?;
     playlists_changed(&app, &core, Some(&playlist_id), r);
@@ -469,6 +503,7 @@ pub async fn playlist_edit(app: AppHandle, core: S<'_>, playlist_id: String, edi
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_delete(app: AppHandle, core: S<'_>, playlist_id: String) -> Result<MutationOutcome> {
+    core.require_online("delete a playlist")?;
     let svc = core.service();
     let r = svc.playlist_delete(&svc.context(), &playlist_id).await?;
     playlists_changed(&app, &core, Some(&playlist_id), r);
@@ -478,6 +513,7 @@ pub async fn playlist_delete(app: AppHandle, core: S<'_>, playlist_id: String) -
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_move(app: AppHandle, core: S<'_>, playlist_id: String, set_video_id: String, before: Option<String>) -> Result<MutationOutcome> {
+    core.require_online("reorder a playlist")?;
     let svc = core.service();
     let r = svc.playlist_move(&svc.context(), &playlist_id, &set_video_id, before.as_deref()).await?;
     playlists_changed(&app, &core, Some(&playlist_id), r);
@@ -492,19 +528,20 @@ pub async fn playlist_move(app: AppHandle, core: S<'_>, playlist_id: String, set
 #[specta::specta]
 pub async fn history(core: S<'_>) -> Result<HistoryPage> {
     let svc = core.service();
-    svc.history(&svc.context()).await
+    core.net(svc.history(&svc.context()).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn history_more(core: S<'_>, cursor: String) -> Result<HistoryPage> {
     let svc = core.service();
-    svc.history_more(&svc.context(), &cursor).await
+    core.net(svc.history_more(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn history_remove(core: S<'_>, row_ids: Vec<String>) -> Result<MutationOutcome> {
+    core.require_online("change your history")?;
     let svc = core.service();
     svc.history_remove(&svc.context(), &row_ids).await
 }
@@ -514,8 +551,9 @@ pub async fn history_remove(core: S<'_>, row_ids: Vec<String>) -> Result<Mutatio
 #[tauri::command]
 #[specta::specta]
 pub async fn counterpart(core: S<'_>, track: Track) -> Result<Option<Counterpart>> {
+    core.require_online("switch versions")?;
     let svc = core.service();
-    svc.counterpart(&svc.context(), &track).await
+    core.net(svc.counterpart(&svc.context(), &track).await)
 }
 
 /// Switch a queue entry to its other version. The pair is looked up here,
@@ -523,6 +561,7 @@ pub async fn counterpart(core: S<'_>, track: Track) -> Result<Option<Counterpart
 #[tauri::command]
 #[specta::specta]
 pub async fn switch_version(core: S<'_>, uid: String) -> Result<()> {
+    core.require_online("switch versions")?;
     let entry = core.player.queue_snapshot().entries.into_iter().find(|e| e.uid == uid).ok_or_else(|| AppError::new(encore_core::ErrorCode::Stale, "That song is no longer in the queue."))?;
     let svc = core.service();
     let pair = svc.counterpart(&svc.context(), &entry.track).await?.ok_or_else(|| AppError::not_found(no_version(&entry.track)))?;
@@ -533,6 +572,7 @@ pub async fn switch_version(core: S<'_>, uid: String) -> Result<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn play_version(core: S<'_>, track: Track) -> Result<()> {
+    core.require_online("switch versions")?;
     let svc = core.service();
     let pair = svc.counterpart(&svc.context(), &track).await?.ok_or_else(|| AppError::not_found(no_version(&track)))?;
     let mut t = pair.track;
@@ -547,6 +587,7 @@ fn no_version(t: &Track) -> &'static str {
 #[tauri::command]
 #[specta::specta]
 pub async fn playlist_remove(app: AppHandle, core: S<'_>, playlist_id: String, entries: Vec<Entry>) -> Result<MutationOutcome> {
+    core.require_online("change a playlist")?;
     let svc = core.service();
     // The row's own ID, not the track's: an album row may list the video
     // while the track plays the song (D10).
@@ -557,6 +598,116 @@ pub async fn playlist_remove(app: AppHandle, core: S<'_>, playlist_id: String, e
     let r = svc.playlist_remove(&svc.context(), &playlist_id, &pairs).await?;
     playlists_changed(&app, &core, Some(&playlist_id), r);
     Ok(r)
+}
+
+// ---------- downloads (D23) ----------
+
+fn downloads(core: &Core) -> Result<&Arc<DownloadManager>> {
+    core.downloads.as_ref().ok_or_else(|| AppError::new(ErrorCode::Unsupported, crate::core::DOWNLOADS_OFF))
+}
+
+/// Everything about downloads at once: counts, songs, kept collections.
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_snapshot(core: S<'_>) -> Result<DownloadsSnapshot> {
+    Ok(match &core.downloads {
+        Some(d) => d.snapshot(),
+        None => encore_downloads::unavailable_snapshot(crate::core::DOWNLOADS_OFF),
+    })
+}
+
+/// Download songs. Returns how many are waiting now.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_tracks(core: S<'_>, tracks: Vec<Track>) -> Result<u32> {
+    Ok(downloads(&core)?.add(tracks)? as u32)
+}
+
+/// Remove downloaded songs. Songs a kept collection needs stay.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_remove(core: S<'_>, track_ids: Vec<ItemId>) -> Result<DownloadRemoved> {
+    downloads(&core)?.remove(&track_ids)
+}
+
+/// Keep a playlist, album or liked songs downloaded and up to date.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_keep(core: S<'_>, id: ItemId) -> Result<()> {
+    let d = downloads(&core)?.clone();
+    if !core.connectivity.online() {
+        return Err(AppError::network("You're offline. Encore needs to read the list first, so try again when you're back online."));
+    }
+    let svc = core.service();
+    // The account it is kept for is the one it was read as (D23).
+    let ctx = svc.context();
+    let c = core.net(svc.collection(&ctx, &id).await)?;
+    let channel = match core.accounts.state() {
+        AuthState::SignedIn { channel, .. } => Some(channel.name),
+        _ => None,
+    };
+    d.keep(c, ctx, channel)
+}
+
+/// Stop keeping a collection downloaded. Its songs go, unless something else
+/// keeps them.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_unkeep(core: S<'_>, id: ItemId, account: Option<String>) -> Result<DownloadRemoved> {
+    downloads(&core)?.unkeep(&id, account.as_deref())
+}
+
+/// "Check for changes": one kept collection, or all of them.
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_sync(core: S<'_>, id: Option<ItemId>) -> Result<()> {
+    core.require_online("check for changes")?;
+    downloads(&core)?.sync(id.as_ref());
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_pause(core: S<'_>, paused: bool) -> Result<()> {
+    downloads(&core)?.pause(paused);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn download_pause_collection(core: S<'_>, id: ItemId, paused: bool, account: Option<String>) -> Result<()> {
+    downloads(&core)?.pause_collection(&id, account.as_deref(), paused)
+}
+
+/// Try failed downloads again, and resume after a bot check or a full disk.
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_retry(core: S<'_>) -> Result<()> {
+    downloads(&core)?.retry();
+    Ok(())
+}
+
+/// Delete every download from this computer, for every account.
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_remove_all(core: S<'_>) -> Result<()> {
+    downloads(&core)?.remove_all()
+}
+
+/// Settings → Downloads, measured on disk.
+#[tauri::command]
+#[specta::specta]
+pub async fn downloads_storage(core: S<'_>) -> Result<DownloadsStorage> {
+    let d = downloads(&core)?.clone();
+    tokio::task::spawn_blocking(move || d.storage()).await.map_err(|_| AppError::internal("storage"))
+}
+
+/// Check the connection now (the system said the network changed, or the
+/// user asked). Returns whether YouTube answered.
+#[tauri::command]
+#[specta::specta]
+pub async fn connectivity_check(core: S<'_>) -> Result<bool> {
+    Ok(core.connectivity.check_now().await)
 }
 
 // ---------- auth ----------
@@ -593,6 +744,9 @@ pub async fn select_channel(app: AppHandle, core: S<'_>, key: String) -> Result<
     core.player.stop();
     core.switch_queue();
     after_auth_change(&app, &core);
+    if let Some(d) = &core.downloads {
+        d.account_changed();
+    }
     Ok(st)
 }
 
@@ -602,6 +756,8 @@ pub async fn reload_channels(core: S<'_>) -> Result<Vec<Channel>> {
     core.accounts.load_channels().await
 }
 
+/// Downloads stay: they belong to this computer, and the account's kept
+/// collections wait until it signs in again (D23).
 #[tauri::command]
 #[specta::specta]
 pub async fn sign_out(app: AppHandle, core: S<'_>) -> Result<()> {
@@ -612,6 +768,9 @@ pub async fn sign_out(app: AppHandle, core: S<'_>) -> Result<()> {
     core.resolver_forget_all();
     core.switch_queue();
     after_auth_change(&app, &core);
+    if let Some(d) = &core.downloads {
+        d.account_changed();
+    }
     Ok(())
 }
 

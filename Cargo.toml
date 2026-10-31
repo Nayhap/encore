@@ -16,6 +16,7 @@ encore-audio = { path = "crates/encore-audio" }
 encore-lyrics = { path = "crates/encore-lyrics" }
 encore-resolver = { path = "crates/encore-resolver" }
 encore-player = { path = "crates/encore-player" }
+encore-downloads = { path = "crates/encore-downloads" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

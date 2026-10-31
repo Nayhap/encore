@@ -2,7 +2,7 @@
   import { call, type AnyArt, type SearchResults } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, fmt, kindLabel } from "$lib/data";
-  import { nav, newPlaylist, playArtist, player, ui } from "$lib/state.svelte";
+  import { downloads, nav, needsOnline, newPlaylist, playArtist, player, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -39,23 +39,41 @@
     localStorage.setItem("recentSearches", JSON.stringify(recent));
   };
 
-  const actions: Result[] = [
+  // Built from the current state, so each reads what it would do now.
+  const downloadActions = $derived.by<Result[]>(() => {
+    if (!downloads.available) return [];
+    const out: Result[] = [];
+    const cur = player.current;
+    if (cur && !downloads.has(cur.id)) out.push({ key: "a-dl", group: "Actions", icon: "download", title: "Download this song", sub: cur.title, hint: "D", run: () => void downloads.download([cur.id]) });
+    const v = nav.view;
+    if (v.name === "collection" && !downloads.keptFor(v.id) && ui.online) out.push({ key: "a-dl-col", group: "Actions", icon: "download", title: "Download this playlist or album", sub: "Keep it downloaded and up to date", run: () => void downloads.keep(v.id) });
+    const s = downloads.summary;
+    if (s?.paused) out.push({ key: "a-dl-resume", group: "Actions", icon: "play", title: "Resume downloads", sub: "Downloads", run: () => downloads.pause(false) });
+    else if (s?.waiting) out.push({ key: "a-dl-pause", group: "Actions", icon: "pause", title: "Pause downloads", sub: "Downloads", run: () => downloads.pause(true) });
+    if (downloads.kept.some((k) => k.mine) && ui.online) out.push({ key: "a-dl-sync", group: "Actions", icon: "repeat", title: "Check downloads for changes", sub: "Kept playlists and albums", run: () => downloads.sync(null) });
+    return out;
+  });
+
+  const actions = $derived<Result[]>([
+    ...downloadActions,
     { key: "a-shuffle", group: "Actions", icon: "shuffle", title: player.shuffle ? "Turn shuffle off" : "Turn shuffle on", sub: "Playback", hint: "S", run: () => player.toggleShuffle() },
     { key: "a-repeat", group: "Actions", icon: "repeat", title: "Change repeat mode", sub: "Off, queue, or this song", hint: "R", run: () => player.cycleRepeat() },
     { key: "a-lyrics", group: "Actions", icon: "lyrics", title: "Open full-screen lyrics", sub: "Playback", hint: "F", run: () => (ui.theater = true) },
     { key: "a-stage", group: "Actions", icon: "stage", title: ui.stageOpen ? "Hide now playing panel" : "Show now playing panel", sub: "Layout", hint: mod("\\"), run: () => (ui.stageOpen = !ui.stageOpen) },
     { key: "a-theme", group: "Actions", icon: "moon", title: "Change theme", sub: "System, dark or light", run: () => nav.go({ name: "settings" }) },
-    { key: "a-newpl", group: "Actions", icon: "plus", title: "New playlist…", sub: "Create a playlist", run: () => newPlaylist() },
+    { key: "a-newpl", group: "Actions", icon: "plus", title: "New playlist…", sub: "Create a playlist", run: () => { const why = needsOnline("create a playlist"); if (why) ui.say(why); else newPlaylist(); } },
     { key: "a-lib", group: "Go to", icon: "library", title: "Library", sub: "Playlists, albums, artists", run: () => nav.go({ name: "library" }) },
+    { key: "a-dls", group: "Go to", icon: "download", title: "Downloads", sub: "Songs on this computer", run: () => nav.go({ name: "downloads" }) },
     { key: "a-hist", group: "Go to", icon: "history", title: "History", sub: "What you've played", run: () => nav.go({ name: "history" }) },
     { key: "a-exp", group: "Go to", icon: "compass", title: "Explore", sub: "New releases, charts, moods", run: () => nav.go({ name: "explore" }) },
-  ];
+  ]);
 
   let seq = 0;
   $effect(() => {
     const s = q.trim();
     failed = null;
-    if (!s) {
+    // Offline, only downloaded songs are searched, here (D23).
+    if (!s || !ui.online) {
       found = null;
       searching = false;
       return;
@@ -88,6 +106,18 @@
     }
     const hit = (...xs: string[]) => xs.some((x) => norm(x).includes(s));
     const acts = actions.filter((a) => hit(a.title, a.sub));
+    if (!ui.online) {
+      const local = [...downloads.items.values()]
+        .filter((i) => i.state === "ready" && hit(i.track.title, artistLine(i.track), i.track.album?.name ?? ""))
+        .slice(0, 8)
+        .map<Result>(({ track: t }) => ({
+          key: t.id, group: "Downloaded songs", title: t.title, sub: `${artistLine(t)}${t.duration ? ` · ${fmt(t.duration)}` : ""}`,
+          art: t.art, hint: "Play",
+          run: () => player.playTracks([t], 0, { label: "Downloads", collectionId: null, radioPlaylist: null }),
+          alt: () => (player.playNext(t.id), ui.say(`“${t.title}” plays next`)),
+        }));
+      return [...local, ...acts];
+    }
     const r = found;
     if (!r) return acts;
     const songs = [...r.songs, ...r.videos.slice(0, 2)].slice(0, 6).map<Result>((t) => ({
@@ -193,6 +223,8 @@
           <p class="empty">Searching YouTube Music…</p>
         {:else if failed}
           <p class="empty">Search failed: {failed}</p>
+        {:else if !ui.online}
+          <p class="empty">You're offline: only downloaded songs can be found, and none match “{q}”.</p>
         {:else}
           <p class="empty">No matches for “{q}”. Try an artist name or part of a song title.</p>
         {/if}

@@ -2,6 +2,7 @@
 //! applies only newer revisions.
 
 use encore_core::model::{AuthState, Lyrics};
+use encore_downloads::{DownloadItem, DownloadsSummary};
 use encore_player::{PlayerSnapshot, PositionAnchor, QueueSplice};
 use encore_resolver::RuntimeStatus;
 use serde::{Deserialize, Serialize};
@@ -82,4 +83,26 @@ pub struct RuntimesEvent(pub RuntimeStatus);
 #[serde(rename_all = "camelCase")]
 pub struct SetupNeededEvent {
     pub track_id: Option<String>,
+}
+
+/// Downloads: counts, progress and waits (at most four a second). A newer
+/// revision than the UI has seen means it missed a change: it takes a
+/// snapshot (D23).
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+pub struct DownloadsEvent(pub DownloadsSummary);
+
+/// One download changed state.
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadItemEvent {
+    /// The downloads revision this change made.
+    pub revision: String,
+    pub item: DownloadItem,
+}
+
+/// The connection was lost, or came back.
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectivityEvent {
+    pub online: bool,
 }

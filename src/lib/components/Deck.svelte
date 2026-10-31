@@ -3,6 +3,7 @@
   import { artistLine, fmt } from "$lib/data";
   import { nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
   import SongMap from "./SongMap.svelte";
 
@@ -34,11 +35,13 @@
           <button class="artist ell" onclick={() => artistId && nav.go({ name: "artist", id: artistId })}>{artistLine(tr)}</button>
         {/if}
       </div>
+      <DownloadMark id={tr.id} size={15} />
       <button
         class="icon-btn"
         class:on={player.liked.has(tr.id)}
         aria-pressed={player.liked.has(tr.id)}
         aria-label={player.liked.has(tr.id) ? "Remove from liked music" : "Add to liked music"}
+        disabled={!ui.online}
         onclick={() => player.toggleLike(tr.id)}
       ><Icon name={player.liked.has(tr.id) ? "heartFill" : "heart"} size={19} /></button>
       <button class="icon-btn more" aria-label="More actions" onclick={(e) => ui.openMenu(e, trackMenu(tr.id))}><Icon name="more" size={18} /></button>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { kindLabel } from "$lib/data";
-  import { account, collectionMenu, nav, newPlaylist, player, playlists, ui, type View } from "$lib/state.svelte";
+  import { account, collectionMenu, downloads, nav, newPlaylist, player, playlists, ui, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { isMac, mod } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -9,6 +9,7 @@
     { label: "Home", icon: "home", view: { name: "home" } },
     { label: "Explore", icon: "compass", view: { name: "explore" } },
     { label: "Library", icon: "library", view: { name: "library" } },
+    { label: "Downloads", icon: "download", view: { name: "downloads" } },
     { label: "History", icon: "history", view: { name: "history" } },
   ];
 
@@ -41,6 +42,14 @@
         <button class="nav" class:active={isActive(it.view)} aria-current={isActive(it.view) ? "page" : undefined} onclick={() => nav.go(it.view)}>
           <Icon name={it.icon} size={19} />
           <span>{it.label}</span>
+          {#if it.view.name === "downloads"}
+            {#if !ui.online}
+              <span class="suffix" role="img" aria-label="Offline" title="You're offline. Downloaded songs still play."><Icon name="offline" size={15} /></span>
+            {:else if downloads.busy && downloads.summary}
+              <span class="suffix count" title="{downloads.summary.waiting} waiting to download">{downloads.summary.waiting || ""}</span>
+              <span class="dot" aria-hidden="true"></span>
+            {/if}
+          {/if}
         </button>
       </li>
     {/each}
@@ -183,6 +192,26 @@
     background: var(--accent);
   }
 
+  .suffix {
+    margin-left: auto;
+    color: var(--mute);
+  }
+  .count {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Narrow sidebar: the count is hidden, a dot says downloads are running. */
+  .dot {
+    display: none;
+    position: absolute;
+    top: 7px;
+    right: 9px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
   .section {
     display: flex;
     align-items: center;
@@ -314,6 +343,7 @@
     .search kbd,
     .nav span,
     .section span,
+    .suffix,
     .pin .txt,
     .account .txt,
     .account > :global(svg),
@@ -330,6 +360,9 @@
       justify-content: center;
       width: 44px;
       padding: 0;
+    }
+    .nav .dot {
+      display: block;
     }
     .section {
       justify-content: center;

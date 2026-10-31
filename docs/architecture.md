@@ -15,6 +15,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 │ Now Playing and media keys, sign-in window    │
 └──────────────┬────────────────────────────────┘
                │
+   encore-downloads ── downloads index, fetching, kept collections
    encore-player ── queue, engine, resolver, radio, preload
      ├─ encore-ytm        YouTube Music API client and parsers
      ├─ encore-auth       cookies, browser import, Keychain
@@ -35,6 +36,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
 | `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. |
 | `encore-lyrics` | YouTube Music timed lyrics, then LRCLIB synced, then plain lyrics. Scores LRCLIB matches by title, artist and duration, and caches results. |
+| `encore-downloads` | Songs kept for offline listening (D23): one worker resolves through the yt-dlp helper and fetches checked HTTP ranges, one queue checks kept playlists, albums and liked songs for changes, and lyrics and covers are kept alongside. It depends on `encore-core`, `encore-audio` and `encore-lyrics`; the player reaches it only through `encore-core`'s `LocalAudio` trait and asks it for a song's file before resolving anything. |
 | `encore-cli` | A headless tool that exercises every crate against live YouTube Music. |
 
 ## UI contract
@@ -66,6 +68,15 @@ Sessions come from one of two places:
 Either way, the user then picks a channel, which may be a brand channel. The session is
 saved as one Keychain item and is kept alive by periodic refreshes. Nothing secret is
 written to disk or to the log.
+
+## Offline
+
+Encore counts as offline only after a request got no answer and a probe of
+music.youtube.com agrees; one probe that gets any answer brings it back. Offline,
+the player plays downloaded songs and passes over the others with one rule
+for next, previous, the end of a song and preloading. Radio, likes, playlist
+edits and search wait, history pings are neither sent nor kept for later,
+and lyrics and covers come from what was kept with the downloads.
 
 ## When YouTube changes things
 

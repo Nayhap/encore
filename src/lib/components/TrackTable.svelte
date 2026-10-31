@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { Track } from "$lib/backend";
   import { artistLine, fmt } from "$lib/data";
-  import { nav, player, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
+  import { downloads, nav, player, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -53,7 +54,10 @@
     const t = tracks[i];
     if (player.current?.id === t.id && player.source?.label === label) return player.toggle();
     if (!t.playable) return ui.say(`“${t.title}” is not available to play`);
-    player.playTracks(tracks.filter((x) => x.playable), tracks.slice(0, i).filter((x) => x.playable).length, { label, collectionId: collectionId ?? null, radioPlaylist: null });
+    // Offline only downloaded songs play (D23); the queue stays as it is.
+    if (!downloads.playable(t)) return ui.say(`“${t.title}” isn't downloaded. Connect to the internet to play it.`);
+    const ok = (x: Track) => downloads.playable(x);
+    player.playTracks(tracks.filter(ok), tracks.slice(0, i).filter(ok).length, { label, collectionId: collectionId ?? null, radioPlaylist: null });
   };
 
   function rowKey(e: KeyboardEvent, i: number) {
@@ -80,7 +84,7 @@
     <div
       class="row"
       class:current
-      class:unplayable={!t.playable}
+      class:unplayable={!downloads.playable(t)}
       class:over={reorder && dragOver === i && dragFrom !== null && dragFrom !== i}
       class:below={reorder && dragOver === i && dragFrom !== null && dragFrom < i}
       class:dragging={dragFrom === i}
@@ -130,12 +134,14 @@
       {/if}
       {#if showPlays}<span role="cell" class="r mono dim">{t.plays?.replace(/ plays?$/, "") ?? "—"}</span>{/if}
       <span role="cell" class="r tail">
+        <DownloadMark {id} />
         <button
           class="icon-btn like"
           class:on={player.liked.has(id)}
           class:keep={player.liked.has(id)}
           aria-pressed={player.liked.has(id)}
           aria-label={player.liked.has(id) ? "Remove from liked music" : "Add to liked music"}
+          disabled={!ui.online}
           onclick={() => player.toggleLike(id)}
         ><Icon name={player.liked.has(id) ? "heartFill" : "heart"} size={16} /></button>
         <span class="mono dim">{fmt(t.duration)}</span>
@@ -172,16 +178,16 @@
     opacity: 0.4;
   }
   .table {
-    --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 96px 40px;
+    --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 112px 40px;
   }
   .table.no-album {
-    --cols: 40px minmax(0, 1fr) 96px 40px;
+    --cols: 40px minmax(0, 1fr) 112px 40px;
   }
   .table.plays {
-    --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 80px 96px 40px;
+    --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 80px 112px 40px;
   }
   .table.plays.no-album {
-    --cols: 40px minmax(0, 1fr) 80px 96px 40px;
+    --cols: 40px minmax(0, 1fr) 80px 112px 40px;
   }
   .row {
     display: grid;
@@ -355,10 +361,10 @@
 
   @media (max-width: 1100px) {
     .table:not(.no-album) {
-      --cols: 40px minmax(0, 1fr) 96px 40px;
+      --cols: 40px minmax(0, 1fr) 112px 40px;
     }
     .table.plays:not(.no-album) {
-      --cols: 40px minmax(0, 1fr) 80px 96px 40px;
+      --cols: 40px minmax(0, 1fr) 80px 112px 40px;
     }
     .table:not(.no-album) .album,
     .table:not(.no-album) .head > :nth-child(3) {

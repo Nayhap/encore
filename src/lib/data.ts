@@ -29,6 +29,14 @@ export const kindLabel: Record<CollectionKind, string> = {
   liked: "Playlist",
 };
 
+/** Bytes for people: "340 MB", "1.2 GB". */
+export const sizeText = (b: number | null | undefined) => {
+  const n = b ?? 0;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  return n > 0 ? "less than 1 MB" : "0 MB";
+};
+
 export const artistLine = (t: Pick<Track, "artists">) => t.artists.map((a) => a.name).join(", ") || "Unknown artist";
 
 /** Stable hue from a string, used until a cover's real hue is known. */

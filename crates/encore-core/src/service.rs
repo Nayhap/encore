@@ -1,5 +1,10 @@
 //! The service abstraction (D2) and the stream resolver seam (D3).
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -42,6 +47,13 @@ pub trait MusicService: Send + Sync {
     async fn suggestions(&self, ctx: &RequestContext, query: &str) -> Result<Vec<String>>;
     async fn collection(&self, ctx: &RequestContext, id: &ItemId) -> Result<Collection>;
     async fn collection_more(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, Option<String>)>;
+    /// Like `collection_more`, but tells a real end of the list from one
+    /// that stopped making progress (D23: removals are only applied after a
+    /// list that really ended).
+    async fn collection_more_checked(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, More)> {
+        let (entries, next) = self.collection_more(ctx, cursor).await?;
+        Ok((entries, next.map(More::Next).unwrap_or(More::Ended)))
+    }
     async fn artist(&self, ctx: &RequestContext, id: &ItemId) -> Result<Artist>;
     async fn library(&self, ctx: &RequestContext, section: LibrarySection) -> Result<LibraryPage>;
     async fn library_more(&self, ctx: &RequestContext, section: LibrarySection, cursor: &str) -> Result<LibraryPage>;
@@ -92,6 +104,96 @@ pub trait MusicService: Send + Sync {
 
 fn unsupported() -> crate::error::AppError {
     crate::error::AppError::new(crate::error::ErrorCode::Unsupported, "This service does not support that.")
+}
+
+/// Where a collection's next page leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum More {
+    /// Another page, behind this cursor.
+    Next(String),
+    /// The list ended.
+    Ended,
+    /// The service repeated its continuation or sent an empty page that
+    /// still had one: the list may be longer than what arrived.
+    Stalled,
+}
+
+// ---------- downloads (D23) ----------
+
+/// A downloaded song, ready to play from disk.
+#[derive(Clone, Debug)]
+pub struct LocalFile {
+    pub path: PathBuf,
+    pub itag: u32,
+    pub codec: String,
+    pub kbps: Option<u32>,
+    pub bytes: u64,
+    pub duration: Option<f64>,
+    pub loudness_db: Option<f32>,
+}
+
+/// What the player asks of the downloads (D23). Songs are kept per device,
+/// whoever downloaded them.
+pub trait LocalAudio: Send + Sync {
+    /// The file of a downloaded song, checked on disk.
+    fn lookup(&self, video_id: &str) -> Option<LocalFile>;
+    /// Whether a song is downloaded, without touching the disk.
+    fn has(&self, video_id: &str) -> bool;
+    /// The saved order of a kept collection, `account`'s copy first.
+    fn collection(&self, account: &str, id: &ItemId) -> Option<Collection>;
+}
+
+/// The service's loudness of a song (`loudnessDb`), for normalisation.
+#[async_trait]
+pub trait LoudnessSource: Send + Sync {
+    async fn loudness(&self, id: &ItemId) -> Result<Option<f32>>;
+}
+
+/// Who is talking to YouTube: playback's resolves (playing, preloading)
+/// and background requests (downloads). A background request is admitted
+/// only while no playback resolve is in flight, checked and counted in one
+/// step, so pressing play is never slowed by the download queue (D23).
+/// Playback is always admitted.
+#[derive(Debug, Default)]
+pub struct PlaybackGate {
+    /// (playback in flight, background in flight)
+    count: Mutex<(usize, usize)>,
+}
+
+impl PlaybackGate {
+    pub fn enter(self: &Arc<Self>) -> GateGuard {
+        self.count.lock().0 += 1;
+        GateGuard(self.clone(), false)
+    }
+
+    /// A background request may start now; hold the guard while it runs.
+    pub fn try_background(self: &Arc<Self>) -> Option<GateGuard> {
+        let mut c = self.count.lock();
+        if c.0 > 0 {
+            return None;
+        }
+        c.1 += 1;
+        Some(GateGuard(self.clone(), true))
+    }
+
+    /// A playback resolve is in flight.
+    pub fn busy(&self) -> bool {
+        self.count.lock().0 > 0
+    }
+}
+
+/// Held while a resolve runs.
+pub struct GateGuard(Arc<PlaybackGate>, bool);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        let mut c = self.0.count.lock();
+        if self.1 {
+            c.1 = c.1.saturating_sub(1);
+        } else {
+            c.0 = c.0.saturating_sub(1);
+        }
+    }
 }
 
 // ---------- play reporting (history) ----------
@@ -281,6 +383,22 @@ mod tests {
         let s = FlushSchedule { at: vec![], every: 30.0 };
         assert_eq!(s.due(0), 30.0);
         assert_eq!(s.due(1), 60.0);
+    }
+
+    #[test]
+    fn the_gate_is_busy_while_a_guard_lives() {
+        let g = Arc::new(PlaybackGate::default());
+        assert!(!g.busy());
+        let bg = g.try_background().expect("nothing playing yet");
+        let a = g.enter();
+        assert!(g.try_background().is_none(), "playback first");
+        let b = g.enter();
+        drop(a);
+        assert!(g.busy());
+        drop(b);
+        assert!(!g.busy());
+        drop(bg);
+        assert!(g.try_background().is_some());
     }
 
     #[test]
