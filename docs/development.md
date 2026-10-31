@@ -65,6 +65,11 @@ and plays a simulated install. Add `?ready` to start with them installed,
 `?setupfail` to see the first install fail, or `?updating` to see a quiet
 update.
 
+For downloads, `?downloaded` starts with a playlist kept and downloaded and
+one song on its own, `?offline` starts offline (switching the browser's
+network off and on flips it too), and `?dlfail` makes every third download
+fail with YouTube's bot check.
+
 ## Build
 
 ```sh
@@ -134,6 +139,14 @@ $C playlist rename PL… "New name"
 $C playlist privacy PL… unlisted
 $C playlist move PL… 1 --before 0    # by row index
 $C playlist delete PL…
+
+$C downloads add 4D7u5KF7SP8         # download, and wait until it's done
+$C downloads keep MPREb_7ltM34kr0mH  # keep an album downloaded (LM: liked songs)
+$C downloads list                    # songs, kept collections, what waits
+$C downloads sync                    # check kept collections for changes
+$C downloads remove 4D7u5KF7SP8
+$C downloads pause                   # and resume
+$C play 4D7u5KF7SP8 --offline        # from the downloads only: no components, no YouTube
 ```
 
 Signed-in commands print outcomes, ping kinds and HTTP statuses only: never
@@ -145,6 +158,7 @@ cookies, tokens or tracking URLs.
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
 | Library cache, settings, queue, lyrics cache, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
 | Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
@@ -175,6 +189,11 @@ All systems:
 - Signed out, YouTube gives no timeline map between a song and its video, so
   switching versions starts the other one from the beginning. The video
   version plays the video's audio; there is no video picture.
+- Kept playlists and albums are checked for new songs only while Encore is
+  open, and only for the account that downloaded them.
+- Downloading many songs in a row can still make YouTube ask for a bot
+  check. Downloads then wait 10 minutes, then 30, then stop until you try
+  again.
 
 macOS:
 

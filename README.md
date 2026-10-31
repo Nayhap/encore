@@ -39,6 +39,9 @@
   History page shows what you played, by day.
 - **Song or video**: switch between a song and its music video (audio
   only) from the now playing panel or any track's menu.
+- **Downloads for offline listening**, kept inside Encore: download songs,
+  or a playlist, album or your liked songs and it stays up to date. With no
+  connection, downloaded songs play and the rest of the queue waits.
 - **Native playback** in Rust, with seek, a disk cache and the next song
   loaded ahead of time.
 - **Shuffle, repeat and autoplay** that work the way you expect.
@@ -89,8 +92,8 @@ install, and nothing else on your computer changes. Encore keeps them up to
 date when it updates. **Settings → Playback** shows them and can remove them
 to free the space.
 
-Uninstalling keeps Encore's caches, settings and player components (a few
-hundred MB at most) unless you tick **Delete the application data** in the
+Uninstalling keeps Encore's caches, settings, player components (a few
+hundred MB at most) and downloads unless you tick **Delete the application data** in the
 Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
 lists the folders to delete by hand on macOS and Linux, and the saved session
 in the system's credential store.
@@ -129,6 +132,7 @@ analytics.
 | <kbd>[</kbd> <kbd>]</kbd> | Previous or next lyric line |
 | <kbd>S</kbd> / <kbd>R</kbd> / <kbd>L</kbd> | Shuffle / repeat / like |
 | <kbd>F</kbd> | Full-screen lyrics |
+| <kbd>D</kbd> | Download the song that's playing |
 | <kbd>⌘K</kbd> | Search and commands |
 | <kbd>⌘\\</kbd> | Show or hide the side panel |
 | <kbd>?</kbd> | All shortcuts |
