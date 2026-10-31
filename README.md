@@ -93,8 +93,8 @@ date when it updates. **Settings → Playback** shows them and can remove them
 to free the space.
 
 Uninstalling keeps Encore's caches, settings and player components (a few
-hundred MB at most), and your downloads, unless you tick **Delete the application data** in the
-Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
+hundred MB at most), and your downloads, unless you tick **Delete the
+application data** in the Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
 lists the folders to delete by hand on macOS and Linux, and the saved session
 in the system's credential store.
 
