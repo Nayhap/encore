@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
+use parking_lot::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -148,31 +149,50 @@ pub trait LoudnessSource: Send + Sync {
     async fn loudness(&self, id: &ItemId) -> Result<Option<f32>>;
 }
 
-/// Counts the stream resolves playback is waiting on (playing, preloading).
-/// Background work such as downloads waits until it is idle, so pressing
-/// play is never slowed by the download queue (D23).
+/// Who is talking to YouTube: playback's resolves (playing, preloading)
+/// and background requests (downloads). A background request is admitted
+/// only while no playback resolve is in flight, checked and counted in one
+/// step, so pressing play is never slowed by the download queue (D23).
+/// Playback is always admitted.
 #[derive(Debug, Default)]
 pub struct PlaybackGate {
-    busy: AtomicUsize,
+    /// (playback in flight, background in flight)
+    count: Mutex<(usize, usize)>,
 }
 
 impl PlaybackGate {
     pub fn enter(self: &Arc<Self>) -> GateGuard {
-        self.busy.fetch_add(1, Ordering::SeqCst);
-        GateGuard(self.clone())
+        self.count.lock().0 += 1;
+        GateGuard(self.clone(), false)
     }
 
+    /// A background request may start now; hold the guard while it runs.
+    pub fn try_background(self: &Arc<Self>) -> Option<GateGuard> {
+        let mut c = self.count.lock();
+        if c.0 > 0 {
+            return None;
+        }
+        c.1 += 1;
+        Some(GateGuard(self.clone(), true))
+    }
+
+    /// A playback resolve is in flight.
     pub fn busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst) > 0
+        self.count.lock().0 > 0
     }
 }
 
-/// Held while a playback resolve runs.
-pub struct GateGuard(Arc<PlaybackGate>);
+/// Held while a resolve runs.
+pub struct GateGuard(Arc<PlaybackGate>, bool);
 
 impl Drop for GateGuard {
     fn drop(&mut self) {
-        self.0.busy.fetch_sub(1, Ordering::SeqCst);
+        let mut c = self.0.count.lock();
+        if self.1 {
+            c.1 = c.1.saturating_sub(1);
+        } else {
+            c.0 = c.0.saturating_sub(1);
+        }
     }
 }
 
@@ -369,12 +389,16 @@ mod tests {
     fn the_gate_is_busy_while_a_guard_lives() {
         let g = Arc::new(PlaybackGate::default());
         assert!(!g.busy());
+        let bg = g.try_background().expect("nothing playing yet");
         let a = g.enter();
+        assert!(g.try_background().is_none(), "playback first");
         let b = g.enter();
         drop(a);
         assert!(g.busy());
         drop(b);
         assert!(!g.busy());
+        drop(bg);
+        assert!(g.try_background().is_some());
     }
 
     #[test]

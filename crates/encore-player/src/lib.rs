@@ -59,6 +59,8 @@ struct State {
     /// Engine deck id → queue entry uid.
     decks: HashMap<u64, String>,
     preload: Option<(String, u64)>,
+    /// The preloaded deck plays a file, not a stream.
+    preload_local: bool,
     preloading: bool,
     /// Position to resume at when nothing is loaded (restore, or a seek
     /// during loading).
@@ -93,6 +95,8 @@ pub struct Player {
     /// Downloaded songs (D23).
     local: Mutex<Option<Arc<dyn LocalAudio>>>,
     online: Arc<AtomicBool>,
+    /// Counts connection changes: even online, odd offline (for history).
+    link: Arc<AtomicU64>,
     /// Held while a play or preload resolves; downloads wait for it.
     gate: Arc<PlaybackGate>,
 }
@@ -127,6 +131,7 @@ impl Player {
                 loaded: None,
                 decks: HashMap::new(),
                 preload: None,
+                preload_local: false,
                 preloading: false,
                 pending_pos: 0.0,
                 skips: 0,
@@ -148,6 +153,7 @@ impl Player {
             reporting: Arc::new(AtomicBool::new(false)),
             local: Mutex::new(None),
             online: Arc::new(AtomicBool::new(true)),
+            link: Arc::new(AtomicU64::new(0)),
             gate: Arc::new(PlaybackGate::default()),
         });
         p.engine.set_volume(0.8);
@@ -189,7 +195,7 @@ impl Player {
     /// and Encore is online).
     pub fn report_history(&self, reporter: Arc<dyn PlayReporter>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let _guard = self.rt.enter();
-        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.online.clone(), on_registered);
+        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.link.clone(), on_registered);
     }
 
     /// Play downloaded songs from disk (D23).
@@ -203,12 +209,36 @@ impl Player {
         if was == on {
             return;
         }
-        if on {
-            // Radio gets another chance once the connection is back.
-            self.st.lock().radio_empty = 0;
-        }
+        self.link.fetch_add(1, Ordering::SeqCst);
+        let ok = self.avail();
+        let (stalled, track_gen) = {
+            let mut st = self.st.lock();
+            if on {
+                // Radio gets another chance once the connection is back.
+                st.radio_empty = 0;
+                if st.error.as_ref().is_some_and(|e| e.message == NOTHING_OFFLINE) {
+                    st.error = None;
+                    st.phase = Phase::Paused;
+                }
+            } else if st.preload.is_some() && !st.preload_local {
+                // A deck streaming over the network won't finish: the
+                // file (if the song is downloaded) is preloaded instead.
+                st.preload = None;
+                drop(st);
+                self.engine.clear_preload();
+                st = self.st.lock();
+            }
+            // The song stopped for lack of a connection and isn't
+            // downloaded: go on to the next one that is.
+            let cur_missing = st.queue.current().is_some_and(|c| !ok(&c.track));
+            (!on && st.phase == Phase::Error && cur_missing, st.track_gen)
+        };
         self.check_preload();
         self.publish(false);
+        if stalled {
+            let me = self.clone();
+            self.rt.spawn(async move { me.skip_unavailable(track_gen).await });
+        }
     }
 
     pub fn online(&self) -> bool {
@@ -766,10 +796,15 @@ impl Player {
         if st.queue.upcoming_where(&ok).map(|u| u.uid.as_str()) != Some(entry.uid.as_str()) {
             return;
         }
+        // Resolved online, but the connection went meanwhile.
+        if path.is_none() && !self.online() {
+            return;
+        }
         if let Ok(stream) = res {
             let load_id = self.next_load.fetch_add(1, Ordering::Relaxed);
             st.decks.insert(load_id, entry.uid.clone());
             st.preload = Some((entry.uid.clone(), load_id));
+            st.preload_local = path.is_some();
             let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
             let spec = match path {
                 Some(p) => SourceSpec::File(p),

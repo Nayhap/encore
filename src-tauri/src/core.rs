@@ -213,12 +213,24 @@ impl Core {
                         continue;
                     }
                     if let Some(entry) = encore_core::art::lookup(&a.key) {
-                        let _ = c.store.put("art", &a.key, &(entry.base, entry.hue), Some(180 * 24 * 3600));
+                        // A downloaded song's cover never expires (D23).
+                        let ttl = if c.art.is_kept(&a.key) { None } else { Some(180 * 24 * 3600) };
+                        let _ = c.store.put("art", &a.key, &(entry.base, entry.hue), ttl);
                         done.insert(a.key.clone());
                     }
                 }
             }
         });
+    }
+
+    /// A request that got no answer may mean the connection is gone: the
+    /// connection check takes a look (D23). Every command that asks
+    /// YouTube passes its result through here or through `cached`.
+    pub fn net<T>(&self, r: Result<T>) -> Result<T> {
+        if r.as_ref().is_err_and(|e| e.code == ErrorCode::Network) {
+            self.connectivity.transport_failed();
+        }
+        r
     }
 
     /// Refuse what needs YouTube while offline, with a reason (D23).

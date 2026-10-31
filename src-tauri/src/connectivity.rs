@@ -64,6 +64,19 @@ impl Connectivity {
         tauri::async_runtime::spawn(async move { me.watch().await });
     }
 
+    /// Probe once now and say whether YouTube answered. Going offline
+    /// still takes the confirmation `check` gives.
+    pub async fn check_now(self: &Arc<Self>) -> bool {
+        *self.last.lock() = Some(Instant::now());
+        let up = self.reachable().await;
+        if up {
+            self.set(true);
+        } else if self.online() {
+            self.check();
+        }
+        up
+    }
+
     async fn reachable(&self) -> bool {
         self.http.head(PROBE_URL).send().await.is_ok()
     }

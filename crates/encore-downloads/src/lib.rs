@@ -18,7 +18,7 @@ pub mod files;
 pub mod sync;
 pub mod types;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,16 +27,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use encore_audio::AudioCache;
 use encore_audio::cache::sanitize_key;
+pub use encore_core::downloads::RECOVERED;
 use encore_core::downloads::{Commit, DownloadRow, Finished, Format, KeptRow, RowState, next_attempt};
 use encore_core::error::{AppError, Result};
 use encore_core::model::{Collection, Entry, ItemId, Track};
-use encore_core::service::{LocalAudio, LocalFile, LoudnessSource, MusicService, PlayFailureKind, PlaybackGate, ResolveAuth, ResolvedStream, StreamResolver};
+use encore_core::service::{GateGuard, LocalAudio, LocalFile, LoudnessSource, MusicService, PlayFailureKind, PlaybackGate, RequestContext, ResolveAuth, ResolvedStream, StreamResolver};
 use encore_core::store::{Store, now};
 use encore_lyrics::LyricsService;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, broadcast};
 
-pub use fetch::{FetchError, Fetched, Fetcher, HttpFetcher};
+pub use fetch::{Body, FetchError, Fetched, Fetcher, HttpFetcher};
 use fetch::{Outcome, Source, TransferError};
 use files::{Layout, Sidecar, WorkerLock};
 use sync::Traversal;
@@ -44,8 +45,6 @@ pub use types::*;
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
 
-/// Pins of songs found again from their files after the index was lost.
-pub const RECOVERED: &str = "recovered";
 const SETTINGS: &str = "settings";
 const PAUSED: &str = "downloads_paused";
 /// Seconds before the next try after a failure; then the song fails.
@@ -54,8 +53,8 @@ const RETRIES: [i64; 3] = [10, 60, 300];
 const HEADROOM: u64 = 64 * 1024 * 1024;
 /// Kept collections are checked at most this often while nothing changes.
 const SYNC_EVERY: i64 = 6 * 3600;
-/// At launch and on reconnect, unless checked this recently.
-const SYNC_SOON: i64 = 30 * 60;
+/// A check that failed is tried again this long after, when idle.
+const SYNC_RETRY: i64 = 30 * 60;
 /// When to ask again for lyrics nobody had.
 const LYRICS_RETRY: i64 = 7 * 24 * 3600;
 const GONE: &str = "This is no longer on YouTube Music, or it's private now. Your downloads of it stay.";
@@ -126,7 +125,16 @@ struct Mem {
     elsewhere: bool,
     breaker: Breaker,
     active: Option<Active>,
+    /// Collection ids waiting to be checked or being checked (for the UI).
     syncing: HashSet<String>,
+    /// Checks wait their turn here, one at a time (`run_syncs`).
+    sync_queue: VecDeque<SyncJob>,
+    /// (account, set id) of the check running now.
+    sync_running: Option<(String, String)>,
+    /// Asked for again while running: one more check when it ends.
+    sync_dirty: HashSet<(String, String)>,
+    /// The folder's lock couldn't be taken for another reason than a second Encore.
+    lock_error: Option<String>,
     counts: Counts,
     last_progress: Option<Instant>,
     last_request: Option<Instant>,
@@ -134,6 +142,16 @@ struct Mem {
     art_tried: HashSet<String>,
     lyrics_tried: HashSet<String>,
     started: bool,
+    /// Songs found again from their sidecars at open.
+    recovered: usize,
+}
+
+/// One check of a kept collection, bound to the account and session it was
+/// asked for under.
+struct SyncJob {
+    ctx: RequestContext,
+    id: ItemId,
+    first: Option<Collection>,
 }
 
 pub struct DownloadManager {
@@ -142,6 +160,7 @@ pub struct DownloadManager {
     mem: Mutex<Mem>,
     tx: broadcast::Sender<DownloadsUpdate>,
     wake: Notify,
+    sync_wake: Notify,
     lock: Mutex<Option<WorkerLock>>,
     on_network_error: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     rt: tokio::runtime::Handle,
@@ -159,6 +178,21 @@ enum JobError {
 
 fn jitter() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0)
+}
+
+/// The bitrate YouTube serves for an itag, for files whose stream wasn't
+/// seen (copied from the playback cache).
+fn kbps_of(itag: u32) -> Option<u32> {
+    match itag {
+        139 => Some(48),
+        140 => Some(128),
+        141 => Some(256),
+        249 => Some(50),
+        250 => Some(70),
+        251 => Some(160),
+        774 => Some(256),
+        _ => None,
+    }
 }
 
 /// Playlists are kept under their `VL…` browse id, whichever form the UI has.
@@ -192,6 +226,9 @@ fn wait_of(m: &Mem) -> Option<(DownloadWait, String)> {
     if !m.online {
         return Some((DownloadWait::Offline, "You're offline. Downloads continue when you're back online.".into()));
     }
+    if let Some(e) = &m.lock_error {
+        return Some((DownloadWait::Locked, format!("Encore can't lock its downloads folder ({e}). Downloads wait until it can.")));
+    }
     if m.elsewhere {
         return Some((DownloadWait::Elsewhere, "Another Encore is downloading. Downloads continue here once it's closed.".into()));
     }
@@ -206,7 +243,7 @@ fn wait_of(m: &Mem) -> Option<(DownloadWait, String)> {
         }
     }
     if m.disk_full {
-        return Some((DownloadWait::DiskFull, "Your disk is full. Free some space, then resume downloads.".into()));
+        return Some((DownloadWait::DiskFull, "Your disk is full. Free some space, then choose Try again.".into()));
     }
     if !m.setup_ready {
         return Some((DownloadWait::SetupNeeded, "Set up playback to download songs.".into()));
@@ -242,6 +279,7 @@ impl DownloadManager {
     /// `start`, so a second process (the CLI) can read safely.
     pub fn open(dir: PathBuf, d: Deps) -> Result<Arc<Self>> {
         let layout = Layout::create(dir).map_err(|e| AppError::internal(format!("Encore couldn't create its downloads folder ({}).", e.kind())))?;
+        let mut recovered = 0;
         if d.store.download_count()? == 0 {
             let found = files::scan_sidecars(&layout.audio);
             if !found.is_empty() {
@@ -250,6 +288,7 @@ impl DownloadManager {
             for s in &found {
                 d.store.download_recover(RECOVERED, &s.row())?;
             }
+            recovered = found.len();
         }
         let paused = d.store.get::<bool>(SETTINGS, PAUSED).ok().flatten().unwrap_or(false);
         let (tx, _) = broadcast::channel(256);
@@ -267,15 +306,21 @@ impl DownloadManager {
                 breaker: Breaker::default(),
                 active: None,
                 syncing: HashSet::new(),
+                sync_queue: VecDeque::new(),
+                sync_running: None,
+                sync_dirty: HashSet::new(),
+                lock_error: None,
                 counts: Counts::default(),
                 last_progress: None,
                 last_request: None,
                 art_tried: HashSet::new(),
                 lyrics_tried: HashSet::new(),
                 started: false,
+                recovered,
             }),
             tx,
             wake: Notify::new(),
+            sync_wake: Notify::new(),
             lock: Mutex::new(None),
             on_network_error: Mutex::new(None),
             rt: tokio::runtime::Handle::current(),
@@ -284,11 +329,19 @@ impl DownloadManager {
         Ok(me)
     }
 
-    /// Run the worker (it waits for the folder's lock if another Encore
-    /// holds it).
+    /// Run the worker and the collection checks (both wait for the
+    /// folder's lock if another Encore holds it).
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
         self.rt.spawn(async move { me.run().await });
+        let me = self.clone();
+        self.rt.spawn(async move { me.run_syncs().await });
+    }
+
+    /// How many songs were found again from their files because the index
+    /// was lost (kept collections have to be downloaded again).
+    pub fn recovered(&self) -> usize {
+        self.mem.lock().recovered
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<DownloadsUpdate> {
@@ -373,6 +426,7 @@ impl DownloadManager {
         let c = self.d.store.kept_counts(&k.account, &k.set_id).unwrap_or_default();
         KeptCollection {
             card: k.card.clone(),
+            account: k.account.clone(),
             channel: k.channel.clone(),
             mine: k.account == account,
             songs: c.songs,
@@ -472,15 +526,14 @@ impl DownloadManager {
         Ok(n)
     }
 
-    /// Remove downloaded songs, unless a kept collection still needs them.
+    /// Remove the account in use's downloads of these songs. A song stays
+    /// while a kept collection or another account still wants it.
     pub fn remove(&self, ids: &[ItemId]) -> Result<DownloadRemoved> {
         let vids: Vec<String> = ids.iter().map(|i| i.remote().to_string()).collect();
-        let kept = self.d.store.download_unpin(&vids)?;
+        let account = self.d.service.context().account;
+        let kept = self.d.store.download_unpin(&account, &vids)?;
         let removed = self.release();
-        Ok(DownloadRemoved {
-            removed: removed as u32,
-            kept: kept.into_iter().filter_map(|(v, titles)| Some(KeptBy { track_id: ItemId::ytm(&v), collection: titles.into_iter().next()? })).collect(),
-        })
+        Ok(DownloadRemoved { removed: removed as u32, kept: kept.into_iter().map(|(v, collection)| KeptBy { track_id: ItemId::ytm(&v), collection }).collect() })
     }
 
     /// Remove every download, pin and kept collection, for every account.
@@ -513,44 +566,86 @@ impl DownloadManager {
             let mut m = self.mem.lock();
             for r in rows {
                 m.ready.remove(&r.video_id);
-                if let Some(a) = m.active.as_ref().filter(|a| a.video_id == r.video_id) {
-                    a.cancel.store(true, Ordering::SeqCst);
+                // The running download of a removed song stops, and stops
+                // showing at once.
+                if m.active.as_ref().is_some_and(|a| a.video_id == r.video_id) {
+                    if let Some(a) = m.active.take() {
+                        a.cancel.store(true, Ordering::SeqCst);
+                    }
                 }
             }
         }
         self.emit_rows(rows);
         for r in rows {
-            if self.delete_files(r) {
-                let _ = self.d.store.download_forget(&r.video_id, r.attempt);
-            }
+            self.forget(r);
         }
         self.refresh_counts();
         self.emit_summary();
     }
 
-    /// Remove a song's files. A file still open elsewhere (Windows) stays
-    /// marked for removal and is tried again later.
-    fn delete_files(&self, r: &DownloadRow) -> bool {
-        let mut ok = true;
-        if let Some(name) = r.file_name() {
-            ok &= files::remove(&self.layout.file(&name));
-            ok &= files::remove(&self.layout.sidecar(&name));
-        }
-        for p in self.layout.parts_of(&r.video_id) {
-            ok &= files::remove(&p);
-        }
-        if let Some(k) = &r.art_key {
-            if !self.d.store.download_art_in_use(k).unwrap_or(true) {
-                files::remove(&self.layout.cover(k));
+    /// Remove a song's files, then its row, if it is still being removed
+    /// (`Store::download_forget_with`). A file still open elsewhere
+    /// (Windows) stays marked for removal and is tried again later.
+    fn forget(&self, r: &DownloadRow) {
+        let unlink = || {
+            let mut ok = true;
+            if let Some(name) = r.file_name() {
+                ok &= files::remove(&self.layout.file(&name));
+                ok &= files::remove(&self.layout.sidecar(&name));
             }
+            for p in self.layout.parts_of(&r.video_id) {
+                ok &= files::remove(&p);
+            }
+            ok
+        };
+        if let Ok(Some(Some(cover))) = self.d.store.download_forget_with(&r.video_id, r.attempt, unlink) {
+            files::remove(&self.layout.cover(&cover));
         }
-        ok
     }
 
     fn finish_removals(&self) {
         for r in self.d.store.download_deleting().unwrap_or_default() {
-            if self.delete_files(&r) {
-                let _ = self.d.store.download_forget(&r.video_id, r.attempt);
+            self.forget(&r);
+        }
+    }
+
+    /// After removals: lyrics and covers no download uses any more (a
+    /// lookup can finish after its song was removed).
+    fn sweep(&self) {
+        let _ = self.d.store.download_purge_lyrics();
+        let Ok(keys) = self.d.store.download_art_keys() else { return };
+        if let Ok(rd) = std::fs::read_dir(&self.layout.art) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !keys.contains(&name) {
+                    files::remove(&e.path());
+                }
+            }
+        }
+    }
+
+    /// Finished files whose install was cut short (renamed, but the index
+    /// never said so): ready again from their sidecar if the song is still
+    /// waiting, removed if nothing describes them.
+    fn reconcile(&self) {
+        let found = files::scan_sidecars(&self.layout.audio);
+        let described: HashSet<String> = found.iter().filter_map(|s| s.row().file_name()).collect();
+        for sc in &found {
+            let r = sc.row();
+            if matches!(self.d.store.download_row(&r.video_id), Ok(Some(x)) if x.state != RowState::Ready) && matches!(self.d.store.download_restore(&r), Ok(true)) {
+                tracing::info!(video = %r.video_id, "an interrupted download was finished after all");
+            }
+        }
+        let Ok(rd) = std::fs::read_dir(&self.layout.audio) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !(name.ends_with(".m4a") || name.ends_with(".webm")) || described.contains(&name) {
+                continue;
+            }
+            let Some((vid, _)) = name.rsplit_once('-') else { continue };
+            let ready = matches!(self.d.store.download_row(vid), Ok(Some(x)) if x.state == RowState::Ready && x.file_name().as_deref() == Some(name.as_str()));
+            if !ready {
+                files::remove(&e.path());
             }
         }
     }
@@ -571,9 +666,8 @@ impl DownloadManager {
         {
             let mut m = self.mem.lock();
             m.paused = on;
-            if on {
-                m.disk_full = false;
-            }
+            // Resuming after freeing space works too, not only Try again.
+            m.disk_full = false;
         }
         self.wake.notify_one();
         self.emit_summary();
@@ -602,9 +696,11 @@ impl DownloadManager {
             return;
         }
         self.wake.notify_one();
+        self.sync_wake.notify_one();
         self.emit_summary();
+        // Reconnected: check this account's collections (D23).
         if on {
-            self.sync_due(SYNC_SOON);
+            self.sync_due(0);
         }
     }
 
@@ -617,13 +713,6 @@ impl DownloadManager {
         }
     }
 
-    fn set_elsewhere(&self, on: bool) {
-        let changed = std::mem::replace(&mut self.mem.lock().elsewhere, on) != on;
-        if changed {
-            self.emit_summary();
-        }
-    }
-
     /// Settings → Downloads: measured on disk.
     pub fn storage(&self) -> DownloadsStorage {
         let bytes = files::dir_size(&self.layout.audio) + files::dir_size(&self.layout.art);
@@ -632,41 +721,59 @@ impl DownloadManager {
 
     // ---------- kept collections ----------
 
-    /// Keep a collection downloaded and up to date for the account in use.
-    /// `c` is its first page; `channel` the name shown as its keeper.
-    pub fn keep(self: &Arc<Self>, c: Collection, channel: Option<String>) -> Result<()> {
-        let account = self.d.service.context().account;
+    /// Keep a collection downloaded and up to date. `c` is its first page,
+    /// read under `ctx`; `channel` the name shown as its keeper. Refused if
+    /// the account changed since `c` was read.
+    pub fn keep(self: &Arc<Self>, c: Collection, ctx: RequestContext, channel: Option<String>) -> Result<()> {
+        if self.d.service.context() != ctx {
+            return Err(AppError::new(encore_core::ErrorCode::Stale, "The account changed meanwhile. Try again."));
+        }
         let card = sync::card_of(&c);
-        self.d.store.kept_put(&account, &card, channel.as_deref())?;
+        self.d.store.kept_put(&ctx.account, &card, channel.as_deref())?;
         self.changed();
-        let me = self.clone();
-        self.rt.spawn(async move { me.sync_set(account, card.id, Some(c)).await });
+        self.request_sync(SyncJob { ctx, id: card.id, first: Some(c) });
         Ok(())
     }
 
-    /// The account keeping `id`: the one in use if it does, else any.
-    fn keeper(&self, id: &ItemId) -> Result<String> {
-        let account = self.d.service.context().account;
-        if self.d.store.kept_row(&account, id.as_str())?.is_some() {
-            return Ok(account);
+    /// The account keeping `id`: `account` when given, else the one in use
+    /// if it does, else any.
+    fn keeper(&self, id: &ItemId, account: Option<&str>) -> Result<String> {
+        let missing = || AppError::not_found("That isn't kept downloaded.");
+        if let Some(a) = account {
+            return self.d.store.kept_row(a, id.as_str())?.map(|k| k.account).ok_or_else(missing);
         }
-        self.d.store.kept_rows()?.into_iter().find(|k| k.set_id == id.as_str()).map(|k| k.account).ok_or_else(|| AppError::not_found("That isn't kept downloaded."))
+        let current = self.d.service.context().account;
+        if self.d.store.kept_row(&current, id.as_str())?.is_some() {
+            return Ok(current);
+        }
+        self.d.store.kept_rows()?.into_iter().find(|k| k.set_id == id.as_str()).map(|k| k.account).ok_or_else(missing)
     }
 
-    /// Stop keeping a collection. Songs nothing else wants are removed.
-    pub fn unkeep(&self, id: &ItemId) -> Result<DownloadRemoved> {
+    /// Stop keeping a collection (`account`'s copy, or the likeliest one).
+    /// Songs nothing else wants are removed.
+    pub fn unkeep(&self, id: &ItemId, account: Option<&str>) -> Result<DownloadRemoved> {
         let id = normalize(id);
-        let owner = self.keeper(&id)?;
+        let owner = self.keeper(&id, account)?;
         self.d.store.kept_remove(&owner, id.as_str())?;
         let removed = self.release();
         self.changed();
         Ok(DownloadRemoved { removed: removed as u32, kept: vec![] })
     }
 
-    pub fn pause_collection(&self, id: &ItemId, on: bool) -> Result<()> {
+    /// Pause or resume one kept collection. Its song downloading now stops
+    /// at the next piece unless something else still wants it.
+    pub fn pause_collection(&self, id: &ItemId, account: Option<&str>, on: bool) -> Result<()> {
         let id = normalize(id);
-        let owner = self.keeper(&id)?;
+        let owner = self.keeper(&id, account)?;
         self.d.store.kept_pause(&owner, id.as_str(), on)?;
+        if on {
+            let active = self.mem.lock().active.as_ref().map(|a| (a.video_id.clone(), a.cancel.clone()));
+            if let Some((vid, cancel)) = active {
+                if !self.d.store.download_wanted(&vid).unwrap_or(true) {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            }
+        }
         self.wake.notify_one();
         self.changed();
         Ok(())
@@ -675,88 +782,145 @@ impl DownloadManager {
     /// "Check for changes": one collection, or all of this account's.
     pub fn sync(self: &Arc<Self>, id: Option<&ItemId>) {
         match id {
-            Some(id) => {
-                let account = self.d.service.context().account;
-                let me = self.clone();
-                let id = normalize(id);
-                self.rt.spawn(async move { me.sync_set(account, id, None).await });
-            }
+            Some(id) => self.request_sync(SyncJob { ctx: self.d.service.context(), id: normalize(id), first: None }),
             None => self.sync_due(0),
         }
     }
 
     /// The account in use changed (or was restored at launch): its kept
-    /// collections are checked unless they were in the last half hour, and
-    /// the UI learns which collections are now "mine".
+    /// collections are checked, and the UI learns which are now "mine".
     pub fn account_changed(self: &Arc<Self>) {
         self.changed();
-        self.sync_due(SYNC_SOON);
+        self.sync_due(0);
     }
 
     /// Encore changed a playlist (D20) or liked songs: check it if kept.
+    /// Asked again while a check runs, it runs once more after.
     pub fn collection_changed(self: &Arc<Self>, id: &ItemId) {
         let id = normalize(id);
-        let account = self.d.service.context().account;
-        if matches!(self.d.store.kept_row(&account, id.as_str()), Ok(Some(_))) {
-            let me = self.clone();
-            self.rt.spawn(async move { me.sync_set(account, id, None).await });
+        let ctx = self.d.service.context();
+        if matches!(self.d.store.kept_row(&ctx.account, id.as_str()), Ok(Some(_))) {
+            self.request_sync(SyncJob { ctx, id, first: None });
         }
     }
 
+    /// This account's kept collections not checked within `max_age`
+    /// seconds; a check that failed is due again after `SYNC_RETRY`.
     fn due(&self, max_age: i64) -> Vec<ItemId> {
         let account = self.d.service.context().account;
         let n = now();
-        self.d.store.kept_rows().unwrap_or_default().into_iter().filter(|k| k.account == account && k.synced.is_none_or(|s| n - s >= max_age)).map(|k| ItemId(k.set_id)).collect()
+        self.d
+            .store
+            .kept_rows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|k| k.account == account)
+            .filter(|k| k.synced.is_none_or(|s| n - s >= max_age) || (k.error.is_some() && k.checked.is_none_or(|c| n - c >= SYNC_RETRY.min(max_age.max(0)))))
+            .map(|k| ItemId(k.set_id))
+            .collect()
     }
 
     fn sync_due(self: &Arc<Self>, max_age: i64) {
-        let due = self.due(max_age);
-        if due.is_empty() {
-            return;
+        let ctx = self.d.service.context();
+        for id in self.due(max_age) {
+            self.request_sync(SyncJob { ctx: ctx.clone(), id, first: None });
         }
-        let account = self.d.service.context().account;
-        let me = self.clone();
-        self.rt.spawn(async move {
-            for id in due {
-                me.clone().sync_set(account.clone(), id, None).await;
-            }
-        });
     }
 
-    /// Read a kept collection again and apply what changed. Only for the
-    /// account in use: another account's collections wait for it.
-    async fn sync_set(self: Arc<Self>, account: String, id: ItemId, first: Option<Collection>) {
-        let ctx = self.d.service.context();
-        if ctx.account != account || !self.mem.lock().online {
-            return;
-        }
-        if !self.mem.lock().syncing.insert(id.0.clone()) {
-            return;
-        }
-        self.changed();
-        if let Ok(Some(k)) = self.d.store.kept_row(&account, id.as_str()) {
-            let had = self.d.store.kept_has_members(&account, id.as_str()).unwrap_or(false);
-            let t = sync::traverse(self.d.service.as_ref(), &ctx, &id, first, &self.d.gate).await;
-            let s = &self.d.store;
-            let (set, generation) = (id.as_str(), k.generation);
-            let r = match &t {
-                Traversal::Complete { card, members } => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), None, false),
-                // A first read that stopped short is still better than nothing.
-                Traversal::Partial { card, members } if !had => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), Some(CHECK_FAILED), false),
-                Traversal::Partial { card, .. } => s.kept_apply(&account, set, generation, None, Some(card), Some(CHECK_FAILED), false),
-                Traversal::Gone => s.kept_apply(&account, set, generation, None, None, Some(GONE), true),
-                Traversal::Failed => s.kept_apply(&account, set, generation, None, None, Some(CHECK_FAILED), false),
-            };
-            match r {
-                Ok(true) => tracing::info!(collection = %id, complete = matches!(t, Traversal::Complete { .. }), "kept collection checked"),
-                Ok(false) => tracing::info!(collection = %id, "kept collection changed meanwhile; check dropped"),
-                Err(e) => tracing::warn!(collection = %id, error = %e.message, "couldn't save a kept collection"),
+    /// Put a check in line. One already waiting for the same collection is
+    /// enough; one running is run once more after.
+    fn request_sync(&self, job: SyncJob) {
+        let key = (job.ctx.account.clone(), job.id.0.clone());
+        {
+            let mut m = self.mem.lock();
+            m.syncing.insert(job.id.0.clone());
+            if m.sync_running.as_ref() == Some(&key) {
+                m.sync_dirty.insert(key);
+            } else if let Some(w) = m.sync_queue.iter_mut().find(|w| w.ctx.account == key.0 && w.id.0 == key.1) {
+                if job.first.is_some() {
+                    w.first = job.first;
+                }
+                w.ctx = job.ctx;
+            } else {
+                m.sync_queue.push_back(job);
             }
         }
-        self.mem.lock().syncing.remove(&id.0);
-        self.release();
-        self.changed();
-        self.wake.notify_one();
+        self.sync_wake.notify_one();
+        self.emit_summary();
+    }
+
+    /// Checks run here, one at a time, by the Encore that holds the
+    /// folder's lock, and only online.
+    async fn run_syncs(self: Arc<Self>) {
+        loop {
+            let ready = { self.mem.lock().online } && self.lock.lock().is_some();
+            let job = if ready { self.mem.lock().sync_queue.pop_front() } else { None };
+            let Some(job) = job else {
+                tokio::select! {
+                    _ = self.sync_wake.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+                continue;
+            };
+            let key = (job.ctx.account.clone(), job.id.0.clone());
+            self.mem.lock().sync_running = Some(key.clone());
+            let id = job.id.clone();
+            let ctx = job.ctx.clone();
+            self.sync_once(job).await;
+            {
+                let mut m = self.mem.lock();
+                m.sync_running = None;
+                if m.sync_dirty.remove(&key) {
+                    m.sync_queue.push_back(SyncJob { ctx, id: id.clone(), first: None });
+                }
+                let waiting = m.sync_queue.iter().any(|w| w.id == id);
+                if !waiting {
+                    m.syncing.remove(&id.0);
+                }
+            }
+            self.release();
+            self.changed();
+            self.wake.notify_one();
+        }
+    }
+
+    /// Read a kept collection again and apply what changed, all under the
+    /// account and session it was asked for: if either changes on the way,
+    /// nothing is applied (that account's own check comes when it's back).
+    async fn sync_once(self: &Arc<Self>, job: SyncJob) {
+        let SyncJob { ctx, id, first } = job;
+        let account = ctx.account.clone();
+        let Ok(Some(k)) = self.d.store.kept_row(&account, id.as_str()) else { return };
+        let same = {
+            let me = self.clone();
+            let ctx = ctx.clone();
+            move || me.mem.lock().online && me.d.service.context() == ctx
+        };
+        if !same() {
+            return;
+        }
+        let had = self.d.store.kept_has_members(&account, id.as_str()).unwrap_or(false);
+        let t = sync::traverse(self.d.service.as_ref(), &ctx, &id, first, &self.d.gate, &same).await;
+        if !same() || matches!(t, Traversal::Stopped) {
+            tracing::info!(collection = %id, "kept collection check stopped: offline or another account");
+            return;
+        }
+        let s = &self.d.store;
+        let (set, generation) = (id.as_str(), k.generation);
+        let r = match &t {
+            Traversal::Complete { card, members } => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), None, false),
+            // A first read that stopped short is still better than nothing.
+            Traversal::Partial { card, members } if !had => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), Some(CHECK_FAILED), false),
+            Traversal::Partial { card, .. } => s.kept_apply(&account, set, generation, None, Some(card), Some(CHECK_FAILED), false),
+            Traversal::Gone => s.kept_apply(&account, set, generation, None, None, Some(GONE), true),
+            Traversal::Failed => s.kept_apply(&account, set, generation, None, None, Some(CHECK_FAILED), false),
+            Traversal::Stopped => return,
+        };
+        match r {
+            Ok(true) => tracing::info!(collection = %id, complete = matches!(t, Traversal::Complete { .. }), "kept collection checked"),
+            Ok(false) => tracing::info!(collection = %id, "kept collection changed meanwhile; check dropped"),
+            Err(e) => tracing::warn!(collection = %id, error = %e.message, "couldn't save a kept collection"),
+        }
     }
 
     // ---------- the worker ----------
@@ -770,32 +934,60 @@ impl DownloadManager {
 
     /// Take the folder's lock; the first time, tidy up after the last run.
     fn hold_lock(&self) -> bool {
-        let held = {
+        let (held, error) = {
             let mut l = self.lock.lock();
+            let mut error = None;
             if l.is_none() {
                 *l = match WorkerLock::try_acquire(&self.layout.root) {
                     Ok(x) => x,
                     Err(e) => {
                         tracing::warn!(error = %e, "downloads: couldn't take the folder's lock");
+                        error = Some(e.kind().to_string());
                         None
                     }
                 };
             }
-            l.is_some()
+            (l.is_some(), error)
         };
-        self.set_elsewhere(!held);
+        // Another Encore holds it, or it can't be taken at all: two waits.
+        let changed = {
+            let mut m = self.mem.lock();
+            let before = (m.elsewhere, m.lock_error.clone());
+            m.elsewhere = !held && error.is_none();
+            m.lock_error = error;
+            before != (m.elsewhere, m.lock_error.clone())
+        };
+        if changed {
+            self.emit_summary();
+        }
         if held && !std::mem::replace(&mut self.mem.lock().started, true) {
             let _ = self.d.store.download_reset_active();
             self.finish_removals();
+            self.reconcile();
             self.clean_parts();
+            self.sweep();
+            self.reload();
             self.changed();
+            self.sync_wake.notify_one();
         }
         held
+    }
+
+    /// The pause flag as stored: `encore-cli downloads pause` changes it
+    /// from another process, and the worker follows.
+    fn paused_now(&self) -> bool {
+        let p = self.d.store.get::<bool>(SETTINGS, PAUSED).ok().flatten().unwrap_or(false);
+        let changed = std::mem::replace(&mut self.mem.lock().paused, p) != p;
+        if changed {
+            self.emit_summary();
+        }
+        p
     }
 
     /// How long to wait before looking at the queue again, if downloads
     /// are waiting on something.
     fn blocked(&self) -> Option<Duration> {
+        self.paused_now();
         let (d, expired) = {
             let mut m = self.mem.lock();
             let expired = m.breaker.until.is_some_and(|u| u <= Instant::now());
@@ -816,8 +1008,10 @@ impl DownloadManager {
     }
 
     fn should_stop(&self) -> bool {
-        let m = self.mem.lock();
-        m.paused || !m.online
+        if self.paused_now() {
+            return true;
+        }
+        !self.mem.lock().online
     }
 
     async fn run(self: Arc<Self>) {
@@ -866,10 +1060,8 @@ impl DownloadManager {
                 self.keep_cover(&r).await;
             }
         }
-        for id in self.due(SYNC_EVERY) {
-            let account = self.d.service.context().account;
-            self.clone().sync_set(account, id, None).await;
-        }
+        self.sync_due(SYNC_EVERY);
+        self.sweep();
     }
 
     fn challenged(&self) {
@@ -940,41 +1132,30 @@ impl DownloadManager {
         }
     }
 
-    /// Wait for playback's resolves to finish, then for the spacing.
-    /// False if the job was cancelled meanwhile.
-    async fn before_request(&self, cancel: &AtomicBool) -> bool {
-        let idle = async {
-            while self.d.gate.busy() {
-                if cancel.load(Ordering::SeqCst) {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            true
-        };
-        if !idle.await {
-            return false;
-        }
+    /// Wait for the spacing, then for a turn that no playback resolve is
+    /// using (`PlaybackGate::try_background`). Hold the guard for the
+    /// request. `None` if the job was cancelled meanwhile.
+    async fn before_request(&self, cancel: &AtomicBool) -> Option<GateGuard> {
         let (lo, hi) = self.d.spacing;
         let spacing = if hi > lo { lo + Duration::from_millis(jitter() % ((hi - lo).as_millis() as u64 + 1)) } else { lo };
         let wait = self.mem.lock().last_request.map(|t| spacing.saturating_sub(t.elapsed()));
         if let Some(w) = wait {
             tokio::time::sleep(w).await;
         }
-        while self.d.gate.busy() {
+        loop {
             if cancel.load(Ordering::SeqCst) {
-                return false;
+                return None;
+            }
+            if let Some(turn) = self.d.gate.try_background() {
+                self.mem.lock().last_request = Some(Instant::now());
+                return Some(turn);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        self.mem.lock().last_request = Some(Instant::now());
-        !cancel.load(Ordering::SeqCst)
     }
 
     async fn resolve(&self, vid: &str, cancel: &AtomicBool) -> std::result::Result<Option<ResolvedStream>, JobError> {
-        if !self.before_request(cancel).await {
-            return Ok(None);
-        }
+        let Some(_turn) = self.before_request(cancel).await else { return Ok(None) };
         let auth = (self.d.auth)();
         match self.d.resolver.resolve(vid, auth.as_ref()).await {
             Ok(s) => Ok(Some(s)),
@@ -1015,7 +1196,7 @@ impl DownloadManager {
         .ok()
         .flatten()?;
         let codec = if ext == "webm" { "opus" } else { "aac" };
-        let _ = self.d.store.download_format(&row.video_id, attempt, &Format { itag, ext: ext.into(), codec: codec.into(), kbps: None, total: n });
+        let _ = self.d.store.download_format(&row.video_id, attempt, &Format { itag, ext: ext.into(), codec: codec.into(), kbps: kbps_of(itag), total: n });
         tracing::info!(video = %row.video_id, itag, "download copied from the playback cache");
         Some((name, n))
     }
@@ -1033,6 +1214,16 @@ impl DownloadManager {
         };
         self.set_total(attempt, total);
         self.progress(attempt, total);
+        // Loudness for normalisation (D5), however the file came: copied
+        // from the playback cache or fetched.
+        let known = self.d.store.download_row(vid).ok().flatten().is_some_and(|r| r.loudness.is_some());
+        if let (false, Some(l)) = (known, &self.d.loudness) {
+            if let Some(_turn) = self.before_request(cancel).await {
+                if let Ok(v) = l.loudness(&row.track.id).await {
+                    let _ = self.d.store.download_set_loudness(vid, v);
+                }
+            }
+        }
         let part = self.layout.part(&name);
         let p2 = part.clone();
         let checked = tokio::task::spawn_blocking(move || -> std::result::Result<(String, Option<f64>, String, u64), String> {
@@ -1046,7 +1237,7 @@ impl DownloadManager {
             Ok(Ok((codec, duration, sha256, bytes))) if bytes == total => Ok(Some((name, Finished { bytes, sha256, codec, duration }))),
             Ok(Ok(_)) => {
                 files::remove(&part);
-                Err(JobError::Retry("The download came out the wrong size.".into()))
+                Err(JobError::Retry("The download wasn't the size YouTube said it would be.".into()))
             }
             Ok(Err(e)) => {
                 tracing::warn!(video = vid, error = %e, "a download didn't decode");
@@ -1061,14 +1252,8 @@ impl DownloadManager {
     async fn fetch_stream(self: &Arc<Self>, row: &DownloadRow, attempt: u64, cancel: &Arc<AtomicBool>) -> std::result::Result<Option<(String, u64)>, JobError> {
         let vid = row.video_id.as_str();
         let Some(mut s) = self.resolve(vid, cancel).await? else { return Ok(None) };
-        if row.loudness.is_none() {
-            if let Some(l) = &self.d.loudness {
-                if self.before_request(cancel).await {
-                    if let Ok(v) = l.loudness(&row.track.id).await {
-                        let _ = self.d.store.download_set_loudness(vid, v);
-                    }
-                }
-            }
+        if s.loudness_db.is_some() {
+            let _ = self.d.store.download_set_loudness(vid, s.loudness_db);
         }
         let stop = {
             let (me, c) = (self.clone(), cancel.clone());
@@ -1144,8 +1329,23 @@ impl DownloadManager {
     fn install(&self, vid: &str, attempt: u64, name: &str, fin: Finished) -> Option<DownloadRow> {
         let part = self.layout.part(name);
         let file = self.layout.file(name);
-        let (p2, f2) = (part.clone(), file.clone());
+        let side = self.layout.sidecar(name);
+        // The sidecar is written first, inside the install: a song is never
+        // ready without what recovers it (D23).
+        let mut pre = self.d.store.download_row(vid).ok().flatten()?;
+        pre.state = RowState::Ready;
+        pre.bytes = fin.bytes;
+        pre.sha256 = Some(fin.sha256.clone());
+        pre.codec = Some(fin.codec.clone());
+        pre.duration = fin.duration.or(pre.duration);
+        let Some(sidecar) = Sidecar::of(&pre).and_then(|sc| serde_json::to_vec(&sc).ok()) else {
+            files::remove(&part);
+            let _ = self.d.store.download_fail(vid, attempt, "Encore couldn't describe the download.");
+            return None;
+        };
+        let (p2, f2, s2) = (part.clone(), file.clone(), side.clone());
         let r = self.d.store.download_commit(vid, attempt, &fin, move || {
+            files::write_atomic(&s2, &sidecar)?;
             std::fs::rename(&p2, &f2)?;
             files::private(&f2);
             Ok(())
@@ -1153,11 +1353,6 @@ impl DownloadManager {
         match r {
             Ok(Commit::Installed) => {
                 let done = self.d.store.download_row(vid).ok().flatten()?;
-                if let Some(sc) = Sidecar::of(&done) {
-                    if let Ok(b) = serde_json::to_vec(&sc) {
-                        let _ = files::write_atomic(&self.layout.sidecar(name), &b);
-                    }
-                }
                 let mut m = self.mem.lock();
                 if let Some(f) = self.local_file(&done) {
                     m.ready.insert(vid.to_string(), f);
@@ -1172,9 +1367,17 @@ impl DownloadManager {
                 None
             }
             Err(e) => {
+                // Whatever got in place is undone: no file without its row.
                 tracing::warn!(video = vid, error = %e.message, "couldn't keep a download");
                 files::remove(&part);
-                let _ = self.d.store.download_requeue(vid, attempt, Some(now() + 60), true, Some("Encore couldn't keep the download."));
+                files::remove(&file);
+                files::remove(&side);
+                if files::free_space(&self.layout.audio).is_some_and(|f| f < HEADROOM) {
+                    self.mem.lock().disk_full = true;
+                    let _ = self.d.store.download_requeue(vid, attempt, None, false, None);
+                } else {
+                    let _ = self.d.store.download_requeue(vid, attempt, Some(now() + 60), true, Some("Encore couldn't keep the download."));
+                }
                 None
             }
         }
@@ -1187,11 +1390,17 @@ impl DownloadManager {
             return;
         }
         let path = self.layout.cover(key);
+        let in_use = || self.d.store.download_art_in_use(key).unwrap_or(false);
         let have = path.is_file()
             || match art.cover(key).await {
-                Some(b) => files::write_atomic(&path, &b).is_ok(),
-                None => false,
+                // The song may have been removed while the cover arrived.
+                Some(b) if in_use() => files::write_atomic(&path, &b).is_ok(),
+                _ => false,
             };
+        if have && !in_use() {
+            files::remove(&path);
+            return;
+        }
         if have {
             let hue = encore_core::art::lookup(key).and_then(|e| e.hue);
             let _ = self.d.store.download_set_art_pinned(key, true, hue);
@@ -1208,9 +1417,7 @@ impl DownloadManager {
             return;
         }
         let never = AtomicBool::new(false);
-        if !self.before_request(&never).await {
-            return;
-        }
+        let Some(_turn) = self.before_request(&never).await else { return };
         match l.fetch_for_download(&r.track).await {
             Ok(found) => {
                 let _ = self.d.store.pin_lyrics(&r.video_id, found.as_ref(), Some(now() + LYRICS_RETRY));
@@ -1239,11 +1446,11 @@ impl DownloadManager {
                 let m = self.mem.lock();
                 (m.active.is_some() || !m.syncing.is_empty(), wait_of(&m).map(|w| w.0))
             };
+            if wait.is_some() && self.mem.lock().active.is_none() {
+                return wait;
+            }
             if busy {
                 continue;
-            }
-            if wait.is_some() {
-                return wait;
             }
             let next = self.d.store.download_next(now()).ok().flatten();
             let retry = self.d.store.download_next_retry().ok().flatten();

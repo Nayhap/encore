@@ -2,12 +2,13 @@
 //! really ended may remove songs from the saved order; one that stalled,
 //! failed halfway or hit the limits keeps the last good order.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use encore_audio::cache::sanitize_key;
 use encore_core::error::ErrorCode;
 use encore_core::model::{Collection, CollectionCard, Entry, ItemId, Track};
-use encore_core::service::{More, MusicService, PlaybackGate, RequestContext};
+use encore_core::service::{GateGuard, More, MusicService, PlaybackGate, RequestContext};
 
 const MAX_ENTRIES: usize = 10_000;
 const MAX_PAGES: usize = 250;
@@ -24,6 +25,8 @@ pub enum Traversal {
     /// Private or deleted now.
     Gone,
     Failed,
+    /// Offline or the account changed meanwhile: nothing to apply.
+    Stopped,
 }
 
 pub fn card_of(c: &Collection) -> CollectionCard {
@@ -50,19 +53,28 @@ pub fn members_of(entries: &[Entry]) -> Vec<(String, Track)> {
         .collect()
 }
 
-async fn when_idle(gate: &PlaybackGate) {
-    while gate.busy() {
+/// Wait for a turn to ask YouTube: never while playback resolves.
+/// `None` when `go_on` says to stop.
+async fn admitted(gate: &Arc<PlaybackGate>, go_on: &(dyn Fn() -> bool + Send + Sync)) -> Option<GateGuard> {
+    loop {
+        if !go_on() {
+            return None;
+        }
+        if let Some(g) = gate.try_background() {
+            return Some(g);
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
 /// Read a collection to its end. `first` is its first page when the
-/// caller already has it.
-pub async fn traverse(service: &dyn MusicService, ctx: &RequestContext, id: &ItemId, first: Option<Collection>, gate: &PlaybackGate) -> Traversal {
+/// caller already has it. `go_on` is asked before every request (online,
+/// same account).
+pub async fn traverse(service: &dyn MusicService, ctx: &RequestContext, id: &ItemId, first: Option<Collection>, gate: &Arc<PlaybackGate>, go_on: &(dyn Fn() -> bool + Send + Sync)) -> Traversal {
     let c = match first {
         Some(c) => c,
         None => {
-            when_idle(gate).await;
+            let Some(_turn) = admitted(gate, go_on).await else { return Traversal::Stopped };
             match service.collection(ctx, id).await {
                 Ok(c) => c,
                 Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::Unavailable) => return Traversal::Gone,
@@ -83,8 +95,8 @@ pub async fn traverse(service: &dyn MusicService, ctx: &RequestContext, id: &Ite
         if entries.len() >= MAX_ENTRIES || pages >= MAX_PAGES || t0.elapsed() > MAX_TIME {
             break false;
         }
-        when_idle(gate).await;
         tokio::time::sleep(PAGE_GAP).await;
+        let Some(_turn) = admitted(gate, go_on).await else { return Traversal::Stopped };
         pages += 1;
         match service.collection_more_checked(ctx, &cur).await {
             Ok((more, More::Next(next))) => {
@@ -230,7 +242,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_ended_list_is_complete() {
-        let t = traverse(&Pages { end: More::Ended }, &RequestContext { account: "a".into(), epoch: 1 }, &ItemId::ytm("VLPL1"), None, &PlaybackGate::default()).await;
+        let t = traverse(&Pages { end: More::Ended }, &RequestContext { account: "a".into(), epoch: 1 }, &ItemId::ytm("VLPL1"), None, &Arc::new(PlaybackGate::default()), &|| true).await;
         let members = match t {
             Traversal::Complete { members, .. } => members,
             other => panic!("{other:?}"),
@@ -241,7 +253,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_stalled_list_is_only_partial() {
-        let t = traverse(&Pages { end: More::Stalled }, &RequestContext { account: "a".into(), epoch: 1 }, &ItemId::ytm("VLPL1"), None, &PlaybackGate::default()).await;
+        let t = traverse(&Pages { end: More::Stalled }, &RequestContext { account: "a".into(), epoch: 1 }, &ItemId::ytm("VLPL1"), None, &Arc::new(PlaybackGate::default()), &|| true).await;
         assert!(matches!(t, Traversal::Partial { .. }), "{t:?}");
     }
 

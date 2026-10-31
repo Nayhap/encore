@@ -25,6 +25,7 @@ pub enum DownloadWait {
     DiskFull,
     SetupNeeded,
     Elsewhere,
+    Locked,
 }
 
 /// One downloaded, or downloading, song.
@@ -89,6 +90,9 @@ pub struct DownloadsSummary {
 #[serde(rename_all = "camelCase")]
 pub struct KeptCollection {
     pub card: CollectionCard,
+    /// Whose copy this is (an opaque account key): two accounts may keep
+    /// the same playlist.
+    pub account: String,
     /// The channel that keeps it.
     pub channel: Option<String>,
     /// Kept by the account in use, so it stays up to date.
@@ -128,7 +132,9 @@ pub struct DownloadRemoved {
 #[serde(rename_all = "camelCase")]
 pub struct KeptBy {
     pub track_id: ItemId,
-    pub collection: String,
+    /// The kept collection that has it; `None` when another account
+    /// downloaded it too.
+    pub collection: Option<String>,
 }
 
 /// Settings → Downloads, measured on disk.

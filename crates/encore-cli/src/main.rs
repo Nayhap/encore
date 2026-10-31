@@ -990,9 +990,9 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
     use encore_downloads::{DownloadState, DownloadsUpdate};
     let fetching = matches!(cmd, DownloadsCmd::Add { .. } | DownloadsCmd::Keep { .. } | DownloadsCmd::Sync { .. } | DownloadsCmd::Resume);
     let resolver = cli_resolver(fetching).await?;
-    let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
-    let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT).ok();
-    let (dl, _) = cli_downloads(svc.clone(), resolver, cache).await?;
+    // No playback cache here: opening it clears its partial files, which may
+    // be the running app's. Songs are fetched instead of copied from it.
+    let (dl, _) = cli_downloads(svc.clone(), resolver, None).await?;
     let e = |e: encore_core::AppError| anyhow!("{} ({:?})", e.message, e.code);
     let ids = |v: &[String]| v.iter().map(|x| ItemId::parse(x)).collect::<Vec<_>>();
     match cmd {
@@ -1026,12 +1026,13 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
             println!("{n} waiting");
         }
         DownloadsCmd::Keep { id } => {
-            let c = svc.collection(&svc.context(), &ItemId::parse(&id)).await.map_err(e)?;
+            let ctx = svc.context();
+            let c = svc.collection(&ctx, &ItemId::parse(&id)).await.map_err(e)?;
             println!("keeping {} ({})", c.title, c.id);
-            dl.keep(c, None).map_err(e)?;
+            dl.keep(c, ctx, None).map_err(e)?;
         }
         DownloadsCmd::Unkeep { id } => {
-            let r = dl.unkeep(&ItemId::parse(&id)).map_err(e)?;
+            let r = dl.unkeep(&ItemId::parse(&id), None).map_err(e)?;
             println!("no longer kept; {} songs removed", r.removed);
             return Ok(());
         }
@@ -1039,12 +1040,16 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
             let r = dl.remove(&ids(&videos)).map_err(e)?;
             println!("{} removed", r.removed);
             for k in &r.kept {
-                println!("  {} stays: \"{}\" keeps it", k.track_id, k.collection);
+                match &k.collection {
+                    Some(c) => println!("  {} stays: \"{c}\" is kept downloaded and includes it", k.track_id),
+                    None => println!("  {} stays: another account downloaded it too", k.track_id),
+                }
             }
             return Ok(());
         }
         DownloadsCmd::Sync { id } => dl.sync(id.map(|x| ItemId::parse(&x)).as_ref()),
         DownloadsCmd::Pause => {
+            // The running app follows the stored flag at its next song or piece.
             dl.pause(true);
             println!("paused");
             return Ok(());

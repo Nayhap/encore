@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use encore_core::art;
@@ -22,6 +23,8 @@ pub struct ArtCache {
     dir: PathBuf,
     /// `<downloads>/art`: one 544 px cover per key, kept by the downloads.
     kept: Option<PathBuf>,
+    /// Offline, a kept cover answers at once, at every size (D23).
+    online: AtomicBool,
     store: Arc<Store>,
     http: reqwest::Client,
     on_hue: Mutex<Option<HueHook>>,
@@ -87,7 +90,7 @@ impl ArtCache {
             // Follow only redirects that stay on allow-listed hosts.
             if a.previous().len() < 3 && a.url().scheme() == "https" && a.url().host_str().is_some_and(art::host_allowed) { a.follow() } else { a.stop() }
         })).build().expect("http");
-        Self { dir, kept, store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
+        Self { dir, kept, online: AtomicBool::new(true), store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
     }
 
     pub fn on_hue(&self, f: impl Fn(&str, u16, u16) + Send + Sync + 'static) {
@@ -114,6 +117,16 @@ impl ArtCache {
         self.kept.as_ref().map(|d| d.join(key))
     }
 
+    pub fn set_online(&self, on: bool) {
+        self.online.store(on, Ordering::Relaxed);
+    }
+
+    /// A downloaded song uses this cover: its address is kept with the
+    /// download, so it gets no expiry in the art index.
+    pub fn is_kept(&self, key: &str) -> bool {
+        Self::valid_key(key) && self.kept_path(key).is_some_and(|p| p.is_file())
+    }
+
     /// Bytes and MIME type for an art key at (at least) `size` pixels.
     pub async fn get(&self, key: &str, size: u32) -> Result<(Vec<u8>, &'static str), String> {
         if !Self::valid_key(key) {
@@ -135,7 +148,7 @@ impl ArtCache {
             Some(p) => tokio::fs::read(&p).await.ok().and_then(|b| mime_of(&b).map(|m| (b, m))),
             None => None,
         };
-        if size <= 544 {
+        if size <= 544 || !self.online.load(Ordering::Relaxed) {
             if let Some(k) = kept {
                 return Ok(k);
             }
@@ -184,7 +197,8 @@ impl ArtCache {
                     f(key, h1, h2);
                 }
             }
-            let _ = self.store.put("art", key, &(entry.base.clone(), h), Some(180 * 24 * 3600));
+            let ttl = if self.is_kept(key) { None } else { Some(180 * 24 * 3600) };
+            let _ = self.store.put("art", key, &(entry.base.clone(), h), ttl);
         }
         let evict = {
             let mut w = self.writes.lock();

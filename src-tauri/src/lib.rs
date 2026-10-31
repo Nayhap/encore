@@ -345,6 +345,7 @@ pub fn run() {
             core.connectivity.on_change(move |on| {
                 c5.player.set_online(on);
                 c5.lyrics.set_online(on);
+                c5.art.set_online(on);
                 if let Some(d) = &c5.downloads {
                     d.set_online(on);
                 }
@@ -353,6 +354,14 @@ pub fn run() {
             if let Some(d) = &core.downloads {
                 d.set_setup_ready(core.resolver.runtimes().status().usable);
                 d.start();
+                // The index was lost and rebuilt from the song files (D23).
+                let n = d.recovered();
+                if n > 0 {
+                    let text = format!("Encore's database was damaged and replaced. It found your {n} downloaded songs again; download playlists and albums again to keep them up to date.");
+                    if let Some(text) = core.startup_notice(text) {
+                        let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&handle);
+                    }
+                }
             }
             // Plays go to YouTube Music history while the setting is on (D18).
             let h4 = handle.clone();

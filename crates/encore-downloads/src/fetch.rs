@@ -2,7 +2,8 @@
 //! order, every answer checked. A `206` must carry exactly the range asked
 //! for (start, end and total) and exactly that many bytes; a `200` is the
 //! whole file and replaces whatever was there; `416` means the file
-//! changed, so it starts over once. The signed URL is never logged.
+//! changed, so it starts over once. Bodies go to disk as they arrive, never
+//! more than was asked for. The signed URL is never logged.
 
 use std::io::SeekFrom;
 use std::path::Path;
@@ -17,26 +18,29 @@ pub const OVERLAP: u64 = 4096;
 /// Longer than any song: refuse instead of filling the disk.
 pub const MAX_TOTAL: u64 = 1024 * 1024 * 1024;
 
-#[derive(Debug)]
+/// An answer's body, read piece by piece.
+#[async_trait]
+pub trait Body: Send {
+    /// The next piece; `None` at the end.
+    async fn chunk(&mut self) -> Result<Option<Vec<u8>>, FetchError>;
+}
+
 pub struct Fetched {
     pub status: u16,
     pub content_range: Option<String>,
-    pub body: Vec<u8>,
+    pub body: Box<dyn Body>,
 }
 
 #[derive(Debug)]
 pub enum FetchError {
-    /// No answer: connection, DNS, timeout.
+    /// No answer, or it stopped: connection, DNS, a stall.
     Transport(String),
-    /// The body was longer than allowed.
-    TooLong,
 }
 
-/// One GET. With `range`, asks for those bytes (inclusive). Reads at most
-/// `limit` bytes of body.
+/// One GET. With `range`, asks for those bytes (inclusive).
 #[async_trait]
 pub trait Fetcher: Send + Sync {
-    async fn get(&self, url: &str, headers: &[(String, String)], range: Option<(u64, u64)>, limit: u64) -> Result<Fetched, FetchError>;
+    async fn get(&self, url: &str, headers: &[(String, String)], range: Option<(u64, u64)>) -> Result<Fetched, FetchError>;
 }
 
 pub struct HttpFetcher {
@@ -51,7 +55,9 @@ impl Default for HttpFetcher {
 
 impl HttpFetcher {
     pub fn new() -> Self {
-        HttpFetcher { http: reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(60)).build().expect("http client") }
+        // A stall, not a slow connection, is what times out: a 1 MiB range
+        // may take minutes on a poor link.
+        HttpFetcher { http: reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(30)).build().expect("http client") }
     }
 }
 
@@ -65,9 +71,18 @@ fn describe(e: &reqwest::Error) -> String {
     }
 }
 
+struct HttpBody(reqwest::Response);
+
+#[async_trait]
+impl Body for HttpBody {
+    async fn chunk(&mut self) -> Result<Option<Vec<u8>>, FetchError> {
+        self.0.chunk().await.map(|c| c.map(|b| b.to_vec())).map_err(|e| FetchError::Transport(describe(&e)))
+    }
+}
+
 #[async_trait]
 impl Fetcher for HttpFetcher {
-    async fn get(&self, url: &str, headers: &[(String, String)], range: Option<(u64, u64)>, limit: u64) -> Result<Fetched, FetchError> {
+    async fn get(&self, url: &str, headers: &[(String, String)], range: Option<(u64, u64)>) -> Result<Fetched, FetchError> {
         // The bytes as stored: no compression in between.
         let mut rb = self.http.get(url).header(reqwest::header::ACCEPT_ENCODING, "identity");
         for (k, v) in headers {
@@ -76,19 +91,10 @@ impl Fetcher for HttpFetcher {
         if let Some((a, b)) = range {
             rb = rb.header(reqwest::header::RANGE, format!("bytes={a}-{b}"));
         }
-        let mut r = rb.send().await.map_err(|e| FetchError::Transport(describe(&e)))?;
+        let r = rb.send().await.map_err(|e| FetchError::Transport(describe(&e)))?;
         let status = r.status().as_u16();
         let content_range = r.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).map(str::to_string);
-        let mut body = Vec::new();
-        if status == 200 || status == 206 {
-            while let Some(c) = r.chunk().await.map_err(|e| FetchError::Transport(describe(&e)))? {
-                if (body.len() + c.len()) as u64 > limit {
-                    return Err(FetchError::TooLong);
-                }
-                body.extend_from_slice(&c);
-            }
-        }
-        Ok(Fetched { status, content_range, body })
+        Ok(Fetched { status, content_range, body: Box::new(HttpBody(r)) })
     }
 }
 
@@ -132,9 +138,46 @@ pub enum TransferError {
 
 const TRIES: u32 = 4;
 
+/// How a body went.
+enum Read {
+    /// All of it: this many bytes.
+    Done(u64),
+    /// More than allowed.
+    TooLong,
+    /// The connection stopped after this many bytes.
+    Cut(u64, String),
+    /// `stop` said so after this many bytes.
+    Stopped(u64),
+}
+
+/// Write a body at `at`, at most `limit` bytes, checking `stop` between pieces.
+async fn write_body(file: &mut tokio::fs::File, body: &mut Box<dyn Body>, at: u64, limit: u64, stop: &(dyn Fn() -> bool + Send + Sync), progress: &(dyn Fn(u64) + Send + Sync)) -> Result<Read, TransferError> {
+    file.seek(SeekFrom::Start(at)).await.map_err(TransferError::Disk)?;
+    let mut n = 0u64;
+    loop {
+        // A body that has all it should is finished, whatever `stop` says.
+        if n < limit && stop() {
+            return Ok(Read::Stopped(n));
+        }
+        match body.chunk().await {
+            Ok(Some(c)) => {
+                n += c.len() as u64;
+                if n > limit {
+                    return Ok(Read::TooLong);
+                }
+                file.write_all(&c).await.map_err(TransferError::Disk)?;
+                progress(at + n);
+            }
+            Ok(None) => return Ok(Read::Done(n)),
+            Err(FetchError::Transport(e)) => return Ok(Read::Cut(n, e)),
+        }
+    }
+}
+
 /// Fetch `[from, total)` of `src` into `part`, which already holds `from`
-/// good bytes. `stop` is checked between ranges; `progress` gets the bytes
-/// in the file so far.
+/// good bytes. `stop` is checked between pieces; a range cut short is
+/// dropped, so the file only ever holds whole, checked ranges. `progress`
+/// gets the bytes in the file so far.
 pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, stop: &(dyn Fn() -> bool + Send + Sync), progress: &(dyn Fn(u64) + Send + Sync)) -> Result<Outcome, TransferError> {
     if src.total == 0 || src.total > MAX_TOTAL {
         return Err(TransferError::Server("YouTube gave this song an impossible size.".into()));
@@ -145,6 +188,17 @@ pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, sto
     let mut failures = 0u32;
     let mut restarted = false;
     progress(off);
+    // Count a failed try; give up after `TRIES` in a row.
+    macro_rules! again {
+        ($err:expr) => {{
+            failures += 1;
+            if failures >= TRIES {
+                return Err($err);
+            }
+            tokio::time::sleep(Duration::from_millis(500 * failures as u64)).await;
+            continue;
+        }};
+    }
     while off < src.total {
         if stop() {
             file.flush().await.map_err(TransferError::Disk)?;
@@ -153,52 +207,62 @@ pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, sto
         let a = off;
         let b = if src.ranges { (off + CHUNK).min(src.total) - 1 } else { src.total - 1 };
         let range = if src.ranges || a > 0 { Some((a, b)) } else { None };
-        let got = match f.get(&src.url, &src.headers, range, src.total).await {
+        let mut got = match f.get(&src.url, &src.headers, range).await {
             Ok(g) => g,
-            Err(FetchError::TooLong) => return Err(TransferError::Server("YouTube's media server sent more than the song.".into())),
-            Err(FetchError::Transport(e)) => {
-                failures += 1;
-                if failures >= TRIES {
-                    return Err(TransferError::Network(e));
-                }
-                tokio::time::sleep(Duration::from_millis(500 * failures as u64)).await;
-                continue;
-            }
+            Err(FetchError::Transport(e)) => again!(TransferError::Network(e)),
         };
         match got.status {
             206 => {
-                let cr = got.content_range.as_deref().and_then(parse_content_range);
-                match cr {
+                match got.content_range.as_deref().and_then(parse_content_range) {
                     Some((_, _, total)) if total != src.total => return Err(TransferError::Changed(total)),
-                    Some((x, y, _)) if x == a && y == b && got.body.len() as u64 == b - a + 1 => {}
+                    Some((x, y, _)) if x == a && y == b => {}
+                    _ => again!(TransferError::Server("YouTube's media server sent the wrong part of the song.".into())),
+                }
+                let want = b - a + 1;
+                match write_body(&mut file, &mut got.body, a, want, stop, progress).await? {
+                    Read::Done(n) if n == want => {
+                        off = b + 1;
+                        failures = 0;
+                    }
+                    Read::Stopped(_) => {
+                        file.set_len(a).await.map_err(TransferError::Disk)?;
+                        file.flush().await.map_err(TransferError::Disk)?;
+                        return Ok(Outcome::Stopped);
+                    }
+                    Read::Cut(_, e) => {
+                        file.set_len(a).await.map_err(TransferError::Disk)?;
+                        again!(TransferError::Network(e))
+                    }
                     _ => {
-                        failures += 1;
-                        if failures >= TRIES {
-                            return Err(TransferError::Server("YouTube's media server sent the wrong part of the song.".into()));
-                        }
-                        continue;
+                        file.set_len(a).await.map_err(TransferError::Disk)?;
+                        again!(TransferError::Server("YouTube's media server sent the wrong part of the song.".into()))
                     }
                 }
-                file.seek(SeekFrom::Start(a)).await.map_err(TransferError::Disk)?;
-                file.write_all(&got.body).await.map_err(TransferError::Disk)?;
-                off = b + 1;
-                failures = 0;
-                progress(off);
             }
-            // The whole file: it replaces the partial one.
+            // The whole file, from the start: it replaces the partial one.
             200 => {
-                if got.body.len() as u64 != src.total {
-                    failures += 1;
-                    if failures >= TRIES {
-                        return Err(TransferError::Server("YouTube's media server sent an incomplete song.".into()));
-                    }
-                    continue;
-                }
                 file.set_len(0).await.map_err(TransferError::Disk)?;
-                file.seek(SeekFrom::Start(0)).await.map_err(TransferError::Disk)?;
-                file.write_all(&got.body).await.map_err(TransferError::Disk)?;
-                off = src.total;
-                progress(off);
+                match write_body(&mut file, &mut got.body, 0, src.total, stop, progress).await? {
+                    Read::Done(n) if n == src.total => off = src.total,
+                    // What arrived is a good start to continue from.
+                    Read::Stopped(_) => {
+                        file.flush().await.map_err(TransferError::Disk)?;
+                        return Ok(Outcome::Stopped);
+                    }
+                    Read::Cut(n, e) => {
+                        off = n;
+                        again!(TransferError::Network(e))
+                    }
+                    Read::Done(n) => {
+                        off = n.min(src.total);
+                        again!(TransferError::Server("YouTube's media server sent an incomplete song.".into()))
+                    }
+                    Read::TooLong => {
+                        file.set_len(0).await.map_err(TransferError::Disk)?;
+                        off = 0;
+                        again!(TransferError::Server("YouTube's media server sent more than the song.".into()))
+                    }
+                }
             }
             // The range doesn't fit what the server has: start over, once.
             416 if !restarted && a > 0 => {
@@ -208,14 +272,11 @@ pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, sto
                 progress(off);
             }
             403 | 410 => return Err(TransferError::Refused),
-            st => {
-                failures += 1;
-                if failures >= TRIES {
-                    return Err(TransferError::Server(format!("YouTube's media server answered {st}.")));
-                }
-                let wait = if st == 429 { 5000 } else { 1000 };
-                tokio::time::sleep(Duration::from_millis(wait * failures as u64)).await;
+            429 => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                again!(TransferError::Server("YouTube's media server answered 429.".into()))
             }
+            st => again!(TransferError::Server(format!("YouTube's media server answered {st}."))),
         }
     }
     file.flush().await.map_err(TransferError::Disk)?;
@@ -240,10 +301,18 @@ pub async fn tail_matches(f: &dyn Fetcher, src: &Source, part: &Path, len: u64) 
     if read.await.is_err() {
         return false;
     }
-    match f.get(&src.url, &src.headers, Some((a, len - 1)), OVERLAP).await {
-        Ok(g) => g.status == 206 && g.content_range.as_deref().and_then(parse_content_range) == Some((a, len - 1, src.total)) && g.body == mine,
-        Err(_) => false,
+    let Ok(mut g) = f.get(&src.url, &src.headers, Some((a, len - 1))).await else { return false };
+    if g.status != 206 || g.content_range.as_deref().and_then(parse_content_range) != Some((a, len - 1, src.total)) {
+        return false;
     }
+    let mut theirs = Vec::with_capacity(OVERLAP as usize);
+    while let Ok(Some(c)) = g.body.chunk().await {
+        theirs.extend_from_slice(&c);
+        if theirs.len() as u64 > OVERLAP {
+            return false;
+        }
+    }
+    theirs == mine
 }
 
 #[cfg(test)]
@@ -265,13 +334,31 @@ pub(crate) mod tests {
         pub requests: Mutex<Vec<Option<(u64, u64)>>>,
     }
 
+    /// A body handed out 64 KiB at a time.
+    struct Pieces(Vec<u8>);
+
+    #[async_trait]
+    impl Body for Pieces {
+        async fn chunk(&mut self) -> Result<Option<Vec<u8>>, FetchError> {
+            if self.0.is_empty() {
+                return Ok(None);
+            }
+            let n = self.0.len().min(64 * 1024);
+            Ok(Some(self.0.drain(..n).collect()))
+        }
+    }
+
+    fn answer(status: u16, content_range: Option<String>, body: Vec<u8>) -> Fetched {
+        Fetched { status, content_range, body: Box::new(Pieces(body)) }
+    }
+
     #[async_trait]
     impl Fetcher for FakeServer {
-        async fn get(&self, _url: &str, _h: &[(String, String)], range: Option<(u64, u64)>, limit: u64) -> Result<Fetched, FetchError> {
+        async fn get(&self, _url: &str, _h: &[(String, String)], range: Option<(u64, u64)>) -> Result<Fetched, FetchError> {
             self.requests.lock().push(range);
             let data = self.data.lock().clone();
             if self.refuse.load(Ordering::SeqCst) {
-                return Ok(Fetched { status: 403, content_range: None, body: vec![] });
+                return Ok(answer(403, None, vec![]));
             }
             let total = data.len() as u64;
             match range {
@@ -280,12 +367,9 @@ pub(crate) mod tests {
                     let shift = if self.wrong_range.load(Ordering::SeqCst) && a > 0 { 1 } else { 0 };
                     let (x, y) = (a - shift, b - shift);
                     let body = data[x as usize..=y as usize].to_vec();
-                    if body.len() as u64 > limit {
-                        return Err(FetchError::TooLong);
-                    }
-                    Ok(Fetched { status: 206, content_range: Some(format!("bytes {x}-{y}/{total}")), body })
+                    Ok(answer(206, Some(format!("bytes {x}-{y}/{total}")), body))
                 }
-                _ => Ok(Fetched { status: 200, content_range: None, body: data }),
+                _ => Ok(answer(200, None, data)),
             }
         }
     }

@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::error::{AppError, Result};
 use crate::model::{CollectionCard, Lyrics, Track};
@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS download_sets (
     generation INTEGER NOT NULL,
     added      INTEGER NOT NULL,
     synced     INTEGER,
+    checked    INTEGER,
     error      TEXT,
     gone       INTEGER NOT NULL DEFAULT 0,
     paused     INTEGER NOT NULL DEFAULT 0,
@@ -89,6 +90,10 @@ const COLS: &str = "video_id, track, state, itag, ext, codec, kbps, total, bytes
 
 /// Something still wants this song: a pin or a kept collection.
 const REFERENCED: &str = "(EXISTS (SELECT 1 FROM download_pins p WHERE p.video_id = d.video_id) OR EXISTS (SELECT 1 FROM download_members m WHERE m.video_id = d.video_id))";
+
+/// Pins of songs found again from their sidecar files after the index was
+/// lost: they belong to whoever is signed in.
+pub const RECOVERED: &str = "recovered";
 
 /// A new attempt number, unique for this device: microseconds since 1970,
 /// then counting up.
@@ -197,7 +202,10 @@ pub struct KeptRow {
     pub channel: Option<String>,
     pub generation: u64,
     pub added: i64,
+    /// The last check that read the whole collection.
     pub synced: Option<i64>,
+    /// The last check, whatever came of it.
+    pub checked: Option<i64>,
     pub error: Option<String>,
     /// The collection is private or deleted on the service now.
     pub gone: bool,
@@ -264,10 +272,11 @@ fn kept(r: &rusqlite::Row) -> rusqlite::Result<KeptRow> {
         error: r.get(7)?,
         gone: r.get(8)?,
         paused: r.get(9)?,
+        checked: r.get(10)?,
     })
 }
 
-const KEPT_COLS: &str = "account, set_id, card, channel, generation, added, synced, error, gone, paused";
+const KEPT_COLS: &str = "account, set_id, card, channel, generation, added, synced, error, gone, paused, checked";
 
 fn json<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| AppError::internal(e.to_string()))
@@ -349,7 +358,7 @@ impl Store {
     /// `account` downloads these songs. Returns how many are now waiting.
     pub fn download_request(&self, account: &str, tracks: &[Track]) -> Result<usize> {
         let mut c = self.conn.lock();
-        let tx = c.transaction().map_err(db_err)?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_err)?;
         let mut waiting = 0;
         for t in tracks {
             if ensure_row(&tx, t, true).map_err(db_err)? {
@@ -472,23 +481,38 @@ impl Store {
         Ok(())
     }
 
-    /// Drop everyone's pin on these songs. Returns, for songs a kept
-    /// collection still needs, the titles of those collections.
-    pub fn download_unpin(&self, video_ids: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    /// Drop `account`'s pin on these songs (and a recovered one). Returns,
+    /// for songs that stay, why: the title of a kept collection that has
+    /// them, or `None` when another account downloaded them too. The
+    /// release that follows (`download_release`) cancels what nothing wants.
+    pub fn download_unpin(&self, account: &str, video_ids: &[String]) -> Result<Vec<(String, Option<String>)>> {
         let mut c = self.conn.lock();
-        let tx = c.transaction().map_err(db_err)?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_err)?;
         let mut kept = Vec::new();
         for v in video_ids {
-            tx.execute("DELETE FROM download_pins WHERE video_id = ?1", params![v]).map_err(db_err)?;
-            let titles = set_titles(&tx, v).map_err(db_err)?;
-            if !titles.is_empty() {
-                kept.push((v.clone(), titles));
+            tx.execute("DELETE FROM download_pins WHERE video_id = ?1 AND account IN (?2, ?3)", params![v, account, RECOVERED]).map_err(db_err)?;
+            if let Some(title) = set_titles(&tx, v).map_err(db_err)?.into_iter().next() {
+                kept.push((v.clone(), Some(title)));
+            } else if tx.query_row("SELECT EXISTS (SELECT 1 FROM download_pins WHERE video_id = ?1)", params![v], |r| r.get::<_, bool>(0)).map_err(db_err)? {
+                kept.push((v.clone(), None));
             }
-            // A song nothing wants any more stops at once (D23 commit barrier).
-            tx.execute(&format!("UPDATE downloads SET attempt = ?2 WHERE video_id = ?1 AND state IN ('queued', 'active') AND NOT {REFERENCED_BY_ID}"), params![v, next_attempt() as i64]).map_err(db_err)?;
         }
         tx.commit().map_err(db_err)?;
         Ok(kept)
+    }
+
+    /// Whether anything still wants a song fetched now: a pin, or a kept
+    /// collection that isn't paused.
+    pub fn download_wanted(&self, video_id: &str) -> Result<bool> {
+        self.conn
+            .lock()
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM download_pins WHERE video_id = ?1)
+                     OR EXISTS (SELECT 1 FROM download_members m JOIN download_sets s ON s.account = m.account AND s.set_id = m.set_id WHERE m.video_id = ?1 AND s.paused = 0)",
+                params![video_id],
+                |r| r.get(0),
+            )
+            .map_err(db_err)
     }
 
     /// Songs nothing wants any more: marked `deleting` (which also cancels
@@ -522,15 +546,63 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// The files are gone: forget the row, unless it was wanted again.
-    pub fn download_forget(&self, video_id: &str, attempt: u64) -> Result<bool> {
+    /// Remove a song's files and then its row, but only while it is still
+    /// being removed under `attempt`. `unlink` runs inside the transaction,
+    /// which holds the database's write lock, so the song can't be asked for
+    /// again (in this process or another) between the check and the files
+    /// going: an old removal never deletes a new download's files. Returns
+    /// `None` when nothing was done (wanted again, or a file couldn't go),
+    /// else the cover key no other song uses any more.
+    pub fn download_forget_with(&self, video_id: &str, attempt: u64, unlink: impl FnOnce() -> bool) -> Result<Option<Option<String>>> {
         let mut c = self.conn.lock();
-        let tx = c.transaction().map_err(db_err)?;
-        let n = tx.execute("DELETE FROM downloads WHERE video_id = ?1 AND state = 'deleting' AND attempt = ?2", params![video_id, attempt as i64]).map_err(db_err)?;
-        if n == 1 {
-            tx.execute("DELETE FROM download_lyrics WHERE video_id = ?1", params![video_id]).map_err(db_err)?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_err)?;
+        let art: Option<Option<String>> = tx
+            .query_row("SELECT art_key FROM downloads WHERE video_id = ?1 AND state = 'deleting' AND attempt = ?2", params![video_id, attempt as i64], |r| r.get(0))
+            .optional()
+            .map_err(db_err)?;
+        let Some(art) = art else { return Ok(None) };
+        if !unlink() {
+            return Ok(None);
         }
+        tx.execute("DELETE FROM downloads WHERE video_id = ?1", params![video_id]).map_err(db_err)?;
+        tx.execute("DELETE FROM download_lyrics WHERE video_id = ?1", params![video_id]).map_err(db_err)?;
+        let unused = match art {
+            Some(k) => {
+                let used: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM downloads WHERE art_key = ?1 AND state != 'deleting')", params![k], |r| r.get(0)).map_err(db_err)?;
+                (!used).then_some(k)
+            }
+            None => None,
+        };
         tx.commit().map_err(db_err)?;
+        Ok(Some(unused))
+    }
+
+    /// Cover keys any song that isn't being removed still uses.
+    pub fn download_art_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare("SELECT DISTINCT art_key FROM downloads WHERE art_key IS NOT NULL AND state != 'deleting'").map_err(db_err)?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(db_err)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Lyrics left behind by songs that are gone.
+    pub fn download_purge_lyrics(&self) -> Result<usize> {
+        self.conn.lock().execute("DELETE FROM download_lyrics WHERE video_id NOT IN (SELECT video_id FROM downloads WHERE state != 'deleting')", []).map_err(db_err)
+    }
+
+    /// A finished file whose install was interrupted (renamed, but the row
+    /// never said so): ready again, from its sidecar, if the song is still
+    /// wanted and waiting.
+    pub fn download_restore(&self, r: &DownloadRow) -> Result<bool> {
+        let n = self
+            .conn
+            .lock()
+            .execute(
+                "UPDATE downloads SET state = 'ready', itag = ?2, ext = ?3, codec = ?4, kbps = ?5, total = ?6, bytes = ?6, sha256 = ?7, duration = COALESCE(?8, duration), loudness = COALESCE(?9, loudness), error = NULL, retry_at = NULL, done_at = ?10, version = version + 1
+                 WHERE video_id = ?1 AND state IN ('queued', 'failed')",
+                params![r.video_id, r.itag.map(|v| v as i64), r.ext, r.codec, r.kbps.map(|v| v as i64), r.bytes as i64, r.sha256, r.duration, r.loudness.map(|l| l as f64), now()],
+            )
+            .map_err(db_err)?;
         Ok(n == 1)
     }
 
@@ -671,7 +743,7 @@ impl Store {
     /// collection is still kept under `generation`; returns whether it was.
     pub fn kept_apply(&self, account: &str, set_id: &str, generation: u64, members: Option<&[(String, Track)]>, card: Option<&CollectionCard>, error: Option<&str>, gone: bool) -> Result<bool> {
         let mut c = self.conn.lock();
-        let tx = c.transaction().map_err(db_err)?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db_err)?;
         let current: Option<i64> = tx.query_row("SELECT generation FROM download_sets WHERE account = ?1 AND set_id = ?2", params![account, set_id], |r| r.get(0)).optional().map_err(db_err)?;
         if current != Some(generation as i64) {
             return Ok(false);
@@ -690,8 +762,10 @@ impl Store {
         if let Some(card) = card {
             tx.execute("UPDATE download_sets SET card = ?3 WHERE account = ?1 AND set_id = ?2", params![account, set_id, json(card)?]).map_err(db_err)?;
         }
+        // Only a check without an error counts as up to date; a failed one
+        // is asked again soon (D23).
         tx.execute(
-            "UPDATE download_sets SET synced = ?3, error = ?4, gone = ?5 WHERE account = ?1 AND set_id = ?2",
+            "UPDATE download_sets SET synced = CASE WHEN ?4 IS NULL THEN ?3 ELSE synced END, checked = ?3, error = ?4, gone = ?5 WHERE account = ?1 AND set_id = ?2",
             params![account, set_id, now(), error, gone],
         )
         .map_err(db_err)?;
@@ -738,7 +812,8 @@ impl Store {
     }
 
     /// Keep lyrics with a download, or remember there were none and when to
-    /// ask again.
+    /// ask again. Only while the song is still downloaded: a lookup that
+    /// finishes after the song was removed leaves nothing behind.
     pub fn pin_lyrics(&self, video_id: &str, lyrics: Option<&Lyrics>, retry_at: Option<i64>) -> Result<()> {
         let l = match lyrics {
             Some(l) => Some(json(l)?),
@@ -747,7 +822,8 @@ impl Store {
         self.conn
             .lock()
             .execute(
-                "INSERT INTO download_lyrics (video_id, lyrics, retry_at) VALUES (?1, ?2, ?3)
+                "INSERT INTO download_lyrics (video_id, lyrics, retry_at)
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM downloads WHERE video_id = ?1 AND state = 'ready')
                  ON CONFLICT(video_id) DO UPDATE SET lyrics = excluded.lyrics, retry_at = excluded.retry_at",
                 params![video_id, l, if lyrics.is_some() { None } else { retry_at }],
             )
@@ -778,9 +854,6 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 }
-
-/// Same as `REFERENCED`, for a statement on the `downloads` table itself.
-const REFERENCED_BY_ID: &str = "(EXISTS (SELECT 1 FROM download_pins p WHERE p.video_id = downloads.video_id) OR EXISTS (SELECT 1 FROM download_members m WHERE m.video_id = downloads.video_id))";
 
 fn set_titles(c: &Connection, video_id: &str) -> rusqlite::Result<Vec<String>> {
     let mut st = c.prepare(
@@ -819,9 +892,10 @@ mod tests {
         let snap = s.kept_snapshot("a", "ytm:PL1").unwrap().unwrap().1;
         assert_eq!(snap.iter().map(|(_, t)| t.title.as_str()).collect::<Vec<_>>(), vec!["x", "y", "x"], "duplicates keep their place");
 
-        let kept = s.download_unpin(&["x".into()]).unwrap();
-        assert_eq!(kept, vec![("x".to_string(), vec!["List PL1".to_string()])]);
+        let kept = s.download_unpin("a", &["x".into()]).unwrap();
+        assert_eq!(kept, vec![("x".to_string(), Some("List PL1".to_string()))]);
         assert!(s.download_release().unwrap().is_empty(), "the kept playlist still wants x");
+        s.download_unpin("b", &["x".into()]).unwrap();
 
         s.kept_remove("a", "ytm:PL1").unwrap();
         let gone: Vec<String> = s.download_release().unwrap().into_iter().map(|r| r.video_id).collect();
@@ -837,7 +911,7 @@ mod tests {
         let first = next_attempt();
         assert!(s.download_start("x", first).unwrap());
         // Removed while the last chunk arrives.
-        s.download_unpin(&["x".into()]).unwrap();
+        s.download_unpin("a", &["x".into()]).unwrap();
         s.download_release().unwrap();
         let mut installed = false;
         assert_eq!(s.download_commit("x", first, &done(), || Ok(installed = true)).unwrap(), Commit::Stale);
@@ -850,6 +924,57 @@ mod tests {
         assert_eq!(s.download_commit("x", first, &done(), || Ok(())).unwrap(), Commit::Stale, "the old attempt still can't");
         assert_eq!(s.download_commit("x", second, &done(), || Ok(())).unwrap(), Commit::Installed);
         assert_eq!(s.download_row("x").unwrap().unwrap().state, RowState::Ready);
+    }
+
+    #[test]
+    fn removing_a_song_keeps_another_accounts_download() {
+        let s = Store::open_memory().unwrap();
+        s.download_request("a", &[t("x")]).unwrap();
+        s.download_request("b", &[t("x")]).unwrap();
+        assert_eq!(s.download_unpin("a", &["x".into()]).unwrap(), vec![("x".to_string(), None)], "b downloaded it too");
+        assert!(s.download_release().unwrap().is_empty());
+        s.download_unpin("b", &["x".into()]).unwrap();
+        assert_eq!(s.download_release().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn asked_for_again_between_unpin_and_release_keeps_downloading() {
+        let s = Store::open_memory().unwrap();
+        s.download_request("a", &[t("x")]).unwrap();
+        let a = next_attempt();
+        assert!(s.download_start("x", a).unwrap());
+        s.download_unpin("a", &["x".into()]).unwrap();
+        // Another window asks for it before the release runs.
+        s.download_request("a", &[t("x")]).unwrap();
+        assert!(s.download_release().unwrap().is_empty());
+        assert_eq!(s.download_commit("x", a, &done(), || Ok(())).unwrap(), Commit::Installed, "the running attempt still owns it");
+    }
+
+    #[test]
+    fn an_old_removal_leaves_a_new_download_alone() {
+        let s = Store::open_memory().unwrap();
+        s.download_request("a", &[t("x")]).unwrap();
+        s.download_unpin("a", &["x".into()]).unwrap();
+        let gone = s.download_release().unwrap();
+        // Downloaded again before the old removal got to the files.
+        s.download_request("a", &[t("x")]).unwrap();
+        let mut unlinked = false;
+        assert_eq!(s.download_forget_with("x", gone[0].attempt, || { unlinked = true; true }).unwrap(), None);
+        assert!(!unlinked, "the new download's files are not touched");
+        assert_eq!(s.download_row("x").unwrap().unwrap().state, RowState::Queued);
+    }
+
+    #[test]
+    fn a_failed_check_is_not_up_to_date() {
+        let s = Store::open_memory().unwrap();
+        let g = s.kept_put("a", &card("PL1"), None).unwrap();
+        s.kept_apply("a", "ytm:PL1", g, Some(&[("e".into(), t("x"))]), None, None, false).unwrap();
+        let synced = s.kept_row("a", "ytm:PL1").unwrap().unwrap().synced;
+        assert!(synced.is_some());
+        s.kept_apply("a", "ytm:PL1", g, None, None, Some("Couldn't check for changes."), false).unwrap();
+        let k = s.kept_row("a", "ytm:PL1").unwrap().unwrap();
+        assert_eq!(k.synced, synced);
+        assert!(k.checked.is_some());
     }
 
     #[test]

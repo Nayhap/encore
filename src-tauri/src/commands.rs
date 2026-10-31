@@ -185,7 +185,7 @@ pub async fn browse_page(core: S<'_>, browse_id: String, params: Option<String>)
 #[specta::specta]
 pub async fn more_shelves(core: S<'_>, cursor: String) -> Result<Page> {
     let svc = core.service();
-    svc.more_shelves(&svc.context(), &cursor).await
+    core.net(svc.more_shelves(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
@@ -193,14 +193,14 @@ pub async fn more_shelves(core: S<'_>, cursor: String) -> Result<Page> {
 pub async fn search(core: S<'_>, query: String, filter: Option<SearchFilter>) -> Result<SearchResults> {
     core.require_online("search")?;
     let svc = core.service();
-    svc.search(&svc.context(), &query, filter).await
+    core.net(svc.search(&svc.context(), &query, filter).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn search_more(core: S<'_>, cursor: String) -> Result<SearchResults> {
     let svc = core.service();
-    svc.search_more(&svc.context(), &cursor).await
+    core.net(svc.search_more(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
@@ -236,7 +236,7 @@ pub async fn collection(core: S<'_>, id: ItemId) -> Result<Collection> {
 #[specta::specta]
 pub async fn collection_more(core: S<'_>, cursor: String) -> Result<EntriesPage> {
     let svc = core.service();
-    let (entries, cursor) = svc.collection_more(&svc.context(), &cursor).await?;
+    let (entries, cursor) = core.net(svc.collection_more(&svc.context(), &cursor).await)?;
     Ok(EntriesPage { entries, cursor })
 }
 
@@ -262,7 +262,7 @@ pub async fn library(core: S<'_>, section: LibrarySection) -> Result<LibraryPage
 #[specta::specta]
 pub async fn library_more(core: S<'_>, section: LibrarySection, cursor: String) -> Result<LibraryPage> {
     let svc = core.service();
-    svc.library_more(&svc.context(), section, &cursor).await
+    core.net(svc.library_more(&svc.context(), section, &cursor).await)
 }
 
 #[tauri::command]
@@ -308,7 +308,7 @@ pub async fn play_track(core: S<'_>, track: Track) -> Result<()> {
 pub async fn start_radio(core: S<'_>, playlist_id: String, label: String) -> Result<()> {
     core.require_online("start a radio")?;
     let svc = core.service();
-    let u = svc.up_next(&svc.context(), &RadioSeed::Playlist { playlist_id: playlist_id.clone() }, None).await?;
+    let u = core.net(svc.up_next(&svc.context(), &RadioSeed::Playlist { playlist_id: playlist_id.clone() }, None).await)?;
     core.player.play_tracks(u.tracks, 0, Some(QueueSource { label, collection_id: None, radio_playlist: u.playlist_id.or(Some(playlist_id)) }), false)
 }
 
@@ -528,14 +528,14 @@ pub async fn playlist_move(app: AppHandle, core: S<'_>, playlist_id: String, set
 #[specta::specta]
 pub async fn history(core: S<'_>) -> Result<HistoryPage> {
     let svc = core.service();
-    svc.history(&svc.context()).await
+    core.net(svc.history(&svc.context()).await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn history_more(core: S<'_>, cursor: String) -> Result<HistoryPage> {
     let svc = core.service();
-    svc.history_more(&svc.context(), &cursor).await
+    core.net(svc.history_more(&svc.context(), &cursor).await)
 }
 
 #[tauri::command]
@@ -553,7 +553,7 @@ pub async fn history_remove(core: S<'_>, row_ids: Vec<String>) -> Result<Mutatio
 pub async fn counterpart(core: S<'_>, track: Track) -> Result<Option<Counterpart>> {
     core.require_online("switch versions")?;
     let svc = core.service();
-    svc.counterpart(&svc.context(), &track).await
+    core.net(svc.counterpart(&svc.context(), &track).await)
 }
 
 /// Switch a queue entry to its other version. The pair is looked up here,
@@ -635,22 +635,26 @@ pub async fn download_remove(core: S<'_>, track_ids: Vec<ItemId>) -> Result<Down
 #[specta::specta]
 pub async fn download_keep(core: S<'_>, id: ItemId) -> Result<()> {
     let d = downloads(&core)?.clone();
-    core.require_online("download this")?;
+    if !core.connectivity.online() {
+        return Err(AppError::network("You're offline. Encore needs to read the list first, so try again when you're back online."));
+    }
     let svc = core.service();
-    let c = svc.collection(&svc.context(), &id).await?;
+    // The account it is kept for is the one it was read as (D23).
+    let ctx = svc.context();
+    let c = core.net(svc.collection(&ctx, &id).await)?;
     let channel = match core.accounts.state() {
         AuthState::SignedIn { channel, .. } => Some(channel.name),
         _ => None,
     };
-    d.keep(c, channel)
+    d.keep(c, ctx, channel)
 }
 
 /// Stop keeping a collection downloaded. Its songs go, unless something else
 /// keeps them.
 #[tauri::command]
 #[specta::specta]
-pub async fn download_unkeep(core: S<'_>, id: ItemId) -> Result<DownloadRemoved> {
-    downloads(&core)?.unkeep(&id)
+pub async fn download_unkeep(core: S<'_>, id: ItemId, account: Option<String>) -> Result<DownloadRemoved> {
+    downloads(&core)?.unkeep(&id, account.as_deref())
 }
 
 /// "Check for changes": one kept collection, or all of them.
@@ -671,8 +675,8 @@ pub async fn downloads_pause(core: S<'_>, paused: bool) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn download_pause_collection(core: S<'_>, id: ItemId, paused: bool) -> Result<()> {
-    downloads(&core)?.pause_collection(&id, paused)
+pub async fn download_pause_collection(core: S<'_>, id: ItemId, paused: bool, account: Option<String>) -> Result<()> {
+    downloads(&core)?.pause_collection(&id, account.as_deref(), paused)
 }
 
 /// Try failed downloads again, and resume after a bot check or a full disk.
@@ -698,13 +702,12 @@ pub async fn downloads_storage(core: S<'_>) -> Result<DownloadsStorage> {
     tokio::task::spawn_blocking(move || d.storage()).await.map_err(|_| AppError::internal("storage"))
 }
 
-/// Check the connection now (the system said the network changed).
-/// Returns whether Encore is online as far as it knows.
+/// Check the connection now (the system said the network changed, or the
+/// user asked). Returns whether YouTube answered.
 #[tauri::command]
 #[specta::specta]
 pub async fn connectivity_check(core: S<'_>) -> Result<bool> {
-    core.connectivity.check();
-    Ok(core.connectivity.online())
+    Ok(core.connectivity.check_now().await)
 }
 
 // ---------- auth ----------
