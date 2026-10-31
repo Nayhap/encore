@@ -10,7 +10,8 @@
 //!
 //! The [`HistoryReporter`] task feeds it from the player's own events and
 //! sends the pings through a [`PlayReporter`], one at a time. Failures are
-//! logged once and never touch playback.
+//! logged once and never touch playback. Offline nothing is opened or sent,
+//! and a play that started offline is never reported later (D23).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,8 @@ use crate::{Phase, PlayerEvent};
 
 /// Audible seconds before a play counts.
 pub const MIN_HEARD: f64 = 2.0;
+/// Pings waiting to be sent; more are dropped rather than piled up.
+const SEND_QUEUE: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct Listen {
@@ -184,14 +187,20 @@ type Opened = (String, String, Option<Arc<dyn PlayReport>>);
 pub struct HistoryReporter;
 
 impl HistoryReporter {
-    /// Follow the player's events and report plays while `enabled`.
-    /// `on_registered` runs after a play's first ping was accepted.
-    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
-        let (send_tx, mut send_rx) = mpsc::unbounded_channel::<(Arc<dyn PlayReport>, Ping, Option<u32>, ItemId)>();
+    /// Follow the player's events and report plays while `enabled` and
+    /// `online`. `on_registered` runs after a play's first ping was accepted.
+    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, online: Arc<AtomicBool>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
+        let (send_tx, mut send_rx) = mpsc::channel::<(Arc<dyn PlayReport>, Ping, Option<u32>, ItemId)>(SEND_QUEUE);
+        let online2 = online.clone();
         // One ping at a time, in order.
         tokio::spawn(async move {
             let mut failed_for: Option<ItemId> = None;
             while let Some((r, ping, itag, id)) = send_rx.recv().await {
+                // Pings are not kept for later: a play replayed hours after
+                // the fact would be wrong history (D23).
+                if !online2.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let first = matches!(ping, Ping::Playback { .. });
                 match r.send(&ping, itag).await {
                     Ok(()) => {
@@ -208,7 +217,7 @@ impl HistoryReporter {
                 }
             }
         });
-        tokio::spawn(run(events, reporter, enabled, send_tx));
+        tokio::spawn(run(events, reporter, enabled, online, send_tx));
     }
 }
 
@@ -216,7 +225,8 @@ async fn run(
     mut events: broadcast::Receiver<PlayerEvent>,
     reporter: Arc<dyn PlayReporter>,
     enabled: Arc<AtomicBool>,
-    send: mpsc::UnboundedSender<(Arc<dyn PlayReport>, Ping, Option<u32>, ItemId)>,
+    online: Arc<AtomicBool>,
+    send: mpsc::Sender<(Arc<dyn PlayReport>, Ping, Option<u32>, ItemId)>,
 ) {
     let t0 = Instant::now();
     let clock = move || t0.elapsed().as_secs_f64();
@@ -225,7 +235,7 @@ async fn run(
     let ship = |a: &Active, pings: Vec<Ping>| {
         if let ReportState::Open(r) = &a.report {
             for p in pings {
-                let _ = send.send((r.clone(), p, a.itag, a.id.clone()));
+                let _ = send.try_send((r.clone(), p, a.itag, a.id.clone()));
             }
         }
     };
@@ -250,6 +260,13 @@ async fn run(
                     active = None;
                     continue;
                 }
+                let connected = online.load(Ordering::Relaxed);
+                if !connected {
+                    // Offline: this play is not reported, now or later.
+                    if let Some(a) = active.as_mut() {
+                        a.report = ReportState::Off;
+                    }
+                }
                 match ev {
                     PlayerEvent::State(s) => {
                         let Some(cur) = s.current.clone() else {
@@ -259,7 +276,8 @@ async fn run(
                         let same = active.as_ref().is_some_and(|a| a.track_gen == s.track_gen && a.uid == cur.uid);
                         if !same {
                             end(active.take(), now);
-                            active = Some(Active { track_gen: s.track_gen.clone(), uid: cur.uid.clone(), id: cur.track.id.clone(), seek_gen: s.seek_gen.clone(), itag: None, listen: Listen::new(), report: ReportState::Waiting });
+                            let report = if connected { ReportState::Waiting } else { ReportState::Off };
+                            active = Some(Active { track_gen: s.track_gen.clone(), uid: cur.uid.clone(), id: cur.track.id.clone(), seek_gen: s.seek_gen.clone(), itag: None, listen: Listen::new(), report });
                         }
                         let a = active.as_mut().unwrap();
                         if let Some(st) = &s.stream {
@@ -298,8 +316,9 @@ async fn run(
                 }
             }
             Some((tg, uid, res)) = open_rx.recv() => {
-                // A report for a play that has already ended is dropped unsent.
-                let Some(a) = active.as_mut().filter(|a| a.track_gen == tg && a.uid == uid) else { continue };
+                // A report for a play that has already ended (or went
+                // offline meanwhile) is dropped unsent.
+                let Some(a) = active.as_mut().filter(|a| a.track_gen == tg && a.uid == uid && matches!(a.report, ReportState::Opening)) else { continue };
                 if !enabled.load(Ordering::Relaxed) {
                     active = None;
                     continue;
@@ -501,8 +520,29 @@ mod tests {
         let log = Arc::new(Log::default());
         let reg = Arc::new(Mutex::new(Vec::new()));
         let r2 = reg.clone();
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(AtomicBool::new(true)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
         (tx, log, reg)
+    }
+
+    #[tokio::test]
+    async fn offline_plays_are_never_reported() {
+        let (tx, rx) = broadcast::channel(64);
+        let log = Arc::new(Log::default());
+        let online = Arc::new(AtomicBool::new(false));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), online.clone(), Arc::new(|_: &ItemId| {}));
+        tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=6 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        // Back online halfway through the same play: still nothing.
+        online.store(true, Ordering::Relaxed);
+        for i in 7..=12 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        assert!(log.opened.lock().is_empty());
+        assert!(log.pings.lock().is_empty());
     }
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(60)).await;

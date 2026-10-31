@@ -1,5 +1,9 @@
 //! The service abstraction (D2) and the stream resolver seam (D3).
 
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -42,6 +46,13 @@ pub trait MusicService: Send + Sync {
     async fn suggestions(&self, ctx: &RequestContext, query: &str) -> Result<Vec<String>>;
     async fn collection(&self, ctx: &RequestContext, id: &ItemId) -> Result<Collection>;
     async fn collection_more(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, Option<String>)>;
+    /// Like `collection_more`, but tells a real end of the list from one
+    /// that stopped making progress (D23: removals are only applied after a
+    /// list that really ended).
+    async fn collection_more_checked(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, More)> {
+        let (entries, next) = self.collection_more(ctx, cursor).await?;
+        Ok((entries, next.map(More::Next).unwrap_or(More::Ended)))
+    }
     async fn artist(&self, ctx: &RequestContext, id: &ItemId) -> Result<Artist>;
     async fn library(&self, ctx: &RequestContext, section: LibrarySection) -> Result<LibraryPage>;
     async fn library_more(&self, ctx: &RequestContext, section: LibrarySection, cursor: &str) -> Result<LibraryPage>;
@@ -92,6 +103,77 @@ pub trait MusicService: Send + Sync {
 
 fn unsupported() -> crate::error::AppError {
     crate::error::AppError::new(crate::error::ErrorCode::Unsupported, "This service does not support that.")
+}
+
+/// Where a collection's next page leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum More {
+    /// Another page, behind this cursor.
+    Next(String),
+    /// The list ended.
+    Ended,
+    /// The service repeated its continuation or sent an empty page that
+    /// still had one: the list may be longer than what arrived.
+    Stalled,
+}
+
+// ---------- downloads (D23) ----------
+
+/// A downloaded song, ready to play from disk.
+#[derive(Clone, Debug)]
+pub struct LocalFile {
+    pub path: PathBuf,
+    pub itag: u32,
+    pub codec: String,
+    pub kbps: Option<u32>,
+    pub bytes: u64,
+    pub duration: Option<f64>,
+    pub loudness_db: Option<f32>,
+}
+
+/// What the player asks of the downloads (D23). Songs are kept per device,
+/// whoever downloaded them.
+pub trait LocalAudio: Send + Sync {
+    /// The file of a downloaded song, checked on disk.
+    fn lookup(&self, video_id: &str) -> Option<LocalFile>;
+    /// Whether a song is downloaded, without touching the disk.
+    fn has(&self, video_id: &str) -> bool;
+    /// The saved order of a kept collection, `account`'s copy first.
+    fn collection(&self, account: &str, id: &ItemId) -> Option<Collection>;
+}
+
+/// The service's loudness of a song (`loudnessDb`), for normalisation.
+#[async_trait]
+pub trait LoudnessSource: Send + Sync {
+    async fn loudness(&self, id: &ItemId) -> Result<Option<f32>>;
+}
+
+/// Counts the stream resolves playback is waiting on (playing, preloading).
+/// Background work such as downloads waits until it is idle, so pressing
+/// play is never slowed by the download queue (D23).
+#[derive(Debug, Default)]
+pub struct PlaybackGate {
+    busy: AtomicUsize,
+}
+
+impl PlaybackGate {
+    pub fn enter(self: &Arc<Self>) -> GateGuard {
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        GateGuard(self.clone())
+    }
+
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// Held while a playback resolve runs.
+pub struct GateGuard(Arc<PlaybackGate>);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.busy.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 // ---------- play reporting (history) ----------
@@ -281,6 +363,18 @@ mod tests {
         let s = FlushSchedule { at: vec![], every: 30.0 };
         assert_eq!(s.due(0), 30.0);
         assert_eq!(s.due(1), 60.0);
+    }
+
+    #[test]
+    fn the_gate_is_busy_while_a_guard_lives() {
+        let g = Arc::new(PlaybackGate::default());
+        assert!(!g.busy());
+        let a = g.enter();
+        let b = g.enter();
+        drop(a);
+        assert!(g.busy());
+        drop(b);
+        assert!(!g.busy());
     }
 
     #[test]

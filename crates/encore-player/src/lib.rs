@@ -2,20 +2,26 @@
 //! (D5), resolves streams (D3/D4), preloads the next track 20 s before the end,
 //! extends the queue from radio when autoplay is on, and publishes revisioned
 //! state, queue splices and 2 Hz position anchors (D13).
+//!
+//! Downloaded songs play from disk before anything is resolved. Offline,
+//! every step (next, previous, natural end, preload) passes over songs that
+//! aren't downloaded, using one rule (`avail`), and radio waits (D23).
 
 pub mod history;
 pub mod types;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use encore_audio::{AudioCache, Engine, EngineEvent, HttpSpec, SourceSpec};
-use encore_core::error::{AppError, Result};
+use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
 use encore_core::queue::{Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
-use encore_core::service::{MusicService, PlayFailure, PlayFailureKind, PlayReporter, ResolveAuth, ResolvedStream, StreamResolver};
+use encore_core::redact::Secret;
+use encore_core::service::{LocalAudio, MusicService, PlayFailure, PlayFailureKind, PlayReporter, PlaybackGate, ResolveAuth, ResolvedStream, StreamResolver};
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
@@ -28,6 +34,7 @@ const SHUFFLE_ENUM_LIMIT: usize = 10_000;
 /// How long a newly chosen song must stay chosen before its stream is
 /// resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
+const NOTHING_OFFLINE: &str = "You're offline, and nothing else in the queue is downloaded.";
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
 
@@ -83,6 +90,11 @@ pub struct Player {
     cache: Option<AudioCache>,
     /// Report plays to the service's history (a user setting, D18).
     reporting: Arc<AtomicBool>,
+    /// Downloaded songs (D23).
+    local: Mutex<Option<Arc<dyn LocalAudio>>>,
+    online: Arc<AtomicBool>,
+    /// Held while a play or preload resolves; downloads wait for it.
+    gate: Arc<PlaybackGate>,
 }
 
 fn s(n: u64) -> String {
@@ -134,6 +146,9 @@ impl Player {
             preloaded_streams: Mutex::new(HashMap::new()),
             cache: cache_for_player,
             reporting: Arc::new(AtomicBool::new(false)),
+            local: Mutex::new(None),
+            online: Arc::new(AtomicBool::new(true)),
+            gate: Arc::new(PlaybackGate::default()),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -170,10 +185,95 @@ impl Player {
         self.tx.subscribe()
     }
 
-    /// Report plays through `reporter` from now on (while the setting is on).
+    /// Report plays through `reporter` from now on (while the setting is on
+    /// and Encore is online).
     pub fn report_history(&self, reporter: Arc<dyn PlayReporter>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let _guard = self.rt.enter();
-        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), on_registered);
+        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.online.clone(), on_registered);
+    }
+
+    /// Play downloaded songs from disk (D23).
+    pub fn set_local_audio(&self, local: Arc<dyn LocalAudio>) {
+        *self.local.lock() = Some(local);
+    }
+
+    /// Offline, only downloaded songs play and radio waits (D23).
+    pub fn set_online(self: &Arc<Self>, on: bool) {
+        let was = self.online.swap(on, Ordering::SeqCst);
+        if was == on {
+            return;
+        }
+        if on {
+            // Radio gets another chance once the connection is back.
+            self.st.lock().radio_empty = 0;
+        }
+        self.check_preload();
+        self.publish(false);
+    }
+
+    pub fn online(&self) -> bool {
+        self.online.load(Ordering::SeqCst)
+    }
+
+    pub fn gate(&self) -> Arc<PlaybackGate> {
+        self.gate.clone()
+    }
+
+    /// The one rule for what can play now: anything online; offline, only
+    /// downloaded songs.
+    fn avail(&self) -> impl Fn(&Track) -> bool {
+        let online = self.online();
+        let local = self.local.lock().clone();
+        move |t: &Track| online || local.as_ref().is_some_and(|l| l.has(t.id.remote()))
+    }
+
+    /// Say how many songs a step passed over for not being downloaded.
+    fn note_passed(&self, n: usize) {
+        if n > 0 {
+            let text = if n == 1 { "Skipped a song that isn't downloaded.".to_string() } else { format!("Skipped {n} songs that aren't downloaded.") };
+            let _ = self.tx.send(PlayerEvent::Notice(text));
+        }
+    }
+
+    /// A file to play `vid` from without resolving: a download first, then
+    /// the playback cache.
+    fn local_source(&self, vid: &str) -> Option<(ResolvedStream, PathBuf)> {
+        let local = self.local.lock().clone();
+        if let Some(f) = local.and_then(|l| l.lookup(vid)) {
+            let s = ResolvedStream {
+                video_id: vid.into(),
+                url: Secret::new(String::new()),
+                headers: vec![],
+                itag: f.itag,
+                codec: f.codec.clone(),
+                mime: String::new(),
+                bitrate_kbps: f.kbps,
+                content_length: Some(f.bytes),
+                duration: f.duration,
+                loudness_db: f.loudness_db,
+                expires_at: None,
+                range_safe: true,
+                authenticated: false,
+            };
+            return Some((s, f.path));
+        }
+        let (path, itag) = self.cache.as_ref()?.find_video(vid)?;
+        let s = ResolvedStream {
+            video_id: vid.into(),
+            url: Secret::new(String::new()),
+            headers: vec![],
+            itag,
+            codec: if matches!(itag, 249 | 250 | 251 | 774) { "opus".into() } else { "aac".into() },
+            mime: String::new(),
+            bitrate_kbps: None,
+            content_length: std::fs::metadata(&path).ok().map(|m| m.len()),
+            duration: None,
+            loudness_db: None,
+            expires_at: None,
+            range_safe: true,
+            authenticated: false,
+        };
+        Some((s, path))
     }
 
     pub fn set_reporting(&self, on: bool) {
@@ -375,37 +475,31 @@ impl Player {
                     None => None,
                 }
             };
-            let auth = (me.auth)();
             let t0 = Instant::now();
-            // A fully cached file plays at once, without resolving a URL.
-            let cached = me.cache.as_ref().and_then(|c| c.find_video(&vid));
+            // A downloaded or fully cached file plays at once, without
+            // resolving a URL (and without the player components, D22).
+            let local = me.local_source(&vid);
+            if local.is_none() && !me.online() {
+                me.skip_unavailable(my_gen).await;
+                return;
+            }
             // Pressing Next several times in a row used to resolve every song
             // passed over, one after another (seconds each, two at a time),
             // so the song the user stopped on started last. Wait a moment
             // and give up if another song was chosen meanwhile.
-            if cached.is_none() && promoted.is_none() {
+            if local.is_none() && promoted.is_none() {
                 tokio::time::sleep(SKIP_SETTLE).await;
                 if me.st.lock().track_gen != my_gen {
                     return;
                 }
             }
-            let res = match cached {
-                Some((path, itag)) => Ok(ResolvedStream {
-                    video_id: vid.clone(),
-                    url: encore_core::redact::Secret::new(String::new()),
-                    headers: vec![],
-                    itag,
-                    codec: if matches!(itag, 249 | 250 | 251 | 774) { "opus".into() } else { "aac".into() },
-                    mime: String::new(),
-                    bitrate_kbps: None,
-                    content_length: std::fs::metadata(&path).ok().map(|m| m.len()),
-                    duration: None,
-                    loudness_db: None,
-                    expires_at: None,
-                    range_safe: true,
-                    authenticated: false,
-                }),
-                None => me.resolver.resolve(&vid, auth.as_ref()).await,
+            let (res, path) = match local {
+                Some((s, p)) => (Ok(s), Some(p)),
+                None => {
+                    let auth = (me.auth)();
+                    let _busy = me.gate.enter();
+                    (me.resolver.resolve(&vid, auth.as_ref()).await, None)
+                }
             };
             match &res {
                 Ok(s) => tracing::info!(video = %vid, ms = t0.elapsed().as_millis() as u64, itag = s.itag, codec = %s.codec, range_safe = s.range_safe, authenticated = s.authenticated, "resolved"),
@@ -420,8 +514,8 @@ impl Player {
                     Ok(stream) => {
                         let load_id = promoted.unwrap_or_else(|| me.next_load.fetch_add(1, Ordering::Relaxed));
                         let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
-                        let spec = match &cached_path_of(&me, &stream) {
-                            Some(p) => SourceSpec::File(p.clone()),
+                        let spec = match path {
+                            Some(p) => SourceSpec::File(p),
                             None => me.http_spec(&stream),
                         };
                         st.decks.insert(load_id, uid.clone());
@@ -483,11 +577,42 @@ impl Player {
         } else if autoskip {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Skipped “{title}”: {}", f.message)));
             tokio::time::sleep(Duration::from_millis(600)).await;
-            let step = self.st.lock().queue.next();
+            let ok = self.avail();
+            let step = self.st.lock().queue.next_where(&ok);
             self.apply_step(step, true).await;
         } else if skips >= MAX_AUTO_SKIPS {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Stopped after {MAX_AUTO_SKIPS} songs in a row could not play: {}", f.message)));
         }
+    }
+
+    /// Offline, the current song isn't downloaded: go on to the next one
+    /// that is. Not a failure of the song, so it doesn't count toward D4's
+    /// three skips. With nothing left to play, stop with one message.
+    async fn skip_unavailable(self: &Arc<Self>, my_gen: u64) {
+        let (step, title, passed) = {
+            let mut st = self.st.lock();
+            if st.track_gen != my_gen {
+                return;
+            }
+            let title = st.queue.current().map(|c| c.track.title.clone()).unwrap_or_default();
+            let ok = self.avail();
+            let step = st.queue.next_where(&ok);
+            (step, title, st.queue.passed())
+        };
+        if let Step::Play(_) = step {
+            let text = if passed == 0 { format!("Skipped “{title}”: it isn't downloaded.") } else { format!("Skipped {} songs that aren't downloaded.", passed + 1) };
+            let _ = self.tx.send(PlayerEvent::Notice(text));
+            self.play_current(0.0);
+            return;
+        }
+        {
+            let mut st = self.st.lock();
+            st.phase = Phase::Error;
+            st.loaded = None;
+            st.error = Some(PlayFailure::new(PlayFailureKind::Network, NOTHING_OFFLINE));
+        }
+        self.publish(false);
+        let _ = self.tx.send(PlayerEvent::Notice(NOTHING_OFFLINE.into()));
     }
 
     async fn apply_step(self: &Arc<Self>, step: Step, natural: bool) {
@@ -505,9 +630,10 @@ impl Player {
             }
             Step::NeedRadio => {
                 let added = self.fetch_radio().await;
+                let ok = self.avail();
                 let step = {
                     let mut st = self.st.lock();
-                    if added > 0 { st.queue.next() } else { Step::End }
+                    if added > 0 { st.queue.next_where(&ok) } else { Step::End }
                 };
                 if let Step::Play(_) = step {
                     self.play_current(0.0);
@@ -531,6 +657,10 @@ impl Player {
 
     /// Pull more tracks from the radio / up-next endpoint (autoplay).
     async fn fetch_radio(self: &Arc<Self>) -> usize {
+        // Offline, radio waits for the connection (D23).
+        if !self.online() {
+            return 0;
+        }
         let (seed, cursor) = {
             let mut st = self.st.lock();
             if st.radio_loading || st.radio_empty >= 3 {
@@ -588,8 +718,9 @@ impl Player {
         let (phase, pos, dur, upcoming, need_radio) = {
             let st = self.st.lock();
             let snap = self.snapshot_locked(&st);
-            let up = st.queue.upcoming().cloned();
-            let need_radio = st.queue.autoplay && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading;
+            let ok = self.avail();
+            let up = st.queue.upcoming_where(&ok).cloned();
+            let need_radio = st.queue.autoplay && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading && self.online();
             (st.phase, snap.position, snap.duration, up, need_radio)
         };
         if matches!(phase, Phase::Playing | Phase::Buffering) {
@@ -618,30 +749,21 @@ impl Player {
     }
 
     async fn preload(self: &Arc<Self>, entry: QueueEntry) {
-        let auth = (self.auth)();
         let vid = entry.track.id.remote().to_string();
-        let res = match self.cache.as_ref().and_then(|c| c.find_video(&vid)) {
-            Some((_, itag)) => Ok(ResolvedStream {
-                video_id: vid.clone(),
-                url: encore_core::redact::Secret::new(String::new()),
-                headers: vec![],
-                itag,
-                codec: if matches!(itag, 249 | 250 | 251 | 774) { "opus".into() } else { "aac".into() },
-                mime: String::new(),
-                bitrate_kbps: None,
-                content_length: None,
-                duration: None,
-                loudness_db: None,
-                expires_at: None,
-                range_safe: true,
-                authenticated: false,
-            }),
-            None => self.resolver.resolve(&vid, auth.as_ref()).await,
+        let (res, path) = match self.local_source(&vid) {
+            Some((s, p)) => (Ok(s), Some(p)),
+            None if !self.online() => (Err(PlayFailure::new(PlayFailureKind::Network, "offline")), None),
+            None => {
+                let auth = (self.auth)();
+                let _busy = self.gate.enter();
+                (self.resolver.resolve(&vid, auth.as_ref()).await, None)
+            }
         };
+        let ok = self.avail();
         let mut st = self.st.lock();
         st.preloading = false;
         // Still the right entry to come next?
-        if st.queue.upcoming().map(|u| u.uid.as_str()) != Some(entry.uid.as_str()) {
+        if st.queue.upcoming_where(&ok).map(|u| u.uid.as_str()) != Some(entry.uid.as_str()) {
             return;
         }
         if let Ok(stream) = res {
@@ -649,7 +771,7 @@ impl Player {
             st.decks.insert(load_id, entry.uid.clone());
             st.preload = Some((entry.uid.clone(), load_id));
             let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
-            let spec = match cached_path_of(self, &stream) {
+            let spec = match path {
                 Some(p) => SourceSpec::File(p),
                 None => self.http_spec(&stream),
             };
@@ -664,21 +786,26 @@ impl Player {
     /// explicit Next does not wait for extraction and the server's
     /// "available at" delay.
     fn warm_upcoming(self: &Arc<Self>) {
+        if !self.online() {
+            return;
+        }
         let Some(up) = self.st.lock().queue.upcoming().cloned() else { return };
-        if self.cache.as_ref().is_some_and(|c| c.find_video(up.track.id.remote()).is_some()) {
+        if self.local_source(up.track.id.remote()).is_some() {
             return;
         }
         let me = self.clone();
         tokio::spawn(async move {
             let auth = (me.auth)();
+            let _busy = me.gate.enter();
             let _ = me.resolver.resolve(up.track.id.remote(), auth.as_ref()).await;
         });
     }
 
     /// Drop a preload that no longer matches what comes next.
     fn check_preload(&self) {
+        let ok = self.avail();
         let mut st = self.st.lock();
-        let up = st.queue.upcoming().map(|u| u.uid.clone());
+        let up = st.queue.upcoming_where(&ok).map(|u| u.uid.clone());
         if let Some((puid, _)) = &st.preload {
             if Some(puid) != up.as_ref() {
                 st.preload = None;
@@ -730,13 +857,15 @@ impl Player {
             }
             EngineEvent::Advanced { from, to } => {
                 // The preloaded deck took over at the natural end.
-                let ok = {
+                let avail = self.avail();
+                let (ok, passed) = {
                     let mut st = self.st.lock();
                     if st.loaded.as_ref().map(|l| l.load_id) != Some(from) {
-                        false
+                        (false, 0)
                     } else {
                         let next_uid = st.decks.get(&to).cloned();
-                        let step = st.queue.on_ended();
+                        let step = st.queue.on_ended_where(&avail);
+                        let passed = st.queue.passed();
                         let now_uid = st.queue.current().map(|c| c.uid.clone());
                         st.preload = None;
                         if matches!(step, Step::Play(_)) && now_uid == next_uid {
@@ -748,12 +877,13 @@ impl Player {
                             let stream = self.preloaded_streams.lock().remove(&to);
                             st.last_duration = stream.as_ref().and_then(|s| s.duration).or(st.queue.current().and_then(|c| c.track.duration));
                             st.loaded = stream.map(|stream| Loaded { load_id: to, uid: now_uid.clone().unwrap_or_default(), stream, from_cache: false });
-                            true
+                            (true, passed)
                         } else {
-                            false
+                            (false, passed)
                         }
                     }
                 };
+                self.note_passed(passed);
                 if ok {
                     self.publish(false);
                     self.send_anchor();
@@ -764,13 +894,15 @@ impl Player {
                 }
             }
             EngineEvent::Ended { id } => {
-                let step = {
+                let avail = self.avail();
+                let (step, passed) = {
                     let mut st = self.st.lock();
                     if st.loaded.as_ref().map(|l| l.load_id) != Some(id) {
                         return;
                     }
-                    st.queue.on_ended()
+                    (st.queue.on_ended_where(&avail), st.queue.passed())
                 };
+                self.note_passed(passed);
                 self.apply_step(step, true).await;
             }
             EngineEvent::Failed { id, error } => {
@@ -824,8 +956,16 @@ impl Player {
     /// background. With shuffle, the whole collection (bounded) is enumerated
     /// first so shuffle covers every song (D6).
     pub async fn play_collection(self: &Arc<Self>, id: &ItemId, start: usize, shuffle: bool) -> Result<()> {
+        if !self.online() {
+            return self.play_kept(id, start, shuffle);
+        }
         let ctx = self.service.context();
-        let c = self.service.collection(&ctx, id).await?;
+        let c = match self.service.collection(&ctx, id).await {
+            Ok(c) => c,
+            // The connection went: a kept copy still plays.
+            Err(e) if e.code == ErrorCode::Network => return self.play_kept(id, start, shuffle).map_err(|_| e),
+            Err(e) => return Err(e),
+        };
         let mut entries = c.entries.clone();
         let mut cursor = c.cursor.clone();
         let src = QueueSource { label: c.title.clone(), collection_id: Some(id.as_str().to_string()), radio_playlist: c.playlist_id.clone().map(|p| if p.starts_with("RD") { p } else { format!("RDAMPL{p}") }) };
@@ -874,6 +1014,30 @@ impl Player {
             });
         }
         Ok(())
+    }
+
+    /// Play the saved order of a kept collection, as much of it as is
+    /// downloaded (D23). `start` is a row of the full list.
+    fn play_kept(self: &Arc<Self>, id: &ItemId, start: usize, shuffle: bool) -> Result<()> {
+        let local = self.local.lock().clone().ok_or_else(|| AppError::network("You're offline. Connect to the internet to play this."))?;
+        let account = self.service.context().account;
+        let c = local.collection(&account, id).ok_or_else(|| AppError::network("You're offline, and this isn't downloaded. Connect to the internet to play it."))?;
+        let here: Vec<bool> = c.entries.iter().map(|e| local.has(e.track.id.remote())).collect();
+        let tracks: Vec<Track> = c.entries.iter().zip(&here).filter(|(_, h)| **h).map(|(e, _)| e.track.clone()).collect();
+        if tracks.is_empty() {
+            return Err(AppError::network("None of these songs are downloaded yet. Connect to the internet to play them."));
+        }
+        let start = if shuffle {
+            (rand_seed() as usize) % tracks.len()
+        } else if here.get(start).copied().unwrap_or(false) {
+            here[..start].iter().filter(|h| **h).count()
+        } else if start == 0 {
+            0
+        } else {
+            return Err(AppError::network("This song isn't downloaded. Connect to the internet to play it."));
+        };
+        let src = QueueSource { label: c.title.clone(), collection_id: Some(id.as_str().to_string()), radio_playlist: None };
+        self.play_tracks(tracks, start, Some(src), shuffle)
     }
 
     /// Play one track; without context, start its radio.
@@ -945,17 +1109,24 @@ impl Player {
     }
 
     pub async fn next(self: &Arc<Self>) {
-        let step = {
+        let ok = self.avail();
+        let (step, passed) = {
             let mut st = self.st.lock();
             st.skips = 0;
-            st.queue.next()
+            (st.queue.next_where(&ok), st.queue.passed())
         };
+        self.note_passed(passed);
         self.apply_step(step, false).await;
     }
 
     pub async fn prev(self: &Arc<Self>) {
         let pos = self.snapshot().position;
-        let step = self.st.lock().queue.prev(pos);
+        let ok = self.avail();
+        let (step, passed) = {
+            let mut st = self.st.lock();
+            (st.queue.prev_where(pos, &ok), st.queue.passed())
+        };
+        self.note_passed(passed);
         self.apply_step(step, false).await;
     }
 
@@ -1181,14 +1352,6 @@ impl Player {
     pub fn queue_clone(&self) -> Queue {
         self.st.lock().queue.clone()
     }
-}
-
-/// The cached file for a synthetic (cache-hit) stream.
-fn cached_path_of(p: &Player, s: &ResolvedStream) -> Option<std::path::PathBuf> {
-    if !s.url.expose().is_empty() {
-        return None;
-    }
-    p.cache.as_ref().and_then(|c| c.find_video(&s.video_id)).map(|x| x.0)
 }
 
 fn rand_seed() -> u64 {
