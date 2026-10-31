@@ -1,6 +1,7 @@
 //! `art://localhost/<key>?s=<size>` (D14): opaque keys, allow-listed hosts,
 //! size/MIME limits, disk LRU, dominant hue computed once. The same cached
-//! file feeds macOS Now Playing.
+//! file feeds macOS Now Playing. Covers of downloaded songs are kept apart,
+//! out of the LRU, and answer every size when the network can't (D23).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ type HueHook = Box<dyn Fn(&str, u16, u16) + Send + Sync>;
 
 pub struct ArtCache {
     dir: PathBuf,
+    /// `<downloads>/art`: one 544 px cover per key, kept by the downloads.
+    kept: Option<PathBuf>,
     store: Arc<Store>,
     http: reqwest::Client,
     on_hue: Mutex<Option<HueHook>>,
@@ -78,13 +81,13 @@ pub fn hues(bytes: &[u8]) -> Option<(u16, u16)> {
 }
 
 impl ArtCache {
-    pub fn new(dir: PathBuf, store: Arc<Store>) -> Self {
+    pub fn new(dir: PathBuf, store: Arc<Store>, kept: Option<PathBuf>) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(8)).timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::custom(|a| {
             // Follow only redirects that stay on allow-listed hosts.
             if a.previous().len() < 3 && a.url().scheme() == "https" && a.url().host_str().is_some_and(art::host_allowed) { a.follow() } else { a.stop() }
         })).build().expect("http");
-        Self { dir, store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
+        Self { dir, kept, store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
     }
 
     pub fn on_hue(&self, f: impl Fn(&str, u16, u16) + Send + Sync + 'static) {
@@ -95,8 +98,20 @@ impl ArtCache {
         key.len() == 20 && key.chars().all(|c| c.is_ascii_hexdigit())
     }
 
+    /// The file for a key: the cached one, else a downloaded song's cover.
     pub fn path_for(&self, key: &str, size: u32) -> Option<PathBuf> {
-        Self::valid_key(key).then(|| self.dir.join(format!("{key}-{}", snap_size(size))))
+        if !Self::valid_key(key) {
+            return None;
+        }
+        let cached = self.dir.join(format!("{key}-{}", snap_size(size)));
+        if cached.exists() {
+            return Some(cached);
+        }
+        Some(self.kept_path(key).filter(|p| p.exists()).unwrap_or(cached))
+    }
+
+    fn kept_path(&self, key: &str) -> Option<PathBuf> {
+        self.kept.as_ref().map(|d| d.join(key))
     }
 
     /// Bytes and MIME type for an art key at (at least) `size` pixels.
@@ -114,6 +129,25 @@ impl ArtCache {
                 return Ok((b, m));
             }
         }
+        // A downloaded song's cover: enough for anything up to 544 px, and
+        // for every size when the network can't answer.
+        let kept = match self.kept_path(key) {
+            Some(p) => tokio::fs::read(&p).await.ok().and_then(|b| mime_of(&b).map(|m| (b, m))),
+            None => None,
+        };
+        if size <= 544 {
+            if let Some(k) = kept {
+                return Ok(k);
+            }
+            return self.fetch(key, size, &path).await;
+        }
+        match self.fetch(key, size, &path).await {
+            Ok(x) => Ok(x),
+            Err(e) => kept.ok_or(e),
+        }
+    }
+
+    async fn fetch(&self, key: &str, size: u32, path: &std::path::Path) -> Result<(Vec<u8>, &'static str), String> {
         let entry = art::lookup(key).ok_or("unknown art key")?;
         let url = art::sized_url(&entry.base, size);
         let u = url::Url::parse(&url).map_err(|_| "bad art url")?;
@@ -138,7 +172,7 @@ impl ArtCache {
         }
         let tmp = path.with_extension("tmp");
         if tokio::fs::write(&tmp, &b).await.is_ok() {
-            let _ = tokio::fs::rename(&tmp, &path).await;
+            let _ = tokio::fs::rename(&tmp, path).await;
         }
         // Hue once per key; persist the key → URL mapping and hue.
         if entry.hue.is_none() {
@@ -197,6 +231,14 @@ pub fn parse_request(uri: &str) -> Option<(String, u32)> {
     let key = u.path().trim_start_matches('/').to_string();
     let size = u.query_pairs().find(|(k, _)| k == "s").and_then(|(_, v)| v.parse().ok()).unwrap_or(544);
     Some((key, size))
+}
+
+/// Downloads keep the cover the app shows (D23).
+#[async_trait::async_trait]
+impl encore_downloads::ArtSource for ArtCache {
+    async fn cover(&self, key: &str) -> Option<Vec<u8>> {
+        self.get(key, 544).await.ok().map(|(b, _)| b)
+    }
 }
 
 #[cfg(test)]

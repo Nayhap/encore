@@ -31,6 +31,7 @@ export const commands = {
 	search: (query: string, filter: SearchFilter | null) => typedError<SearchResults_Serialize, AppError_Serialize>(__TAURI_INVOKE("search", { query, filter })),
 	searchMore: (cursor: string) => typedError<SearchResults_Serialize, AppError_Serialize>(__TAURI_INVOKE("search_more", { cursor })),
 	suggestions: (query: string) => typedError<string[], AppError_Serialize>(__TAURI_INVOKE("suggestions", { query })),
+	/**  Offline, a kept collection shows its saved order, all of it (D23). */
 	collection: (id: ItemId) => typedError<Collection_Serialize, AppError_Serialize>(__TAURI_INVOKE("collection", { id })),
 	collectionMore: (cursor: string) => typedError<EntriesPage_Serialize, AppError_Serialize>(__TAURI_INVOKE("collection_more", { cursor })),
 	artist: (id: ItemId) => typedError<Artist_Serialize, AppError_Serialize>(__TAURI_INVOKE("artist", { id })),
@@ -88,9 +89,41 @@ export const commands = {
 	importBrowser: (profileId: string) => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("import_browser", { profileId })),
 	selectChannel: (key: string) => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("select_channel", { key })),
 	reloadChannels: () => typedError<AccountChannel_Serialize[], AppError_Serialize>(__TAURI_INVOKE("reload_channels")),
+	/**
+	 *  Downloads stay: they belong to this computer, and the account's kept
+	 *  collections wait until it signs in again (D23).
+	 */
 	signOut: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sign_out")),
 	beginSignin: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("begin_signin")),
 	cancelSignin: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("cancel_signin")),
+	/**  Everything about downloads at once: counts, songs, kept collections. */
+	downloadsSnapshot: () => typedError<DownloadsSnapshot_Serialize, AppError_Serialize>(__TAURI_INVOKE("downloads_snapshot")),
+	/**  Download songs. Returns how many are waiting now. */
+	downloadTracks: (tracks: Track_Deserialize[]) => typedError<number, AppError_Serialize>(__TAURI_INVOKE("download_tracks", { tracks })),
+	/**  Remove downloaded songs. Songs a kept collection needs stay. */
+	downloadRemove: (trackIds: ItemId[]) => typedError<DownloadRemoved, AppError_Serialize>(__TAURI_INVOKE("download_remove", { trackIds })),
+	/**  Keep a playlist, album or liked songs downloaded and up to date. */
+	downloadKeep: (id: ItemId) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("download_keep", { id })),
+	/**
+	 *  Stop keeping a collection downloaded. Its songs go, unless something else
+	 *  keeps them.
+	 */
+	downloadUnkeep: (id: ItemId) => typedError<DownloadRemoved, AppError_Serialize>(__TAURI_INVOKE("download_unkeep", { id })),
+	/**  "Check for changes": one kept collection, or all of them. */
+	downloadsSync: (id: ItemId | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_sync", { id })),
+	downloadsPause: (paused: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_pause", { paused })),
+	downloadPauseCollection: (id: ItemId, paused: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("download_pause_collection", { id, paused })),
+	/**  Try failed downloads again, and resume after a bot check or a full disk. */
+	downloadsRetry: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_retry")),
+	/**  Delete every download from this computer, for every account. */
+	downloadsRemoveAll: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_remove_all")),
+	/**  Settings → Downloads, measured on disk. */
+	downloadsStorage: () => typedError<DownloadsStorage, AppError_Serialize>(__TAURI_INVOKE("downloads_storage")),
+	/**
+	 *  Check the connection now (the system said the network changed).
+	 *  Returns whether Encore is online as far as it knows.
+	 */
+	connectivityCheck: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("connectivity_check")),
 	/**
 	 *  Windows 11 snap layouts: the flyout normally appears when the pointer
 	 *  rests on the native maximise button, which Encore doesn't have. Pressing
@@ -114,6 +147,9 @@ export const commands = {
 export const events = {
 	artHueEvent: makeEvent<ArtHueEvent, ArtHueEvent>("art-hue-event"),
 	authEvent: makeEvent<AuthEvent_Serialize, AuthEvent_Deserialize>("auth-event"),
+	connectivityEvent: makeEvent<ConnectivityEvent, ConnectivityEvent>("connectivity-event"),
+	downloadItemEvent: makeEvent<DownloadItemEvent_Serialize, DownloadItemEvent_Deserialize>("download-item-event"),
+	downloadsEvent: makeEvent<DownloadsEvent_Serialize, DownloadsEvent_Deserialize>("downloads-event"),
 	historyEvent: makeEvent<HistoryEvent, HistoryEvent>("history-event"),
 	lyricsEvent: makeEvent<LyricsEvent_Serialize, LyricsEvent_Deserialize>("lyrics-event"),
 	noticeEvent: makeEvent<NoticeEvent_Serialize, NoticeEvent_Deserialize>("notice-event"),
@@ -149,6 +185,25 @@ export type AccountChannel_Serialize = {
 	authUser: number,
 	isBrand: boolean,
 	photo: ArtRef_Serialize | null,
+};
+
+/**  The song being downloaded right now. */
+export type ActiveDownload = ActiveDownload_Serialize | ActiveDownload_Deserialize;
+
+/**  The song being downloaded right now. */
+export type ActiveDownload_Deserialize = {
+	trackId: ItemId,
+	attempt: string,
+	bytes: number | null,
+	total?: number | null,
+};
+
+/**  The song being downloaded right now. */
+export type ActiveDownload_Serialize = {
+	trackId: ItemId,
+	attempt: string,
+	bytes: number | null,
+	total: number | null,
 };
 
 export type AppError = AppError_Serialize | AppError_Deserialize;
@@ -285,6 +340,8 @@ export type Bootstrap_Deserialize = {
 	reportHistory: boolean,
 	/**  Something from startup the user should know (shown once). */
 	notice?: string | null,
+	/**  Encore can reach YouTube (D23). */
+	online: boolean,
 };
 
 export type Bootstrap_Serialize = {
@@ -298,6 +355,8 @@ export type Bootstrap_Serialize = {
 	reportHistory: boolean,
 	/**  Something from startup the user should know (shown once). */
 	notice: string | null,
+	/**  Encore can reach YouTube (D23). */
+	online: boolean,
 };
 
 export type BrowserProfile = {
@@ -436,6 +495,11 @@ export type ComponentInfo_Serialize = {
 	ready: boolean,
 };
 
+/**  The connection was lost, or came back. */
+export type ConnectivityEvent = {
+	online: boolean,
+};
+
 /**
  *  The other version of a track (song ↔ music video), with the timeline map
  *  when the service gives one.
@@ -486,6 +550,176 @@ export type Credit_Deserialize = {
 export type Credit_Serialize = {
 	name: string,
 	id: ItemId | null,
+};
+
+/**  One downloaded, or downloading, song. */
+export type DownloadItem = DownloadItem_Serialize | DownloadItem_Deserialize;
+
+/**  One download changed state. */
+export type DownloadItemEvent = DownloadItemEvent_Serialize | DownloadItemEvent_Deserialize;
+
+/**  One download changed state. */
+export type DownloadItemEvent_Deserialize = {
+	/**  The downloads revision this change made. */
+	revision: string,
+	item: DownloadItem_Deserialize,
+};
+
+/**  One download changed state. */
+export type DownloadItemEvent_Serialize = {
+	/**  The downloads revision this change made. */
+	revision: string,
+	item: DownloadItem_Serialize,
+};
+
+/**  One downloaded, or downloading, song. */
+export type DownloadItem_Deserialize = {
+	track: Track_Deserialize,
+	state: DownloadState,
+	/**  Why it failed, as a sentence. */
+	error?: string | null,
+	/**  Size on disk once downloaded. */
+	bytes: number | null,
+	codec?: string | null,
+	kbps?: number | null,
+	itag?: number | null,
+	/**  Unix seconds when it was asked for. */
+	added: number | null,
+	/**  Bumps on every change of this song. */
+	version: string,
+	/**  The attempt progress belongs to. */
+	attempt: string,
+};
+
+/**  One downloaded, or downloading, song. */
+export type DownloadItem_Serialize = {
+	track: Track_Serialize,
+	state: DownloadState,
+	/**  Why it failed, as a sentence. */
+	error: string | null,
+	/**  Size on disk once downloaded. */
+	bytes: number | null,
+	codec: string | null,
+	kbps: number | null,
+	itag: number | null,
+	/**  Unix seconds when it was asked for. */
+	added: number | null,
+	/**  Bumps on every change of this song. */
+	version: string,
+	/**  The attempt progress belongs to. */
+	attempt: string,
+};
+
+/**  What "Remove download" did. */
+export type DownloadRemoved = {
+	removed: number,
+	/**  Songs that stay because a kept collection needs them, with its title. */
+	kept: KeptBy[],
+};
+
+export type DownloadState = "queued" | "downloading" | "ready" | "failed" | "removed";
+
+/**  Why downloads are waiting, when it isn't the user's pause. */
+export type DownloadWait = "offline" | "botCheck" | "stopped" | "diskFull" | "setupNeeded" | "elsewhere";
+
+/**
+ *  Downloads: counts, progress and waits (at most four a second). A newer
+ *  revision than the UI has seen means it missed a change: it takes a
+ *  snapshot (D23).
+ */
+export type DownloadsEvent = DownloadsEvent_Serialize | DownloadsEvent_Deserialize;
+
+/**
+ *  Downloads: counts, progress and waits (at most four a second). A newer
+ *  revision than the UI has seen means it missed a change: it takes a
+ *  snapshot (D23).
+ */
+export type DownloadsEvent_Deserialize = DownloadsSummary_Deserialize;
+
+/**
+ *  Downloads: counts, progress and waits (at most four a second). A newer
+ *  revision than the UI has seen means it missed a change: it takes a
+ *  snapshot (D23).
+ */
+export type DownloadsEvent_Serialize = DownloadsSummary_Serialize;
+
+/**  Everything the UI shows about downloads, at once. */
+export type DownloadsSnapshot = DownloadsSnapshot_Serialize | DownloadsSnapshot_Deserialize;
+
+/**  Everything the UI shows about downloads, at once. */
+export type DownloadsSnapshot_Deserialize = {
+	summary: DownloadsSummary_Deserialize,
+	items: DownloadItem_Deserialize[],
+	collections: KeptCollection_Deserialize[],
+};
+
+/**  Everything the UI shows about downloads, at once. */
+export type DownloadsSnapshot_Serialize = {
+	summary: DownloadsSummary_Serialize,
+	items: DownloadItem_Serialize[],
+	collections: KeptCollection_Serialize[],
+};
+
+/**  Settings → Downloads, measured on disk. */
+export type DownloadsStorage = {
+	songs: number,
+	bytes: number | null,
+	location: string,
+};
+
+/**  Counts, progress and waits, sent at most four times a second. */
+export type DownloadsSummary = DownloadsSummary_Serialize | DownloadsSummary_Deserialize;
+
+/**  Counts, progress and waits, sent at most four times a second. */
+export type DownloadsSummary_Deserialize = {
+	/**
+	 *  Bumps on every change of a song or a kept collection; a gap means
+	 *  the UI missed one and asks for a snapshot.
+	 */
+	revision: string,
+	/**  Downloads work on this computer. */
+	available: boolean,
+	songs: number,
+	/**  Waiting or downloading. */
+	waiting: number,
+	failed: number,
+	/**  Space used: finished songs, partial ones and covers. */
+	bytes: number | null,
+	active?: ActiveDownload_Deserialize | null,
+	/**  Paused by the user. */
+	paused: boolean,
+	wait?: DownloadWait | null,
+	/**  What the wait (or `available: false`) means, as a sentence. */
+	message?: string | null,
+	online: boolean,
+	/**  Kept collections being checked for changes. */
+	syncing: ItemId[],
+};
+
+/**  Counts, progress and waits, sent at most four times a second. */
+export type DownloadsSummary_Serialize = {
+	/**
+	 *  Bumps on every change of a song or a kept collection; a gap means
+	 *  the UI missed one and asks for a snapshot.
+	 */
+	revision: string,
+	/**  Downloads work on this computer. */
+	available: boolean,
+	songs: number,
+	/**  Waiting or downloading. */
+	waiting: number,
+	failed: number,
+	/**  Space used: finished songs, partial ones and covers. */
+	bytes: number | null,
+	active: ActiveDownload_Serialize | null,
+	/**  Paused by the user. */
+	paused: boolean,
+	wait: DownloadWait | null,
+	/**  What the wait (or `available: false`) means, as a sentence. */
+	message: string | null,
+	online: boolean,
+	/**  Kept collections being checked for changes. */
+	syncing: ItemId[],
 };
 
 export type EntriesPage = EntriesPage_Serialize | EntriesPage_Deserialize;
@@ -617,6 +851,54 @@ export type HistoryRow_Serialize = {
 
 /**  `ServiceId` + opaque remote id, serialised as `"ytm:<remote>"`. */
 export type ItemId = string;
+
+export type KeptBy = {
+	trackId: ItemId,
+	collection: string,
+};
+
+/**  A playlist, album or liked songs kept downloaded. */
+export type KeptCollection = KeptCollection_Serialize | KeptCollection_Deserialize;
+
+/**  A playlist, album or liked songs kept downloaded. */
+export type KeptCollection_Deserialize = {
+	card: CollectionCard_Deserialize,
+	/**  The channel that keeps it. */
+	channel?: string | null,
+	/**  Kept by the account in use, so it stays up to date. */
+	mine: boolean,
+	songs: number,
+	ready: number,
+	failed: number,
+	bytes: number | null,
+	/**  Unix seconds of the last check for changes. */
+	synced?: number | null,
+	/**  Why the last check didn't work, as a sentence. */
+	error?: string | null,
+	/**  Private or deleted on YouTube Music now; the songs stay. */
+	gone: boolean,
+	paused: boolean,
+};
+
+/**  A playlist, album or liked songs kept downloaded. */
+export type KeptCollection_Serialize = {
+	card: CollectionCard_Serialize,
+	/**  The channel that keeps it. */
+	channel: string | null,
+	/**  Kept by the account in use, so it stays up to date. */
+	mine: boolean,
+	songs: number,
+	ready: number,
+	failed: number,
+	bytes: number | null,
+	/**  Unix seconds of the last check for changes. */
+	synced: number | null,
+	/**  Why the last check didn't work, as a sentence. */
+	error: string | null,
+	/**  Private or deleted on YouTube Music now; the songs stay. */
+	gone: boolean,
+	paused: boolean,
+};
 
 export type LibraryPage = LibraryPage_Serialize | LibraryPage_Deserialize;
 

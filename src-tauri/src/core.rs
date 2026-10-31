@@ -2,12 +2,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use encore_audio::AudioCache;
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::queue::Queue;
 use encore_core::service::{MusicService, ResolveAuth};
 use encore_core::store::Store;
+use encore_downloads::DownloadManager;
 use encore_lyrics::LyricsService;
 use encore_player::Player;
 use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
@@ -19,6 +21,9 @@ use serde::{Deserialize, Serialize};
 /// Settings scope and keys in the store (D11).
 pub const SETTINGS: &str = "settings";
 pub const REPORT_HISTORY: &str = "report_history";
+
+/// Why downloads are off, when the system gives Encore no data folder.
+pub const DOWNLOADS_OFF: &str = "Downloads are off: Encore can't find a folder to keep them in on this computer.";
 
 /// Why the backend couldn't start, for the UI (see `bootstrap`).
 pub struct StartupFailure(pub String);
@@ -49,6 +54,12 @@ impl Paths {
         };
         Paths { data, cache, logs }
     }
+
+    /// `<app data>/downloads`. Downloads are kept for good, so never in a
+    /// temporary folder: without a data folder there are no downloads (D23).
+    pub fn downloads() -> Option<PathBuf> {
+        dirs::data_local_dir().map(|d| d.join("app.encore.desktop").join("downloads"))
+    }
 }
 
 pub struct Core {
@@ -60,6 +71,9 @@ pub struct Core {
     pub store: Arc<Store>,
     pub audio_cache: AudioCache,
     pub art: Arc<crate::art::ArtCache>,
+    /// `None` when downloads can't work here (`DOWNLOADS_OFF`).
+    pub downloads: Option<Arc<DownloadManager>>,
+    pub connectivity: Arc<crate::connectivity::Connectivity>,
     #[allow(dead_code)]
     pub paths: Paths,
     /// A message from startup for the UI, and whether the UI is listening
@@ -104,8 +118,43 @@ impl Core {
         // On unless turned off (it only ever reports for a signed-in account).
         player.set_reporting(store.get::<bool>(SETTINGS, REPORT_HISTORY).ok().flatten().unwrap_or(true));
         let lyrics = Arc::new(LyricsService::new(ytm.clone(), Some(store.clone())));
-        let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone()));
-        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, paths, startup_notice: parking_lot::Mutex::new((false, None)) });
+        let downloads_dir = Paths::downloads();
+        let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone(), downloads_dir.as_ref().map(|d| d.join("art"))));
+        let connectivity = crate::connectivity::Connectivity::new();
+        let downloads = match downloads_dir {
+            None => {
+                tracing::warn!("no data folder: downloads are off");
+                None
+            }
+            Some(dir) => {
+                let deps = encore_downloads::Deps {
+                    store: store.clone(),
+                    service: ytm.clone(),
+                    resolver: resolver.clone(),
+                    auth: auth_provider(it.clone()),
+                    gate: player.gate(),
+                    fetcher: Arc::new(encore_downloads::HttpFetcher::new()),
+                    cache: Some(audio_cache.clone()),
+                    lyrics: Some(lyrics.clone()),
+                    art: Some(art.clone()),
+                    loudness: Some(ytm.clone()),
+                    spacing: (Duration::from_secs(2), Duration::from_secs(4)),
+                };
+                match DownloadManager::open(dir, deps) {
+                    Ok(d) => {
+                        player.set_local_audio(d.clone());
+                        let c = connectivity.clone();
+                        d.on_network_error(move || c.transport_failed());
+                        Some(d)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e.message, "downloads are off");
+                        None
+                    }
+                }
+            }
+        };
+        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, downloads, connectivity, paths, startup_notice: parking_lot::Mutex::new((false, None)) });
         Ok(core)
     }
 
@@ -172,6 +221,11 @@ impl Core {
         });
     }
 
+    /// Refuse what needs YouTube while offline, with a reason (D23).
+    pub fn require_online(&self, what: &str) -> Result<()> {
+        if self.connectivity.online() { Ok(()) } else { Err(AppError::network(format!("You're offline. Connect to the internet to {what}."))) }
+    }
+
     /// Serve from the network; on a network failure fall back to the last
     /// cached copy for this account (cursors stripped: they do not survive).
     pub async fn cached<T, F, Fut>(&self, key: &str, fetch: F, strip: impl Fn(&mut T)) -> Result<T>
@@ -184,15 +238,22 @@ impl Core {
         match fetch().await {
             Ok(v) => {
                 let _ = self.store.put(&scope, key, &v, Some(7 * 24 * 3600));
+                // An answer while marked offline: the connection is back.
+                if !self.connectivity.online() {
+                    self.connectivity.check();
+                }
                 Ok(v)
             }
-            Err(e) if e.code == ErrorCode::Network => match self.store.get_any::<T>(&scope, key) {
-                Ok(Some((mut v, _, _))) => {
-                    strip(&mut v);
-                    Ok(v)
+            Err(e) if e.code == ErrorCode::Network => {
+                self.connectivity.transport_failed();
+                match self.store.get_any::<T>(&scope, key) {
+                    Ok(Some((mut v, _, _))) => {
+                        strip(&mut v);
+                        Ok(v)
+                    }
+                    _ => Err(e),
                 }
-                _ => Err(e),
-            },
+            }
             Err(e) => Err(e),
         }
     }

@@ -2,6 +2,7 @@
 
 mod art;
 mod commands;
+mod connectivity;
 mod core;
 mod events;
 mod logging;
@@ -13,6 +14,8 @@ mod window;
 use std::sync::Arc;
 use std::time::Duration;
 
+use encore_core::service::PlayFailureKind;
+use encore_downloads::DownloadsUpdate;
 use encore_player::PlayerEvent;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_specta::{Builder, Event, collect_commands, collect_events};
@@ -89,11 +92,39 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             sign_out,
             begin_signin,
             cancel_signin,
+            downloads_snapshot,
+            download_tracks,
+            download_remove,
+            download_keep,
+            download_unkeep,
+            downloads_sync,
+            downloads_pause,
+            download_pause_collection,
+            downloads_retry,
+            downloads_remove_all,
+            downloads_storage,
+            connectivity_check,
             window::snap_layouts,
             window::set_system_titlebar,
             window::get_system_titlebar,
         ])
-        .events(collect_events![PlayerStateEvent, PlayerPositionEvent, QueueEvent, AuthEvent, LyricsEvent, ArtHueEvent, NoticeEvent, SigninEvent, PlaylistsEvent, HistoryEvent, RuntimesEvent, SetupNeededEvent])
+        .events(collect_events![
+            PlayerStateEvent,
+            PlayerPositionEvent,
+            QueueEvent,
+            AuthEvent,
+            LyricsEvent,
+            ArtHueEvent,
+            NoticeEvent,
+            SigninEvent,
+            PlaylistsEvent,
+            HistoryEvent,
+            RuntimesEvent,
+            SetupNeededEvent,
+            DownloadsEvent,
+            DownloadItemEvent,
+            ConnectivityEvent
+        ])
 }
 
 /// Forward player events to the webview and drive lyrics.
@@ -114,6 +145,10 @@ fn forward_player_events(app: tauri::AppHandle, core: Arc<Core>) {
             };
             match ev {
                 PlayerEvent::State(s) => {
+                    // A song that couldn't be reached: maybe the connection is gone.
+                    if s.error.as_ref().is_some_and(|e| e.kind == PlayFailureKind::Network) {
+                        core.connectivity.transport_failed();
+                    }
                     if s.seek_gen != last_seek {
                         last_seek = s.seek_gen.clone();
                         media::position_changed(&app, s.clone());
@@ -150,6 +185,29 @@ fn forward_player_events(app: tauri::AppHandle, core: Arc<Core>) {
                     let _ = AuthEvent(core.accounts.state()).emit(&app);
                     let _ = NoticeEvent { text: "Your YouTube Music session expired. Import it again from Settings.".into(), level: "error".into(), action: Some("reimport".into()) }.emit(&app);
                 }
+            }
+        }
+    });
+}
+
+/// Forward downloads to the webview (D23).
+fn forward_downloads(app: tauri::AppHandle, core: Arc<Core>) {
+    let Some(d) = core.downloads.clone() else { return };
+    let mut rx = d.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(DownloadsUpdate::Summary(s)) => {
+                    let _ = DownloadsEvent(s).emit(&app);
+                }
+                Ok(DownloadsUpdate::Item { revision, item }) => {
+                    let _ = DownloadItemEvent { revision: revision.to_string(), item }.emit(&app);
+                }
+                // Missed some: a newer revision makes the UI take a snapshot.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = DownloadsEvent(d.summary()).emit(&app);
+                }
+                Err(_) => break,
             }
         }
     });
@@ -259,6 +317,10 @@ pub fn run() {
                             c3.switch_queue();
                         }
                         let _ = AuthEvent(st).emit(&h3);
+                        // The account is known: check its kept collections.
+                        if let Some(d) = &c3.downloads {
+                            d.account_changed();
+                        }
                     }
                     Ok(Err(e)) => {
                         // Access denied at the Keychain prompt, a locked keyring:
@@ -277,6 +339,21 @@ pub fn run() {
                 }
             });
             forward_player_events(handle.clone(), core.clone());
+            forward_downloads(handle.clone(), core.clone());
+            // Online or offline (D23): playback, lyrics and downloads follow.
+            let (c5, h5) = (core.clone(), handle.clone());
+            core.connectivity.on_change(move |on| {
+                c5.player.set_online(on);
+                c5.lyrics.set_online(on);
+                if let Some(d) = &c5.downloads {
+                    d.set_online(on);
+                }
+                let _ = ConnectivityEvent { online: on }.emit(&h5);
+            });
+            if let Some(d) = &core.downloads {
+                d.set_setup_ready(core.resolver.runtimes().status().usable);
+                d.start();
+            }
             // Plays go to YouTube Music history while the setting is on (D18).
             let h4 = handle.clone();
             core.player.report_history(core.ytm.clone(), Arc::new(move |id: &encore_core::model::ItemId| {
@@ -295,6 +372,9 @@ pub fn run() {
                 let before = was_installing.swap(st.installing, std::sync::atomic::Ordering::SeqCst);
                 if before && !st.installing && st.usable {
                     c2.player.resume_after_setup();
+                }
+                if let Some(d) = &c2.downloads {
+                    d.set_setup_ready(st.usable);
                 }
             });
             let rt = core.resolver.runtimes().clone();

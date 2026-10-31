@@ -1,6 +1,6 @@
 //! `encore --self-test [VIDEO_ID] [--out FILE] [--strict]`: checks, without a
 //! window, the parts of Encore that depend on the machine it runs on: the
-//! data folder and database, the audio output, the player components
+//! data folder and database, the downloads folder, the audio output, the player components
 //! (installing them if needed, as the setup screen does) and, given a video
 //! id, resolving and decoding a stream.
 //!
@@ -59,10 +59,29 @@ async fn check(video: Option<String>, strict: bool) -> Value {
 
     // Data folder and database.
     match Store::open(&paths.data.join("encore.sqlite")) {
-        Ok(_) => r["store"] = json!({ "ok": true }),
+        Ok(s) => r["store"] = json!({ "ok": true, "downloads": s.download_count().unwrap_or(0) }),
         Err(e) => {
             ok = false;
             r["store"] = json!({ "ok": false, "error": e.message });
+        }
+    }
+
+    // The downloads folder (D23): there and writable, never a temporary one.
+    match Paths::downloads().map(encore_downloads::files::Layout::create) {
+        Some(Ok(l)) => {
+            let probe = l.root.join(".selftest");
+            let writable = std::fs::write(&probe, b"ok").is_ok();
+            let _ = std::fs::remove_file(&probe);
+            ok &= writable;
+            r["downloads"] = json!({ "ok": writable, "location": l.root.display().to_string() });
+        }
+        Some(Err(e)) => {
+            ok = false;
+            r["downloads"] = json!({ "ok": false, "error": e.kind().to_string() });
+        }
+        None => {
+            ok = false;
+            r["downloads"] = json!({ "ok": false, "error": "no data folder" });
         }
     }
 

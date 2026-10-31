@@ -126,6 +126,7 @@ const P = {
   muted: false,
   source: null as T.QueueSource | null,
   phase: "idle" as T.Phase,
+  error: null as T.PlayerSnapshot["error"],
 };
 let uidN = 0;
 const uid = () => `m${++uidN}`;
@@ -139,7 +140,7 @@ function snap(): T.PlayerSnapshot {
     current: cur, index: P.index, position: P.position, duration: cur?.track.duration ?? null,
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
-    error: null, skippedInARow: 0, queueLoading: false, noOutput: false,
+    error: P.error, skippedInARow: 0, queueLoading: false, noOutput: false,
   };
 }
 function publish(queueChanged = false) {
@@ -165,9 +166,29 @@ function shuffled<X>(xs: X[]) {
   return a;
 }
 function go(i: number, at = 0) {
+  // Offline, like the Rust player: pass over songs that aren't downloaded.
+  if (!dl.online && !isLocal(P.entries[i]?.track.id)) {
+    const n = P.entries.length;
+    const order = [...Array(n).keys()].map((k) => (i + k) % n).filter((j) => j >= i || P.repeat === "all");
+    const j = order.find((x) => isLocal(P.entries[x].track.id));
+    if (j == null) {
+      P.index = i;
+      P.playing = false;
+      P.phase = "error";
+      P.error = { kind: "network", message: "You're offline, and nothing else in the queue is downloaded." };
+      publish(true);
+      h?.notice({ text: P.error.message, level: "warn", action: null });
+      return;
+    }
+    const passed = (j - i + n) % n;
+    h?.notice({ text: passed === 1 ? `Skipped “${P.entries[i].track.title}”: it isn't downloaded.` : `Skipped ${passed} songs that aren't downloaded.`, level: "warn", action: null });
+    i = j;
+  }
+  P.error = null;
   P.index = i;
   P.position = at;
-  if (!needsSetupBeforePlay()) return;
+  // Downloaded songs need no player components (D22, D23).
+  if (!isLocal(P.entries[i]?.track.id) && !needsSetupBeforePlay()) return;
   P.playing = true;
   P.phase = "playing";
   tgen++;
@@ -337,6 +358,111 @@ function needsSetupBeforePlay() {
 }
 if (q.has("updating")) setTimeout(rtInstall, 1500);
 
+// ---------- downloads (D23) ----------
+// One simulated worker: a song "downloads" in 1.5 s, at 0.25 s ticks.
+// `?downloaded` starts with "Late night" kept and downloaded, plus one song
+// on its own; `?offline` starts offline (the browser's online and offline
+// events flip it); `?dlfail` fails every third song with the bot-check
+// sentence.
+const dl = {
+  rev: 1,
+  ver: 0,
+  items: new Map<string, T.DownloadItem>(),
+  pins: new Set<string>(),
+  kept: new Map<string, { card: T.CollectionCard; ids: string[]; paused: boolean; synced: number }>(),
+  paused: false,
+  online: !q.has("offline"),
+  active: null as null | { id: string; bytes: number; total: number; attempt: string },
+  started: 0,
+};
+const now = () => Date.now() / 1000;
+const isLocal = (id: string | undefined) => !!id && dl.items.get(id)?.state === "ready";
+const songBytes = (t: T.Track) => Math.round((t.duration ?? 200) * 16_000);
+const keptBy = (id: string) => [...dl.kept.values()].find((k) => k.ids.includes(id));
+const wanted = (id: string) => dl.pins.has(id) || [...dl.kept.values()].some((k) => !k.paused && k.ids.includes(id));
+
+function dlSet(id: string, state: T.DownloadState, extra: Partial<T.DownloadItem> = {}) {
+  const old = dl.items.get(id);
+  const item: T.DownloadItem = {
+    track: { ...track(id), liked: null }, state, error: null, bytes: 0, codec: null, kbps: null, itag: null,
+    added: old?.added ?? now(), version: String(++dl.ver), attempt: old?.attempt ?? "0", ...extra,
+  };
+  if (state === "removed") dl.items.delete(id);
+  else dl.items.set(id, item);
+  dl.rev++;
+  h?.downloadItem({ revision: String(dl.rev), item });
+}
+function dlSummary(): T.DownloadsSummary {
+  const all = [...dl.items.values()];
+  const ready = all.filter((i) => i.state === "ready");
+  return {
+    revision: String(dl.rev),
+    available: true,
+    songs: ready.length,
+    waiting: all.filter((i) => i.state === "queued" || i.state === "downloading").length,
+    failed: all.filter((i) => i.state === "failed").length,
+    bytes: ready.reduce((n, i) => n + (i.bytes ?? 0), 0) + (dl.active?.bytes ?? 0),
+    active: dl.active ? { trackId: dl.active.id, attempt: dl.active.attempt, bytes: dl.active.bytes, total: dl.active.total } : null,
+    paused: dl.paused,
+    wait: dl.online ? null : "offline",
+    message: dl.online ? null : "You're offline. Downloads continue when you're back online.",
+    online: dl.online,
+    syncing: [],
+  };
+}
+function dlKept(): T.KeptCollection[] {
+  return [...dl.kept.values()].map((k) => {
+    const items = k.ids.map((id) => dl.items.get(id));
+    return {
+      card: k.card, channel: auth.state === "signedIn" ? auth.channel.name : null, mine: true, songs: k.ids.length,
+      ready: items.filter((i) => i?.state === "ready").length, failed: items.filter((i) => i?.state === "failed").length,
+      bytes: items.reduce((n, i) => n + (i?.state === "ready" ? (i.bytes ?? 0) : 0), 0), synced: k.synced, error: null, gone: false, paused: k.paused,
+    };
+  });
+}
+const dlEmit = () => h?.downloads(dlSummary());
+/** Kept collections changed: a newer revision makes the UI take a snapshot. */
+function dlChanged() {
+  dl.rev++;
+  dlEmit();
+}
+setInterval(() => {
+  if (dl.paused || !dl.online) return;
+  if (!dl.active) {
+    const next = [...dl.items.values()].find((i) => i.state === "queued" && wanted(i.track.id));
+    if (!next) return;
+    const id = next.track.id;
+    if (q.has("dlfail") && ++dl.started % 3 === 0) {
+      dlSet(id, "failed", { error: "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again." });
+      return dlEmit();
+    }
+    dl.active = { id, bytes: 0, total: songBytes(next.track), attempt: String(Date.now()) };
+    dlSet(id, "downloading", { attempt: dl.active.attempt });
+    return dlEmit();
+  }
+  const a = dl.active;
+  a.bytes = Math.min(a.total, a.bytes + a.total / 6);
+  if (a.bytes >= a.total) {
+    dl.active = null;
+    dlSet(a.id, "ready", { bytes: a.total, codec: "aac", kbps: 128, itag: 140, attempt: a.attempt });
+  }
+  dlEmit();
+}, 250);
+function setOnline(on: boolean) {
+  if (dl.online === on) return;
+  dl.online = on;
+  h?.connectivity(on);
+  dlEmit();
+}
+addEventListener("online", () => setOnline(true));
+addEventListener("offline", () => setOnline(false));
+if (q.has("downloaded")) {
+  const c = M.collections.find((x) => x.id === "pl-late")!;
+  dl.kept.set(mid(c.id), { card: card(c), ids: c.trackIds.map(mid), paused: false, synced: now() - 3600 });
+  for (const id of [...c.trackIds.map(mid), mid(M.tracks[20].id)]) dlSet(id, "ready", { bytes: songBytes(track(id)), codec: "aac", kbps: 128, itag: 140 });
+  dl.pins.add(mid(M.tracks[20].id));
+}
+
 const channels: T.AccountChannel[] = [
   { key: "0:primary", name: "Riley Park", handle: "@rileypark", pageId: null, authUser: 0, isBrand: false, photo: null },
   { key: "0:123", name: "Mock Brand Channel", handle: "@mockbrand", pageId: "123", authUser: 0, isBrand: true, photo: null },
@@ -365,6 +491,7 @@ export const mockApi: Api = {
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
       runtimes: rtStatus(),
+      online: dl.online,
     }, 10);
   },
   runtimesStatus: async () => rtStatus(true),
@@ -434,7 +561,14 @@ export const mockApi: Api = {
   },
   suggestions: async () => [],
   async collection(id) {
-    const c = M.collections.find((x) => x.id === raw(id));
+    // Offline, a kept collection is its saved copy (D23).
+    if (!dl.online) {
+      const k = dl.kept.get(id);
+      if (!k) throw { code: "network", message: "Couldn't reach YouTube. Check your internet connection.", retryable: true, action: null };
+      return delay({ ...k.card, description: null, stats: `${k.ids.length} songs`, trackCount: k.ids.length, entries: k.ids.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null, videoId: t })), cursor: null, playlistId: null, saved: null, editable: false, privacy: null, related: [] } as T.Collection);
+    }
+    if (id === "ytm:VLLM" && auth.state !== "signedIn") throw { code: "authRequired", message: "Sign in to YouTube Music to use this.", retryable: false, action: "signIn" };
+    const c = M.collections.find((x) => x.id === raw(id) || (id === "ytm:VLLM" && x.id === "pl-liked"));
     if (!c) throw { code: "notFound", message: "That collection does not exist.", retryable: false, action: null };
     return delay({
       id: mid(c.id), kind: kindOf(c), title: c.title, subtitle: card(c).subtitle, artists: card(c).artists, year: c.year ?? null, art: art(c.art),
@@ -477,6 +611,11 @@ export const mockApi: Api = {
   },
   async playCollection(id, start, shuffle) {
     const c = await mockApi.collection(id);
+    if (!dl.online) {
+      const local = c.entries.map((e) => e.track).filter((t) => isLocal(t.id));
+      if (!local.length) throw { code: "network", message: "None of these songs are downloaded yet. Connect to the internet to play them.", retryable: true, action: null };
+      return replace(local, shuffle ? Math.floor(Math.random() * local.length) : 0, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
+    }
     const s = shuffle ? Math.floor(Math.random() * c.entries.length) : start;
     replace(c.entries.map((e) => e.track), s, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
   },
@@ -490,7 +629,8 @@ export const mockApi: Api = {
     const cur = P.index != null ? P.entries[P.index] : null;
     if (!cur) return;
     if (!P.playing && P.position >= (cur.track.duration ?? 0)) P.position = 0;
-    if (!P.playing && !needsSetupBeforePlay()) return;
+    if (!P.playing && !isLocal(cur.track.id) && !needsSetupBeforePlay()) return;
+    if (!P.playing && P.phase === "error") return go(P.index!);
     P.playing = !P.playing;
     P.phase = P.playing ? "playing" : "paused";
     publish();
@@ -722,5 +862,85 @@ export const mockApi: Api = {
     setTimeout(() => mockApi.importBrowser("webview"), 800);
   },
   cancelSignin: async () => {},
+  downloadsSnapshot: async () => structuredClone({ summary: dlSummary(), items: [...dl.items.values()], collections: dlKept() }),
+  async downloadTracks(tracks) {
+    let n = 0;
+    for (const t of tracks) {
+      dl.pins.add(t.id);
+      const it = dl.items.get(t.id);
+      if (!it || it.state === "failed") {
+        dlSet(t.id, "queued");
+        n++;
+      }
+    }
+    dlEmit();
+    return n;
+  },
+  async downloadRemove(ids) {
+    const kept: T.DownloadRemoved["kept"] = [];
+    let removed = 0;
+    for (const id of ids) {
+      dl.pins.delete(id);
+      const k = keptBy(id);
+      if (k) kept.push({ trackId: id, collection: k.card.title });
+      else if (dl.items.has(id)) {
+        if (dl.active?.id === id) dl.active = null;
+        dlSet(id, "removed");
+        removed++;
+      }
+    }
+    dlEmit();
+    return { removed, kept };
+  },
+  async downloadKeep(id) {
+    const c = await mockApi.collection(id);
+    const ids = c.entries.map((e) => e.track.id);
+    dl.kept.set(id, { card: { id, kind: c.kind, title: c.title, subtitle: c.subtitle, artists: c.artists, year: c.year, art: c.art, playId: null }, ids, paused: false, synced: now() });
+    for (const t of ids) if (!dl.items.has(t)) dlSet(t, "queued");
+    dlChanged();
+  },
+  async downloadUnkeep(id) {
+    const k = dl.kept.get(id);
+    if (!k) throw { code: "notFound", message: "That isn't kept downloaded.", retryable: false, action: null };
+    dl.kept.delete(id);
+    let removed = 0;
+    for (const t of new Set(k.ids)) {
+      if (dl.pins.has(t) || keptBy(t) || !dl.items.has(t)) continue;
+      if (dl.active?.id === t) dl.active = null;
+      dlSet(t, "removed");
+      removed++;
+    }
+    dlChanged();
+    return { removed, kept: [] };
+  },
+  async downloadsSync() {
+    for (const k of dl.kept.values()) k.synced = now();
+    dlChanged();
+  },
+  async downloadsPause(p) {
+    dl.paused = p;
+    dlEmit();
+  },
+  async downloadPauseCollection(id, p) {
+    const k = dl.kept.get(id);
+    if (k) k.paused = p;
+    dlChanged();
+  },
+  async downloadsRetry() {
+    for (const i of [...dl.items.values()]) if (i.state === "failed") dlSet(i.track.id, "queued");
+    dlEmit();
+  },
+  async downloadsRemoveAll() {
+    dl.pins.clear();
+    dl.kept.clear();
+    dl.active = null;
+    for (const id of [...dl.items.keys()]) dlSet(id, "removed");
+    dlChanged();
+  },
+  downloadsStorage: async () => {
+    const s = dlSummary();
+    return { songs: s.songs, bytes: s.bytes, location: "~/Library/Application Support/app.encore.desktop/downloads" };
+  },
+  connectivityCheck: async () => dl.online,
   artUrl: () => "",
 };

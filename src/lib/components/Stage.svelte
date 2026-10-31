@@ -1,7 +1,8 @@
 <script lang="ts">
   import { artistLine, fmt } from "$lib/data";
-  import { nav, player, trackMenu, ui } from "$lib/state.svelte";
+  import { downloads, nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
   import Lyrics from "./Lyrics.svelte";
   import VersionSwitch from "./VersionSwitch.svelte";
@@ -91,6 +92,7 @@
             {@const id = t.id}
             <li
               class="row"
+              class:unavailable={!downloads.playable(t)}
               class:over={dragOver === k && dragFrom !== k}
               class:dragging={dragFrom === k}
               draggable="true"
@@ -101,13 +103,14 @@
               oncontextmenu={(ev) => ui.openMenu(ev, [{ label: "Remove from queue", icon: "x", run: () => player.removeAt(qi(k)) }, ...trackMenu(id, e.uid)])}
             >
               <span class="grip" aria-hidden="true"><Icon name="grip" size={14} /></span>
-              <button class="pick" onclick={() => player.jumpTo(qi(k))} aria-label="Play {t.title}">
+              <button class="pick" onclick={() => (downloads.playable(t) ? player.jumpTo(qi(k)) : ui.say(`“${t.title}” isn't downloaded. Connect to the internet to play it.`))} aria-label="Play {t.title}">
                 <span class="thumb"><Cover art={t.art} radius={4} size={120} label={t.title} /></span>
                 <span class="txt">
                   <span class="t ell">{t.title}</span>
                   <span class="a ell">{artistLine(t)}</span>
                 </span>
               </button>
+              <DownloadMark {id} size={13} />
               <span class="dur mono">{fmt(t.duration)}</span>
               <button class="icon-btn rm" aria-label="Remove {t.title} from queue" onclick={() => player.removeAt(qi(k))}><Icon name="x" size={15} /></button>
             </li>
@@ -349,6 +352,10 @@
   }
   .row.dragging {
     opacity: 0.4;
+  }
+  /* Offline and not downloaded: skipped when the queue gets there (D23). */
+  .row.unavailable .pick {
+    opacity: 0.45;
   }
   .grip {
     width: 16px;

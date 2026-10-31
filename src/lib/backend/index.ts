@@ -36,6 +36,12 @@ export interface Handlers {
   runtimes(s: T.RuntimeStatus): void;
   /** A song couldn't start because the player components aren't installed. */
   setupNeeded(e: T.SetupNeededEvent): void;
+  /** Download counts, progress and waits (D23). */
+  downloads(s: T.DownloadsSummary): void;
+  /** One download changed state. */
+  downloadItem(e: T.DownloadItemEvent): void;
+  /** The connection was lost, or came back. */
+  connectivity(online: boolean): void;
 }
 
 export interface Api {
@@ -113,6 +119,25 @@ export interface Api {
   signOut(): Promise<void>;
   beginSignin(): Promise<void>;
   cancelSignin(): Promise<void>;
+  /** Everything about downloads: counts, songs, kept collections (D23). */
+  downloadsSnapshot(): Promise<T.DownloadsSnapshot>;
+  /** Download songs; returns how many are waiting. */
+  downloadTracks(tracks: T.Track[]): Promise<number>;
+  /** Remove downloads; songs a kept collection needs stay. */
+  downloadRemove(trackIds: string[]): Promise<T.DownloadRemoved>;
+  /** Keep a playlist, album or liked songs downloaded and up to date. */
+  downloadKeep(id: string): Promise<void>;
+  downloadUnkeep(id: string): Promise<T.DownloadRemoved>;
+  /** Check kept collections for changes: one, or all. */
+  downloadsSync(id: string | null): Promise<void>;
+  downloadsPause(paused: boolean): Promise<void>;
+  downloadPauseCollection(id: string, paused: boolean): Promise<void>;
+  /** Try failed downloads again, and resume after a wait that stopped them. */
+  downloadsRetry(): Promise<void>;
+  downloadsRemoveAll(): Promise<void>;
+  downloadsStorage(): Promise<T.DownloadsStorage>;
+  /** Ask the backend to check the connection now; returns what it knows. */
+  connectivityCheck(): Promise<boolean>;
   /** URL for an art key at a given edge size. */
   artUrl(key: string, size: number): string;
 }

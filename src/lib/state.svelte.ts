@@ -1,6 +1,7 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
 import { catalog } from "./catalog.svelte";
+import { sizeText } from "./data";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
 // methods are the UI contract; each one becomes a backend command. Position
@@ -315,6 +316,7 @@ export type View =
   | { name: "artist"; id: string }
   | { name: "page"; browseId: string; params?: string | null; title?: string }
   | { name: "history" }
+  | { name: "downloads" }
   | { name: "settings" };
 
 class Nav {
@@ -343,6 +345,8 @@ export interface MenuItem {
   icon?: string;
   run: () => void;
   danger?: boolean;
+  /** Why it can't be used right now (offline, for one); shown instead of running. */
+  disabled?: string;
 }
 
 export type Theme = "system" | "dark" | "light";
@@ -386,6 +390,8 @@ class UI {
   reportHistory = $state(true);
   /** Bumps when a play was reported, so History can refresh. */
   historyRev = $state(0);
+  /** Encore can reach YouTube; Rust decides (D23). */
+  online = $state(true);
 
   /** A short message above the player bar. Longer messages (errors that
    *  say what to do) stay up long enough to read. */
@@ -500,10 +506,12 @@ class Setup {
     }
   }
 
-  /** At launch: offer the setup when playback can't work yet. */
+  /** At launch: offer the setup when playback can't work yet. Offline
+   *  with downloads, those play without the components, so the setup waits
+   *  until a song that isn't downloaded is played online (D23). */
   launch(st: RuntimeStatus) {
     this.apply(st);
-    if (st.supported && !st.usable) this.open = true;
+    if (st.supported && !st.usable && (ui.online || !downloads.count)) this.open = true;
   }
 
   show() {
@@ -539,12 +547,243 @@ class Setup {
   }
 }
 
+/** Playlists are kept under their `VL…` id, whichever form a view has. */
+const keptKey = (id: string) => {
+  const m = /^ytm:(.*)$/.exec(id);
+  if (!m || /^(MPRE|VL|FE)/.test(m[1])) return id;
+  return `ytm:VL${m[1]}`;
+};
+
+const songs = (n: number) => (n === 1 ? "1 song" : `${n} songs`);
+
+/** Downloads (D23). Rust owns them; this mirrors the songs, the kept
+ *  collections and the summary, and turns actions into commands. Item
+ *  events carry the revision they made: a gap means one was missed, and
+ *  the snapshot is fetched again. */
+class Downloads {
+  items = new SvelteMap<string, DownloadItem>();
+  kept = $state<KeptCollection[]>([]);
+  summary = $state<DownloadsSummary | null>(null);
+  #rev = -1n;
+  #loading: Promise<void> | null = null;
+
+  available = $derived(this.summary?.available ?? false);
+  /** Songs on this computer. */
+  count = $derived(this.summary?.songs ?? 0);
+  /** Something is downloading, waiting or being checked. */
+  busy = $derived(!!this.summary && (this.summary.waiting > 0 || this.summary.syncing.length > 0));
+
+  has(id: string) {
+    return this.items.get(id)?.state === "ready";
+  }
+
+  /** What can play now: anything online; offline, only downloads. */
+  playable(t: Track) {
+    return t.playable && (ui.online || this.has(t.id));
+  }
+
+  /** 0 to 1 while `id` downloads and its size is known. */
+  progress(id: string): number | null {
+    const a = this.summary?.active;
+    if (!a || a.trackId !== id) return null;
+    const it = this.items.get(id);
+    if (it && it.attempt !== a.attempt) return null;
+    return a.total ? Math.min(1, (a.bytes ?? 0) / a.total) : null;
+  }
+
+  /** The kept copy of a collection, this account's first. */
+  keptFor(id: string): KeptCollection | undefined {
+    const k = keptKey(id);
+    const all = this.kept.filter((c) => keptKey(c.card.id) === k);
+    return all.find((c) => c.mine) ?? all[0];
+  }
+
+  syncing(id: string) {
+    const k = keptKey(id);
+    return !!this.summary?.syncing.some((s) => keptKey(s) === k);
+  }
+
+  apply(s: DownloadsSnapshot) {
+    this.#rev = big(s.summary.revision);
+    this.summary = s.summary;
+    this.items.clear();
+    for (const it of s.items) this.items.set(it.track.id, it);
+    catalog.addTracks(s.items.map((i) => i.track));
+    this.kept = s.collections;
+  }
+
+  refresh() {
+    this.#loading ??= call((a) => a.downloadsSnapshot())
+      .then((s) => this.apply(s))
+      .catch(() => {})
+      .finally(() => (this.#loading = null));
+    return this.#loading;
+  }
+
+  onSummary(s: DownloadsSummary) {
+    if (this.#rev < 0n) return;
+    const r = big(s.revision);
+    if (r < this.#rev) return;
+    this.summary = s;
+    if (r > this.#rev) void this.refresh();
+  }
+
+  onItem(e: DownloadItemEvent) {
+    if (this.#rev < 0n) return;
+    const r = big(e.revision);
+    if (r <= this.#rev) return;
+    if (r !== this.#rev + 1n) return void this.refresh();
+    this.#rev = r;
+    const it = e.item;
+    if (it.state === "removed") this.items.delete(it.track.id);
+    else {
+      this.items.set(it.track.id, it);
+      catalog.addTracks([it.track]);
+    }
+  }
+
+  #off() {
+    if (this.available) return false;
+    ui.say(this.summary?.message ?? "Downloads aren't available on this computer.", "error");
+    return true;
+  }
+
+  async download(ids: string[]) {
+    if (this.#off()) return;
+    const tracks = ids.map((id) => catalog.track(id)).filter((t): t is Track => !!t && t.playable);
+    if (!tracks.length) return ui.say("These songs can't be downloaded");
+    try {
+      await call((a) => a.downloadTracks(tracks));
+      ui.say(tracks.length === 1 ? `Downloading “${tracks[0].title}”` : `Downloading ${songs(tracks.length)}`);
+    } catch (e: any) {
+      ui.say(`Could not download: ${e.message}`);
+    }
+  }
+
+  /** Remove downloads (or stop them while they download). */
+  async remove(ids: string[], stopping = false) {
+    try {
+      const r = await call((a) => a.downloadRemove(ids));
+      const one = ids.length === 1 ? (catalog.track(ids[0])?.title ?? "the song") : null;
+      if (r.kept.length) {
+        const k = r.kept[0];
+        ui.say(`“${catalog.track(k.trackId)?.title ?? "This song"}” stays downloaded: “${k.collection}” is kept downloaded and has it.`);
+      } else if (one) ui.say(stopping ? `Stopped downloading “${one}”` : `Removed “${one}” from downloads`);
+      else ui.say(`Removed ${r.removed} downloads`);
+    } catch (e: any) {
+      ui.say(`Could not remove: ${e.message}`);
+    }
+  }
+
+  async keep(id: string) {
+    if (this.#off()) return;
+    const title = catalog.collection(id)?.title;
+    try {
+      await call((a) => a.downloadKeep(id));
+      ui.say(title ? `Downloading “${title}”. New songs in it are downloaded too.` : "Downloading");
+    } catch (e: any) {
+      ui.say(e.code === "authRequired" ? "Sign in to download your liked songs" : `Could not download: ${e.message}`);
+    }
+  }
+
+  /** Stop keeping a collection, after saying what goes. */
+  unkeep(id: string) {
+    const k = this.keptFor(id);
+    if (!k) return;
+    ui.confirm = {
+      title: "Remove this download?",
+      text: `${songs(k.ready)} of “${k.card.title}” (${sizeText(k.bytes)}) are deleted from this computer, except those you downloaded on their own or another download has. Nothing changes on YouTube Music.`,
+      confirm: "Remove download",
+      danger: true,
+      run: async () => {
+        try {
+          await call((a) => a.downloadUnkeep(k.card.id));
+          ui.say(`Removed the download of “${k.card.title}”`);
+        } catch (e: any) {
+          ui.say(`Could not remove: ${e.message}`);
+        }
+      },
+    };
+  }
+
+  sync(id: string | null = null) {
+    call((a) => a.downloadsSync(id))
+      .then(() => ui.say("Checking for changes"))
+      .catch((e: BackendError) => ui.say(e.message));
+  }
+
+  pause(on: boolean) {
+    call((a) => a.downloadsPause(on))
+      .then(() => ui.say(on ? "Downloads paused" : "Downloads resumed"))
+      .catch((e: BackendError) => ui.say(`Could not change that: ${e.message}`));
+  }
+
+  pauseKept(id: string, on: boolean) {
+    const k = this.keptFor(id);
+    if (!k) return;
+    call((a) => a.downloadPauseCollection(k.card.id, on))
+      .then(() => ui.say(on ? `Paused downloading “${k.card.title}”` : `Resumed downloading “${k.card.title}”`))
+      .catch((e: BackendError) => ui.say(`Could not change that: ${e.message}`));
+  }
+
+  retry() {
+    call((a) => a.downloadsRetry())
+      .then(() => ui.say("Trying again"))
+      .catch((e: BackendError) => ui.say(`Could not try again: ${e.message}`));
+  }
+
+  removeAll() {
+    const s = this.summary;
+    ui.confirm = {
+      title: "Remove all downloads?",
+      text: `${songs(s?.songs ?? 0)} (${sizeText(s?.bytes)}) are deleted from this computer, for every account, and no playlist or album stays downloaded. Nothing changes on YouTube Music.`,
+      confirm: "Remove all",
+      danger: true,
+      run: async () => {
+        try {
+          await call((a) => a.downloadsRemoveAll());
+          ui.say("Removed all downloads");
+        } catch (e: any) {
+          ui.say(`Could not remove: ${e.message}`);
+        }
+      },
+    };
+  }
+}
+
 export const player = new Player();
 export const nav = new Nav();
 export const ui = new UI();
 export const account = new Account();
 export const playlists = new Playlists();
 export const setup = new Setup();
+export const downloads = new Downloads();
+
+/** Offline, actions that need YouTube say why instead of running (D23). */
+export const needsOnline = (what: string) => (ui.online ? undefined : `You're offline. Connect to the internet to ${what}.`);
+
+/** One line on how a kept collection is doing, for its header and the
+ *  Downloads page. */
+export function keptNote(k: KeptCollection | undefined, syncing: boolean): string | null {
+  if (!k) return null;
+  if (!k.mine) return k.channel ? `Kept by ${k.channel}. Sign in as ${k.channel} to keep it up to date.` : "Downloaded while signed out. It isn't checked for changes while you're signed in.";
+  if (k.gone) return k.error;
+  if (syncing) return "Checking for changes…";
+  if (k.error) return k.error;
+  if (k.paused) return `Paused · ${k.ready} of ${songs(k.songs)} downloaded`;
+  if (k.ready + k.failed < k.songs) return `${k.ready} of ${songs(k.songs)} downloaded`;
+  if (k.failed) return `${k.failed === 1 ? "1 song" : `${k.failed} songs`} couldn't be downloaded`;
+  return "Downloaded · new songs are downloaded too";
+}
+
+/** The download action for a song, in the words of its state. */
+function downloadItem(id: string): MenuItem {
+  const st = downloads.items.get(id)?.state;
+  if (st === "ready") return { label: "Remove download", icon: "downloaded", run: () => void downloads.remove([id]) };
+  if (st === "queued" || st === "downloading") return { label: "Stop downloading", icon: "x", run: () => void downloads.remove([id], true) };
+  if (st === "failed") return { label: "Download again", icon: "download", run: () => void downloads.download([id]) };
+  return { label: "Download", icon: "download", run: () => void downloads.download([id]) };
+}
 
 const remote = (id: string) => id.replace(/^(ytm|mock):/, "");
 
@@ -606,13 +845,14 @@ export function trackMenu(id: string, uid?: string): MenuItem[] {
   const items: MenuItem[] = [
     { label: "Play next", icon: "playNext", run: () => (player.playNext(id), ui.say(`“${tr.title}” plays next`)) },
     { label: "Add to queue", icon: "queue", run: () => (player.addToQueue(id), ui.say(`Added “${tr.title}” to queue`)) },
-    { label: "Start radio", icon: "radio", run: () => player.playTrack(id) },
-    { label: liked ? "Remove from liked music" : "Add to liked music", icon: liked ? "heartFill" : "heart", run: () => (player.toggleLike(id), ui.say(liked ? "Removed from liked music" : "Added to liked music")) },
+    { label: "Start radio", icon: "radio", disabled: needsOnline("start a radio"), run: () => player.playTrack(id) },
+    { label: liked ? "Remove from liked music" : "Add to liked music", icon: liked ? "heartFill" : "heart", disabled: needsOnline("change your likes"), run: () => (player.toggleLike(id), ui.say(liked ? "Removed from liked music" : "Added to liked music")) },
   ];
   if ((tr.kind === "song" || tr.kind === "video") && versions.get(id) !== null) {
-    items.push({ label: tr.kind === "video" ? "Play the song version" : "Play the video version", icon: "swap", run: () => void playOtherVersion(tr, entry) });
+    items.push({ label: tr.kind === "video" ? "Play the song version" : "Play the video version", icon: "swap", disabled: needsOnline("switch versions"), run: () => void playOtherVersion(tr, entry) });
   }
-  if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", run: () => void pickPlaylist([id]) });
+  if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", disabled: needsOnline("add to a playlist"), run: () => void pickPlaylist([id]) });
+  if (downloads.available && tr.playable) items.push(downloadItem(id));
   if (artist?.id) items.push({ label: "Go to artist", icon: "artist", run: () => nav.go({ name: "artist", id: artist.id! }) });
   if (tr.album?.id) items.push({ label: "Go to album", icon: "album", run: () => nav.go({ name: "collection", id: tr.album!.id! }) });
   items.push({ label: "Copy link", icon: "link", run: () => (navigator.clipboard?.writeText(`https://music.youtube.com/watch?v=${remote(id)}`), ui.say("Link copied")) });
@@ -633,15 +873,22 @@ export function collectionMenu(id: string): MenuItem[] {
   const mineItems: MenuItem[] =
     full?.editable && account.signedIn && full.playlistId
       ? [
-          { label: "Edit details…", icon: "edit", run: () => editPlaylist(id) },
-          { label: "Delete playlist…", icon: "trash", danger: true, run: () => deletePlaylist(id) },
+          { label: "Edit details…", icon: "edit", disabled: needsOnline("change a playlist"), run: () => editPlaylist(id) },
+          { label: "Delete playlist…", icon: "trash", danger: true, disabled: needsOnline("delete a playlist"), run: () => deletePlaylist(id) },
         ]
       : [];
+  const kept = downloads.keptFor(id);
+  const dl: MenuItem[] = !downloads.available
+    ? []
+    : kept
+      ? [{ label: "Remove download…", icon: "downloaded", run: () => downloads.unkeep(id) }]
+      : [{ label: "Download", icon: "download", disabled: needsOnline("download this"), run: () => void downloads.keep(id) }];
   return [
     { label: "Play", icon: "play", run: () => player.playCollection(id) },
     { label: "Shuffle", icon: "shuffle", run: () => player.playCollection(id, 0, true) },
     { label: "Play next", icon: "playNext", run: () => withTracks((ids) => (player.playNext(ids), ui.say(`“${title}” plays next`))) },
     { label: "Add to queue", icon: "queue", run: () => withTracks((ids) => (player.addToQueue(ids), ui.say(`Added “${title}” to queue`))) },
+    ...dl,
     {
       label: "Copy link",
       icon: "link",
@@ -747,12 +994,17 @@ export async function connect() {
       history: () => ui.historyRev++,
       runtimes: (st) => setup.apply(st),
       setupNeeded: () => setup.show(),
+      downloads: (s) => downloads.onSummary(s),
+      downloadItem: (e) => downloads.onItem(e),
+      connectivity: (on) => (ui.online = on),
     }),
   );
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  ui.online = b.online;
   if (b.notice) ui.say(b.notice, "error");
+  await downloads.refresh();
   setup.launch(b.runtimes);
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);

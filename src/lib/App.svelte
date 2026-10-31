@@ -7,11 +7,11 @@
   import "./styles/global.css";
 
   import { onMount } from "svelte";
-  import { isTauri } from "./backend";
+  import { call, isTauri } from "./backend";
   import { commands } from "./backend/bindings";
   import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
-  import { account, connect, nav, player, setup, ui } from "./state.svelte";
+  import { account, connect, downloads, nav, player, setup, ui } from "./state.svelte";
   import Deck from "./components/Deck.svelte";
   import Overlays from "./components/Overlays.svelte";
   import Palette from "./components/Palette.svelte";
@@ -25,6 +25,7 @@
   import WindowControls from "./components/WindowControls.svelte";
   import Artist from "./views/Artist.svelte";
   import Collection from "./views/Collection.svelte";
+  import Downloads from "./views/Downloads.svelte";
   import Explore from "./views/Explore.svelte";
   import History from "./views/History.svelte";
   import Home from "./views/Home.svelte";
@@ -40,12 +41,23 @@
 
   let connectError = $state<string | null>(null);
   // Pages shown from the offline cache have no error to retry from: when
-  // the connection comes back, load the current page again.
+  // the connection comes back, load the current page again. Encore's own
+  // check decides (D23); the system's network events only ask it to look.
   let onlineRev = $state(0);
+  let wasOnline = true;
+  $effect(() => {
+    const on = ui.online;
+    if (on && !wasOnline) onlineRev++;
+    wasOnline = on;
+  });
   onMount(() => {
-    const back = () => onlineRev++;
-    addEventListener("online", back);
-    return () => removeEventListener("online", back);
+    const hint = () => void call((a) => a.connectivityCheck()).catch(() => {});
+    addEventListener("online", hint);
+    addEventListener("offline", hint);
+    return () => {
+      removeEventListener("online", hint);
+      removeEventListener("offline", hint);
+    };
   });
   onMount(() => {
     connect().catch((e) => (connectError = e?.message ?? String(e)));
@@ -196,6 +208,12 @@
       case "f":
         ui.theater = !ui.theater;
         break;
+      case "d":
+        if (player.current) {
+          if (downloads.has(player.current.id)) ui.say("Already downloaded");
+          else void downloads.download([player.current.id]);
+        }
+        break;
       case "/":
         ui.palette = true;
         break;
@@ -224,6 +242,12 @@
               <button class="pill primary" onclick={() => nav.go({ name: "settings" })}>Import again</button>
             </div>
           {/if}
+          {#if !ui.online && nav.view.name !== "downloads"}
+            <div class="banner offline" role="status">
+              <span><Icon name="offline" size={17} /> <b>You're offline.</b> Downloaded songs still play.</span>
+              <button class="pill" onclick={() => nav.go({ name: "downloads" })}>Go to Downloads</button>
+            </div>
+          {/if}
           {#if connectError}
             <div class="banner" role="alert">
               <span><b>Encore could not start its backend.</b> {connectError}</span>
@@ -240,6 +264,8 @@
             <Library />
           {:else if nav.view.name === "history"}
             <History />
+          {:else if nav.view.name === "downloads"}
+            <Downloads />
           {:else if nav.view.name === "collection"}
             <Collection id={nav.view.id} />
           {:else if nav.view.name === "artist"}
@@ -318,6 +344,17 @@
     border-radius: 12px;
     background: color-mix(in srgb, var(--accent) 14%, var(--panel));
     font-size: 13.5px;
+  }
+  .banner.offline {
+    background: var(--hover);
+  }
+  .banner.offline span {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .banner.offline :global(svg) {
+    color: var(--mute);
   }
   .setup-pill {
     position: fixed;
