@@ -1,6 +1,6 @@
 <script lang="ts">
   import { artistLine, fmt } from "$lib/data";
-  import { downloads, nav, player, trackMenu, ui } from "$lib/state.svelte";
+  import { downloads, needsOnline, nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
@@ -61,6 +61,8 @@
             class:on={player.liked.has(tr.id)}
             aria-pressed={player.liked.has(tr.id)}
             aria-label={player.liked.has(tr.id) ? "Remove from liked music" : "Add to liked music"}
+            title={needsOnline("change your likes")}
+            disabled={!ui.online}
             onclick={() => player.toggleLike(tr.id)}
           ><Icon name={player.liked.has(tr.id) ? "heartFill" : "heart"} size={20} /></button>
         </div>
@@ -122,9 +124,9 @@
         <label class="autoplay">
           <span>
             <b>Autoplay</b>
-            <small>Keep playing similar songs when the queue ends</small>
+            <small>{ui.online ? "Keep playing similar songs when the queue ends" : "Waits until you're back online"}</small>
           </span>
-          <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
+          <input type="checkbox" role="switch" checked={player.autoplay} disabled={!ui.online} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
         </label>
       </section>
     </div>
@@ -142,9 +144,9 @@
       <label class="autoplay">
         <span>
           <b>Autoplay</b>
-          <small>Keep playing similar songs when the queue ends</small>
+          <small>{ui.online ? "Keep playing similar songs when the queue ends" : "Waits until you're back online"}</small>
         </span>
-        <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
+        <input type="checkbox" role="switch" checked={player.autoplay} disabled={!ui.online} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
       </label>
     </div>
   {/if}

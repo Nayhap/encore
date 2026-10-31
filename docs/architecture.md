@@ -36,7 +36,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
 | `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. |
 | `encore-lyrics` | YouTube Music timed lyrics, then LRCLIB synced, then plain lyrics. Scores LRCLIB matches by title, artist and duration, and caches results. |
-| `encore-downloads` | Songs kept for offline listening (D23): one worker resolves through the yt-dlp helper and fetches checked HTTP ranges, keeps playlists, albums and liked songs up to date, and keeps lyrics and covers alongside. The player asks it for a song's file before resolving anything. |
+| `encore-downloads` | Songs kept for offline listening (D23): one worker resolves through the yt-dlp helper and fetches checked HTTP ranges, one queue checks kept playlists, albums and liked songs for changes, and lyrics and covers are kept alongside. It depends on `encore-core`, `encore-audio` and `encore-lyrics`; the player reaches it only through `encore-core`'s `LocalAudio` trait and asks it for a song's file before resolving anything. |
 | `encore-cli` | A headless tool that exercises every crate against live YouTube Music. |
 
 ## UI contract

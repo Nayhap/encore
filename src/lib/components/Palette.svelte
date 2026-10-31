@@ -2,7 +2,7 @@
   import { call, type AnyArt, type SearchResults } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, fmt, kindLabel } from "$lib/data";
-  import { downloads, nav, newPlaylist, playArtist, player, ui } from "$lib/state.svelte";
+  import { downloads, nav, needsOnline, newPlaylist, playArtist, player, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -61,7 +61,7 @@
     { key: "a-lyrics", group: "Actions", icon: "lyrics", title: "Open full-screen lyrics", sub: "Playback", hint: "F", run: () => (ui.theater = true) },
     { key: "a-stage", group: "Actions", icon: "stage", title: ui.stageOpen ? "Hide now playing panel" : "Show now playing panel", sub: "Layout", hint: mod("\\"), run: () => (ui.stageOpen = !ui.stageOpen) },
     { key: "a-theme", group: "Actions", icon: "moon", title: "Change theme", sub: "System, dark or light", run: () => nav.go({ name: "settings" }) },
-    { key: "a-newpl", group: "Actions", icon: "plus", title: "New playlist…", sub: "Create a playlist", run: () => newPlaylist() },
+    { key: "a-newpl", group: "Actions", icon: "plus", title: "New playlist…", sub: "Create a playlist", run: () => { const why = needsOnline("create a playlist"); if (why) ui.say(why); else newPlaylist(); } },
     { key: "a-lib", group: "Go to", icon: "library", title: "Library", sub: "Playlists, albums, artists", run: () => nav.go({ name: "library" }) },
     { key: "a-dls", group: "Go to", icon: "download", title: "Downloads", sub: "Songs on this computer", run: () => nav.go({ name: "downloads" }) },
     { key: "a-hist", group: "Go to", icon: "history", title: "History", sub: "What you've played", run: () => nav.go({ name: "history" }) },

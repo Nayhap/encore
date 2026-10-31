@@ -101,18 +101,18 @@ export const commands = {
 	/**  Download songs. Returns how many are waiting now. */
 	downloadTracks: (tracks: Track_Deserialize[]) => typedError<number, AppError_Serialize>(__TAURI_INVOKE("download_tracks", { tracks })),
 	/**  Remove downloaded songs. Songs a kept collection needs stay. */
-	downloadRemove: (trackIds: ItemId[]) => typedError<DownloadRemoved, AppError_Serialize>(__TAURI_INVOKE("download_remove", { trackIds })),
+	downloadRemove: (trackIds: ItemId[]) => typedError<DownloadRemoved_Serialize, AppError_Serialize>(__TAURI_INVOKE("download_remove", { trackIds })),
 	/**  Keep a playlist, album or liked songs downloaded and up to date. */
 	downloadKeep: (id: ItemId) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("download_keep", { id })),
 	/**
 	 *  Stop keeping a collection downloaded. Its songs go, unless something else
 	 *  keeps them.
 	 */
-	downloadUnkeep: (id: ItemId) => typedError<DownloadRemoved, AppError_Serialize>(__TAURI_INVOKE("download_unkeep", { id })),
+	downloadUnkeep: (id: ItemId, account: string | null) => typedError<DownloadRemoved_Serialize, AppError_Serialize>(__TAURI_INVOKE("download_unkeep", { id, account })),
 	/**  "Check for changes": one kept collection, or all of them. */
 	downloadsSync: (id: ItemId | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_sync", { id })),
 	downloadsPause: (paused: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_pause", { paused })),
-	downloadPauseCollection: (id: ItemId, paused: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("download_pause_collection", { id, paused })),
+	downloadPauseCollection: (id: ItemId, paused: boolean, account: string | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("download_pause_collection", { id, paused, account })),
 	/**  Try failed downloads again, and resume after a bot check or a full disk. */
 	downloadsRetry: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("downloads_retry")),
 	/**  Delete every download from this computer, for every account. */
@@ -120,8 +120,8 @@ export const commands = {
 	/**  Settings → Downloads, measured on disk. */
 	downloadsStorage: () => typedError<DownloadsStorage, AppError_Serialize>(__TAURI_INVOKE("downloads_storage")),
 	/**
-	 *  Check the connection now (the system said the network changed).
-	 *  Returns whether Encore is online as far as it knows.
+	 *  Check the connection now (the system said the network changed, or the
+	 *  user asked). Returns whether YouTube answered.
 	 */
 	connectivityCheck: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("connectivity_check")),
 	/**
@@ -611,16 +611,26 @@ export type DownloadItem_Serialize = {
 };
 
 /**  What "Remove download" did. */
-export type DownloadRemoved = {
+export type DownloadRemoved = DownloadRemoved_Serialize | DownloadRemoved_Deserialize;
+
+/**  What "Remove download" did. */
+export type DownloadRemoved_Deserialize = {
 	removed: number,
 	/**  Songs that stay because a kept collection needs them, with its title. */
-	kept: KeptBy[],
+	kept: KeptBy_Deserialize[],
+};
+
+/**  What "Remove download" did. */
+export type DownloadRemoved_Serialize = {
+	removed: number,
+	/**  Songs that stay because a kept collection needs them, with its title. */
+	kept: KeptBy_Serialize[],
 };
 
 export type DownloadState = "queued" | "downloading" | "ready" | "failed" | "removed";
 
 /**  Why downloads are waiting, when it isn't the user's pause. */
-export type DownloadWait = "offline" | "botCheck" | "stopped" | "diskFull" | "setupNeeded" | "elsewhere";
+export type DownloadWait = "offline" | "botCheck" | "stopped" | "diskFull" | "setupNeeded" | "elsewhere" | "locked";
 
 /**
  *  Downloads: counts, progress and waits (at most four a second). A newer
@@ -852,9 +862,24 @@ export type HistoryRow_Serialize = {
 /**  `ServiceId` + opaque remote id, serialised as `"ytm:<remote>"`. */
 export type ItemId = string;
 
-export type KeptBy = {
+export type KeptBy = KeptBy_Serialize | KeptBy_Deserialize;
+
+export type KeptBy_Deserialize = {
 	trackId: ItemId,
-	collection: string,
+	/**
+	 *  The kept collection that has it; `None` when another account
+	 *  downloaded it too.
+	 */
+	collection?: string | null,
+};
+
+export type KeptBy_Serialize = {
+	trackId: ItemId,
+	/**
+	 *  The kept collection that has it; `None` when another account
+	 *  downloaded it too.
+	 */
+	collection: string | null,
 };
 
 /**  A playlist, album or liked songs kept downloaded. */
@@ -863,6 +888,11 @@ export type KeptCollection = KeptCollection_Serialize | KeptCollection_Deseriali
 /**  A playlist, album or liked songs kept downloaded. */
 export type KeptCollection_Deserialize = {
 	card: CollectionCard_Deserialize,
+	/**
+	 *  Whose copy this is (an opaque account key): two accounts may keep
+	 *  the same playlist.
+	 */
+	account: string,
 	/**  The channel that keeps it. */
 	channel?: string | null,
 	/**  Kept by the account in use, so it stays up to date. */
@@ -883,6 +913,11 @@ export type KeptCollection_Deserialize = {
 /**  A playlist, album or liked songs kept downloaded. */
 export type KeptCollection_Serialize = {
 	card: CollectionCard_Serialize,
+	/**
+	 *  Whose copy this is (an opaque account key): two accounts may keep
+	 *  the same playlist.
+	 */
+	account: string,
 	/**  The channel that keeps it. */
 	channel: string | null,
 	/**  Kept by the account in use, so it stays up to date. */

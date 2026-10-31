@@ -127,16 +127,17 @@ export interface Api {
   downloadRemove(trackIds: string[]): Promise<T.DownloadRemoved>;
   /** Keep a playlist, album or liked songs downloaded and up to date. */
   downloadKeep(id: string): Promise<void>;
-  downloadUnkeep(id: string): Promise<T.DownloadRemoved>;
+  /** Stop keeping a collection: `account`'s copy, or the likeliest one. */
+  downloadUnkeep(id: string, account: string | null): Promise<T.DownloadRemoved>;
   /** Check kept collections for changes: one, or all. */
   downloadsSync(id: string | null): Promise<void>;
   downloadsPause(paused: boolean): Promise<void>;
-  downloadPauseCollection(id: string, paused: boolean): Promise<void>;
+  downloadPauseCollection(id: string, paused: boolean, account: string | null): Promise<void>;
   /** Try failed downloads again, and resume after a wait that stopped them. */
   downloadsRetry(): Promise<void>;
   downloadsRemoveAll(): Promise<void>;
   downloadsStorage(): Promise<T.DownloadsStorage>;
-  /** Ask the backend to check the connection now; returns what it knows. */
+  /** Check the connection now; true when YouTube answered. */
   connectivityCheck(): Promise<boolean>;
   /** URL for an art key at a given edge size. */
   artUrl(key: string, size: number): string;

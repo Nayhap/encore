@@ -302,7 +302,7 @@
       </div>
       <div class="btns">
         <button class="pill" onclick={() => nav.go({ name: "downloads" })}>Open Downloads</button>
-        <button class="pill" disabled={!downloads.available || (!downloads.count && !downloads.busy)} onclick={() => downloads.removeAll()}>Remove all downloads…</button>
+        <button class="pill" disabled={!downloads.available || (!downloads.items.size && !downloads.kept.length && !(stored?.bytes ?? downloads.summary?.bytes))} onclick={() => downloads.removeAll()}>Remove all downloads…</button>
       </div>
     </div>
     <div class="row">

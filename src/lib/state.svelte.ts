@@ -566,6 +566,9 @@ class Downloads {
   summary = $state<DownloadsSummary | null>(null);
   #rev = -1n;
   #loading: Promise<void> | null = null;
+  /** Something changed while a snapshot was on its way: fetch another. */
+  #again = false;
+  #countsTimer = 0;
 
   available = $derived(this.summary?.available ?? false);
   /** Songs on this computer. */
@@ -604,6 +607,11 @@ class Downloads {
   }
 
   apply(s: DownloadsSnapshot) {
+    // Older than events already applied: keep those, and ask again.
+    if (big(s.summary.revision) < this.#rev) {
+      this.#again = true;
+      return;
+    }
     this.#rev = big(s.summary.revision);
     this.summary = s.summary;
     this.items.clear();
@@ -612,16 +620,38 @@ class Downloads {
     this.kept = s.collections;
   }
 
-  refresh() {
-    this.#loading ??= call((a) => a.downloadsSnapshot())
+  refresh(): Promise<void> {
+    if (this.#loading) {
+      this.#again = true;
+      return this.#loading;
+    }
+    this.#again = false;
+    this.#loading = call((a) => a.downloadsSnapshot())
       .then((s) => this.apply(s))
       .catch(() => {})
-      .finally(() => (this.#loading = null));
+      .finally(() => {
+        this.#loading = null;
+        if (this.#again) void this.refresh();
+      });
     return this.#loading;
   }
 
+  /** Kept collections' counts come with snapshots: one, shortly after
+   *  songs finish, keeps their progress current. */
+  #countsSoon() {
+    if (!this.kept.length || this.#countsTimer) return;
+    this.#countsTimer = window.setTimeout(() => {
+      this.#countsTimer = 0;
+      void this.refresh();
+    }, 1500);
+  }
+
   onSummary(s: DownloadsSummary) {
-    if (this.#rev < 0n) return;
+    if (this.#rev < 0n || this.#loading) {
+      // Not caught up yet: the snapshot on its way may be older than this.
+      this.#again = true;
+      return;
+    }
     const r = big(s.revision);
     if (r < this.#rev) return;
     this.summary = s;
@@ -629,7 +659,10 @@ class Downloads {
   }
 
   onItem(e: DownloadItemEvent) {
-    if (this.#rev < 0n) return;
+    if (this.#rev < 0n || this.#loading) {
+      this.#again = true;
+      return;
+    }
     const r = big(e.revision);
     if (r <= this.#rev) return;
     if (r !== this.#rev + 1n) return void this.refresh();
@@ -640,6 +673,7 @@ class Downloads {
       this.items.set(it.track.id, it);
       catalog.addTracks([it.track]);
     }
+    if (it.state !== "queued" && it.state !== "downloading") this.#countsSoon();
   }
 
   #off() {
@@ -667,7 +701,8 @@ class Downloads {
       const one = ids.length === 1 ? (catalog.track(ids[0])?.title ?? "the song") : null;
       if (r.kept.length) {
         const k = r.kept[0];
-        ui.say(`“${catalog.track(k.trackId)?.title ?? "This song"}” stays downloaded: “${k.collection}” is kept downloaded and has it.`);
+        const t = catalog.track(k.trackId)?.title ?? "This song";
+        ui.say(k.collection ? `“${t}” stays downloaded because “${k.collection}” includes it.` : `“${t}” stays downloaded because another account on this computer downloaded it too.`);
       } else if (one) ui.say(stopping ? `Stopped downloading “${one}”` : `Removed “${one}” from downloads`);
       else ui.say(`Removed ${r.removed} downloads`);
     } catch (e: any) {
@@ -686,18 +721,19 @@ class Downloads {
     }
   }
 
-  /** Stop keeping a collection, after saying what goes. */
-  unkeep(id: string) {
-    const k = this.keptFor(id);
+  /** Stop keeping a collection (this copy, or the likeliest one), after
+   *  saying what goes. */
+  unkeep(id: string, copy?: KeptCollection) {
+    const k = copy ?? this.keptFor(id);
     if (!k) return;
     ui.confirm = {
       title: "Remove this download?",
-      text: `${songs(k.ready)} of “${k.card.title}” (${sizeText(k.bytes)}) are deleted from this computer, except those you downloaded on their own or another download has. Nothing changes on YouTube Music.`,
+      text: `The downloaded songs of “${k.card.title}” (${songs(k.ready)}, ${sizeText(k.bytes)}) are removed from this computer. Songs you downloaded separately, or that another downloaded playlist or album includes, stay. Nothing changes on YouTube Music.`,
       confirm: "Remove download",
       danger: true,
       run: async () => {
         try {
-          await call((a) => a.downloadUnkeep(k.card.id));
+          await call((a) => a.downloadUnkeep(k.card.id, k.account));
           ui.say(`Removed the download of “${k.card.title}”`);
         } catch (e: any) {
           ui.say(`Could not remove: ${e.message}`);
@@ -718,10 +754,10 @@ class Downloads {
       .catch((e: BackendError) => ui.say(`Could not change that: ${e.message}`));
   }
 
-  pauseKept(id: string, on: boolean) {
-    const k = this.keptFor(id);
+  pauseKept(id: string, on: boolean, copy?: KeptCollection) {
+    const k = copy ?? this.keptFor(id);
     if (!k) return;
-    call((a) => a.downloadPauseCollection(k.card.id, on))
+    call((a) => a.downloadPauseCollection(k.card.id, on, k.account))
       .then(() => ui.say(on ? `Paused downloading “${k.card.title}”` : `Resumed downloading “${k.card.title}”`))
       .catch((e: BackendError) => ui.say(`Could not change that: ${e.message}`));
   }
@@ -736,7 +772,7 @@ class Downloads {
     const s = this.summary;
     ui.confirm = {
       title: "Remove all downloads?",
-      text: `${songs(s?.songs ?? 0)} (${sizeText(s?.bytes)}) are deleted from this computer, for every account, and no playlist or album stays downloaded. Nothing changes on YouTube Music.`,
+      text: `${songs(s?.songs ?? 0)} (${sizeText(s?.bytes)}) are removed from this computer, for every account, along with downloads that are waiting or failed, and no playlist or album stays downloaded. Nothing changes on YouTube Music.`,
       confirm: "Remove all",
       danger: true,
       run: async () => {
@@ -759,6 +795,9 @@ export const playlists = new Playlists();
 export const setup = new Setup();
 export const downloads = new Downloads();
 
+/** Why a collection can't be downloaded offline: it has to be read first. */
+export const KEEP_OFFLINE = "You're offline. Encore needs to read the list first, so try again when you're back online.";
+
 /** Offline, actions that need YouTube say why instead of running (D23). */
 export const needsOnline = (what: string) => (ui.online ? undefined : `You're offline. Connect to the internet to ${what}.`);
 
@@ -771,8 +810,9 @@ export function keptNote(k: KeptCollection | undefined, syncing: boolean): strin
   if (syncing) return "Checking for changes…";
   if (k.error) return k.error;
   if (k.paused) return `Paused · ${k.ready} of ${songs(k.songs)} downloaded`;
+  if (!k.songs) return "Reading the list…";
   if (k.ready + k.failed < k.songs) return `${k.ready} of ${songs(k.songs)} downloaded`;
-  if (k.failed) return `${k.failed === 1 ? "1 song" : `${k.failed} songs`} couldn't be downloaded`;
+  if (k.failed) return `${k.failed === 1 ? "1 song" : `${k.failed} songs`} couldn't be downloaded. Try again from the Downloads page.`;
   return "Downloaded · new songs are downloaded too";
 }
 
@@ -882,7 +922,7 @@ export function collectionMenu(id: string): MenuItem[] {
     ? []
     : kept
       ? [{ label: "Remove download…", icon: "downloaded", run: () => downloads.unkeep(id) }]
-      : [{ label: "Download", icon: "download", disabled: needsOnline("download this"), run: () => void downloads.keep(id) }];
+      : [{ label: "Download", icon: "download", disabled: ui.online ? undefined : KEEP_OFFLINE, run: () => void downloads.keep(id) }];
   return [
     { label: "Play", icon: "play", run: () => player.playCollection(id) },
     { label: "Shuffle", icon: "shuffle", run: () => player.playCollection(id, 0, true) },

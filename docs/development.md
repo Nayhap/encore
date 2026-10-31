@@ -68,7 +68,8 @@ update.
 For downloads, `?downloaded` starts with a playlist kept and downloaded and
 one song on its own, `?offline` starts offline (switching the browser's
 network off and on flips it too), and `?dlfail` makes every third download
-fail with YouTube's bot check.
+fail as unavailable and the fifth meet a bot check, which pauses downloads
+for 20 seconds without failing the song.
 
 ## Build
 
@@ -145,7 +146,8 @@ $C downloads keep MPREb_7ltM34kr0mH  # keep an album downloaded (LM: liked songs
 $C downloads list                    # songs, kept collections, what waits
 $C downloads sync                    # check kept collections for changes
 $C downloads remove 4D7u5KF7SP8
-$C downloads pause                   # and resume
+$C downloads pause                   # the running app follows
+$C downloads resume                  # and tries failed songs again
 $C play 4D7u5KF7SP8 --offline        # from the downloads only: no components, no YouTube
 ```
 

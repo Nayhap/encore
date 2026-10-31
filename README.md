@@ -40,8 +40,8 @@
 - **Song or video**: switch between a song and its music video (audio
   only) from the now playing panel or any track's menu.
 - **Downloads for offline listening**, kept inside Encore: download songs,
-  or a playlist, album or your liked songs and it stays up to date. With no
-  connection, downloaded songs play and the rest of the queue waits.
+  or a playlist, album or your liked songs and it stays up to date. Offline,
+  Encore plays the downloaded songs and skips the others in the queue.
 - **Native playback** in Rust, with seek, a disk cache and the next song
   loaded ahead of time.
 - **Shuffle, repeat and autoplay** that work the way you expect.
@@ -92,8 +92,8 @@ install, and nothing else on your computer changes. Encore keeps them up to
 date when it updates. **Settings → Playback** shows them and can remove them
 to free the space.
 
-Uninstalling keeps Encore's caches, settings, player components (a few
-hundred MB at most) and downloads unless you tick **Delete the application data** in the
+Uninstalling keeps Encore's caches, settings and player components (a few
+hundred MB at most), and your downloads, unless you tick **Delete the application data** in the
 Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
 lists the folders to delete by hand on macOS and Linux, and the saved session
 in the system's credential store.

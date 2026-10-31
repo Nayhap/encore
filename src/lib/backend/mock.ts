@@ -362,8 +362,9 @@ if (q.has("updating")) setTimeout(rtInstall, 1500);
 // One simulated worker: a song "downloads" in 1.5 s, at 0.25 s ticks.
 // `?downloaded` starts with "Late night" kept and downloaded, plus one song
 // on its own; `?offline` starts offline (the browser's online and offline
-// events flip it); `?dlfail` fails every third song with the bot-check
-// sentence.
+// events flip it); `?dlfail` fails every third song as unavailable, and
+// the fifth song meets a bot check that pauses everything for 20 s, as the
+// real worker does.
 const dl = {
   rev: 1,
   ver: 0,
@@ -374,6 +375,7 @@ const dl = {
   online: !q.has("offline"),
   active: null as null | { id: string; bytes: number; total: number; attempt: string },
   started: 0,
+  botUntil: 0,
 };
 const now = () => Date.now() / 1000;
 const isLocal = (id: string | undefined) => !!id && dl.items.get(id)?.state === "ready";
@@ -404,8 +406,11 @@ function dlSummary(): T.DownloadsSummary {
     bytes: ready.reduce((n, i) => n + (i.bytes ?? 0), 0) + (dl.active?.bytes ?? 0),
     active: dl.active ? { trackId: dl.active.id, attempt: dl.active.attempt, bytes: dl.active.bytes, total: dl.active.total } : null,
     paused: dl.paused,
-    wait: dl.online ? null : "offline",
-    message: dl.online ? null : "You're offline. Downloads continue when you're back online.",
+    ...(!dl.online
+      ? { wait: "offline" as const, message: "You're offline. Downloads continue when you're back online." }
+      : Date.now() < dl.botUntil
+        ? { wait: "botCheck" as const, message: `YouTube asked Encore to prove it isn't a bot. Downloads continue in 1 minute.` }
+        : { wait: null, message: null }),
     online: dl.online,
     syncing: [],
   };
@@ -414,7 +419,7 @@ function dlKept(): T.KeptCollection[] {
   return [...dl.kept.values()].map((k) => {
     const items = k.ids.map((id) => dl.items.get(id));
     return {
-      card: k.card, channel: auth.state === "signedIn" ? auth.channel.name : null, mine: true, songs: k.ids.length,
+      card: k.card, account: "mock", channel: auth.state === "signedIn" ? auth.channel.name : null, mine: true, songs: k.ids.length,
       ready: items.filter((i) => i?.state === "ready").length, failed: items.filter((i) => i?.state === "failed").length,
       bytes: items.reduce((n, i) => n + (i?.state === "ready" ? (i.bytes ?? 0) : 0), 0), synced: k.synced, error: null, gone: false, paused: k.paused,
     };
@@ -428,13 +433,26 @@ function dlChanged() {
 }
 setInterval(() => {
   if (dl.paused || !dl.online) return;
+  if (dl.botUntil && Date.now() >= dl.botUntil) {
+    dl.botUntil = 0;
+    dlEmit();
+  }
+  if (Date.now() < dl.botUntil) return;
   if (!dl.active) {
     const next = [...dl.items.values()].find((i) => i.state === "queued" && wanted(i.track.id));
     if (!next) return;
     const id = next.track.id;
-    if (q.has("dlfail") && ++dl.started % 3 === 0) {
-      dlSet(id, "failed", { error: "YouTube is asking Encore to prove it isn't a bot. Wait a few minutes and try again." });
-      return dlEmit();
+    if (q.has("dlfail")) {
+      const n = ++dl.started;
+      // A bot check waits and keeps the song queued; it never fails it.
+      if (n === 5) {
+        dl.botUntil = Date.now() + 20_000;
+        return dlEmit();
+      }
+      if (n % 3 === 0) {
+        dlSet(id, "failed", { error: "This song isn't available in your country." });
+        return dlEmit();
+      }
     }
     dl.active = { id, bytes: 0, total: songBytes(next.track), attempt: String(Date.now()) };
     dlSet(id, "downloading", { attempt: dl.active.attempt });
@@ -882,7 +900,7 @@ export const mockApi: Api = {
     for (const id of ids) {
       dl.pins.delete(id);
       const k = keptBy(id);
-      if (k) kept.push({ trackId: id, collection: k.card.title });
+      if (k) kept.push({ trackId: id, collection: k.card.title as string | null });
       else if (dl.items.has(id)) {
         if (dl.active?.id === id) dl.active = null;
         dlSet(id, "removed");

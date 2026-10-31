@@ -2,7 +2,7 @@
   import { call, type KeptCollection, type Track } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, kindLabel, sizeText } from "$lib/data";
-  import { downloads, keptNote, nav, player, ui, type MenuItem } from "$lib/state.svelte";
+  import { downloads, keptNote, nav, player, setup, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Status from "$lib/components/Status.svelte";
@@ -21,10 +21,9 @@
   const s = $derived(downloads.summary);
   const active = $derived(s?.active ? (downloads.items.get(s.active.trackId)?.track ?? catalog.track(s.active.trackId)) : undefined);
   const pct = $derived(s?.active ? downloads.progress(s.active.trackId) : null);
-  // Kept collections, this account's first, one row per collection.
-  const kept = $derived(
-    [...downloads.kept].sort((a, b) => Number(b.mine) - Number(a.mine)).filter((k, i, xs) => xs.findIndex((x) => x.card.id === k.card.id) === i),
-  );
+  // Kept collections, this account's first. Two accounts keeping the same
+  // playlist are two rows, each with its keeper.
+  const kept = $derived([...downloads.kept].sort((a, b) => Number(b.mine) - Number(a.mine)));
 
   const n = (x: number, one: string, many: string) => (x === 1 ? `1 ${one}` : `${x} ${many}`);
   const activity = $derived.by(() => {
@@ -47,8 +46,8 @@
     const items: MenuItem[] = [
       { label: "Open", icon: "list", run: () => nav.go({ name: "collection", id: k.card.id }) },
       { label: "Check for changes", icon: "repeat", disabled: !ui.online ? "You're offline. Connect to the internet to check for changes." : k.mine ? undefined : "Only the account that downloaded it can check it for changes.", run: () => downloads.sync(k.card.id) },
-      { label: k.paused ? "Resume downloading" : "Pause downloading", icon: k.paused ? "play" : "pause", run: () => downloads.pauseKept(k.card.id, !k.paused) },
-      { label: "Remove download…", icon: "trash", danger: true, run: () => downloads.unkeep(k.card.id) },
+      { label: k.paused ? "Resume downloading" : "Pause downloading", icon: k.paused ? "play" : "pause", run: () => downloads.pauseKept(k.card.id, !k.paused, k) },
+      { label: "Remove download…", icon: "trash", danger: true, run: () => downloads.unkeep(k.card.id, k) },
     ];
     ui.openMenu(e, items);
   }
@@ -57,8 +56,12 @@
     player.playTracks(songs, Math.floor(Math.random() * songs.length), { label: "Downloads", collectionId: null, radioPlaylist: null }, true);
   }
 
+  let checking = $state(false);
   async function checkConnection() {
+    checking = true;
     const on = await call((a) => a.connectivityCheck()).catch(() => false);
+    checking = false;
+    // Online: the banner goes by itself.
     if (!on) ui.say("Still offline. Encore keeps checking, and downloads continue once it's back.");
   }
 </script>
@@ -77,7 +80,7 @@
       <div class="notice" role="status">
         <Icon name="offline" size={18} />
         <div><b>You're offline.</b> <span>Your downloaded songs play as usual.</span></div>
-        <button class="pill" onclick={checkConnection}>Check again</button>
+        <button class="pill" disabled={checking} onclick={checkConnection}>{checking ? "Checking…" : "Check again"}</button>
       </div>
     {/if}
 
@@ -97,6 +100,8 @@
         <div class="btns">
           {#if s?.wait === "stopped" || s?.wait === "diskFull"}
             <button class="pill" onclick={() => downloads.retry()}>Try again</button>
+          {:else if s?.wait === "setupNeeded"}
+            <button class="pill primary" onclick={() => setup.show()}>Set up playback</button>
           {/if}
           {#if s?.waiting || s?.paused}
             <button class="pill" onclick={() => downloads.pause(!s?.paused)}>
@@ -146,7 +151,7 @@
     {#if tab === "Songs"}
       {#if waiting.length}
         <h2 class="sub">Waiting</h2>
-        <TrackTable tracks={waiting.map((i) => i.track)} label="Downloads" head={false} />
+        <TrackTable tracks={waiting.map((i) => i.track)} label="Waiting downloads" head={false} />
       {/if}
       {#if songs.length}
         {#if waiting.length}<h2 class="sub">Downloaded</h2>{/if}
@@ -159,14 +164,14 @@
       {/if}
     {:else}
       <ul class="kept">
-        {#each kept as k (k.card.id)}
+        {#each kept as k (k.account + "|" + k.card.id)}
           {@const note = keptNote(k, downloads.syncing(k.card.id))}
           <li class:other={!k.mine}>
             <button class="open" onclick={() => nav.go({ name: "collection", id: k.card.id })} oncontextmenu={(e) => keptMenu(e, k)}>
               <span class="art"><Cover art={k.card.art} radius={6} size={120} label={k.card.title} /></span>
               <span class="txt">
                 <span class="t ell">{k.card.title}</span>
-                <span class="m ell">{kindLabel[k.card.kind]} · {n(k.songs, "song", "songs")} · {sizeText(k.bytes)}</span>
+                <span class="m ell">{kindLabel[k.card.kind]} · {n(k.songs, "song", "songs")} · {sizeText(k.bytes)}{k.mine ? "" : k.channel ? ` · ${k.channel}` : " · signed out"}</span>
                 {#if note}<span class="note ell" class:warn={!!k.error && !k.gone}>{note}</span>{/if}
               </span>
             </button>

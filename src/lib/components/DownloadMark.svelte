@@ -10,11 +10,14 @@
 
   const it = $derived(downloads.items.get(id));
   const pct = $derived(downloads.progress(id));
+  // What was actually downloaded, as it was served (D5 order, no choice).
+  const format = $derived(it?.codec ? `${it.codec === "opus" ? "Opus" : it.codec === "aac" ? "AAC" : it.codec}${it.kbps ? ` ${it.kbps} kbps` : ""}` : null);
+  const readyText = $derived(format ? `Downloaded · ${format}` : "Downloaded");
   const waitText = $derived(downloads.summary?.paused ? "Download paused" : (downloads.summary?.message ?? "Waiting to download"));
 </script>
 
 {#if it?.state === "ready"}
-  <span class="mark" role="img" aria-label="Downloaded" title="Downloaded"><Icon name="downloaded" {size} /></span>
+  <span class="mark" role="img" aria-label={readyText} title={readyText}><Icon name="downloaded" {size} /></span>
 {:else if it?.state === "downloading"}
   {#if pct != null}
     <span
