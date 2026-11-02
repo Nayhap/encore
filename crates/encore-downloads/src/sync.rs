@@ -19,6 +19,11 @@ const MAX_TIME: Duration = Duration::from_secs(300);
 const PAGE_GAP: Duration = Duration::from_millis(2500);
 #[cfg(test)]
 const PAGE_GAP: Duration = Duration::ZERO;
+/// At least this long after any other background request (D23).
+#[cfg(not(test))]
+const MIN_GAP: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const MIN_GAP: Duration = Duration::ZERO;
 
 #[derive(Debug)]
 pub enum Traversal {
@@ -66,7 +71,7 @@ async fn admitted(gate: &Arc<PlaybackGate>, go_on: &(dyn Fn() -> bool + Send + S
         if !go_on() {
             return None;
         }
-        if let Some(g) = gate.try_background() {
+        if let Some(g) = gate.try_background_after(MIN_GAP) {
             return Some(g);
         }
         tokio::time::sleep(Duration::from_millis(200)).await;

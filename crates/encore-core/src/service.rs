@@ -159,6 +159,8 @@ pub trait LoudnessSource: Send + Sync {
 pub struct PlaybackGate {
     /// (playback in flight, background in flight)
     count: Mutex<(usize, usize)>,
+    /// When the last background request was admitted.
+    last: Mutex<Option<std::time::Instant>>,
 }
 
 impl PlaybackGate {
@@ -174,7 +176,17 @@ impl PlaybackGate {
             return None;
         }
         c.1 += 1;
+        *self.last.lock() = Some(std::time::Instant::now());
         Some(GateGuard(self.clone(), true))
+    }
+
+    /// As `try_background`, and only once `gap` has passed since the last
+    /// background request, whoever made it.
+    pub fn try_background_after(self: &Arc<Self>, gap: std::time::Duration) -> Option<GateGuard> {
+        if self.last.lock().is_some_and(|t| t.elapsed() < gap) {
+            return None;
+        }
+        self.try_background()
     }
 
     /// A playback resolve is in flight.

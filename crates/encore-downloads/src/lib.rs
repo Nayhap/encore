@@ -1210,7 +1210,8 @@ impl DownloadManager {
             if cancel.load(Ordering::SeqCst) {
                 return None;
             }
-            if let Some(turn) = self.d.gate.try_background() {
+            // Collection checks count too: never closer than the shortest gap.
+            if let Some(turn) = self.d.gate.try_background_after(lo) {
                 self.mem.lock().last_request = Some(Instant::now());
                 return Some(turn);
             }

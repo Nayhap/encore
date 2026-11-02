@@ -554,6 +554,9 @@ const keptKey = (id: string) => {
   return `ytm:VL${m[1]}`;
 };
 
+/** A summary without its progress, to tell a real change from a tick. */
+const settled = ({ active, bytes: _bytes, ...rest }: DownloadsSummary) => JSON.stringify({ ...rest, active: active?.trackId ?? null });
+
 const songs = (n: number) => (n === 1 ? "1 song" : `${n} songs`);
 
 /** Downloads (D23). Rust owns them; this mirrors the songs, the kept
@@ -570,6 +573,9 @@ class Downloads {
   #again = false;
   /** The newest revision an event announced while a snapshot was loading. */
   #seen = -1n;
+  /** The last summary that came meanwhile: pause and waits change it
+   *  without a new revision. */
+  #pending: DownloadsSummary | null = null;
   #countsTimer = 0;
 
   available = $derived(this.summary?.available ?? false);
@@ -633,7 +639,12 @@ class Downloads {
       .catch(() => {})
       .finally(() => {
         this.#loading = null;
-        if (this.#again || this.#seen > this.#rev) void this.refresh();
+        // A summary at the same revision may be older or newer than the
+        // snapshot; unless only progress differs, ask once more.
+        const p = this.#pending;
+        this.#pending = null;
+        const differs = !!p && !!this.summary && big(p.revision) === this.#rev && settled(p) !== settled(this.summary);
+        if (this.#again || differs || this.#seen > this.#rev) void this.refresh();
       });
     return this.#loading;
   }
@@ -654,6 +665,7 @@ class Downloads {
       // Not caught up yet: the snapshot on its way may be older than this.
       // Progress at the same revision needs no other snapshot.
       if (r > this.#seen) this.#seen = r;
+      this.#pending = s;
       return;
     }
     if (r < this.#rev) return;

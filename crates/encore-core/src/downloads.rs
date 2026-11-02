@@ -640,8 +640,10 @@ impl Store {
         let hue = r.art_hue.map(|(a, b)| format!("{a},{b}"));
         let mut c = self.conn.lock();
         let tx = c.transaction().map_err(db_err)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO downloads (video_id, track, state, itag, ext, codec, kbps, total, bytes, sha256, loudness, duration, art_key, art_base, art_hue, attempt, added, done_at)
+        // Never over a row that exists by now: a song asked for again
+        // meanwhile is that request's to finish.
+        let added = tx.execute(
+            "INSERT OR IGNORE INTO downloads (video_id, track, state, itag, ext, codec, kbps, total, bytes, sha256, loudness, duration, art_key, art_base, art_hue, attempt, added, done_at)
              VALUES (?1, ?2, 'ready', ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)",
             params![
                 r.video_id,
@@ -662,7 +664,9 @@ impl Store {
             ],
         )
         .map_err(db_err)?;
-        tx.execute("INSERT OR IGNORE INTO download_pins (account, video_id, added) VALUES (?1, ?2, ?3)", params![account, r.video_id, now()]).map_err(db_err)?;
+        if added == 1 {
+            tx.execute("INSERT OR IGNORE INTO download_pins (account, video_id, added) VALUES (?1, ?2, ?3)", params![account, r.video_id, now()]).map_err(db_err)?;
+        }
         tx.commit().map_err(db_err)?;
         Ok(())
     }

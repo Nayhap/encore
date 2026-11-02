@@ -146,8 +146,8 @@ enum Read {
     TooLong,
     /// The connection stopped after this many bytes.
     Cut(u64, String),
-    /// `stop` said so after this many bytes.
-    Stopped(u64),
+    /// `stop` said so.
+    Stopped,
 }
 
 /// Write a body at `at`, at most `limit` bytes, checking `stop` between pieces.
@@ -157,7 +157,7 @@ async fn write_body(file: &mut tokio::fs::File, body: &mut Box<dyn Body>, at: u6
     loop {
         // A body that has all it should is finished, whatever `stop` says.
         if n < limit && stop() {
-            return Ok(Read::Stopped(n));
+            return Ok(Read::Stopped);
         }
         match body.chunk().await {
             Ok(Some(c)) => {
@@ -224,7 +224,7 @@ pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, sto
                         off = b + 1;
                         failures = 0;
                     }
-                    Read::Stopped(_) => {
+                    Read::Stopped => {
                         file.set_len(a).await.map_err(TransferError::Disk)?;
                         file.flush().await.map_err(TransferError::Disk)?;
                         return Ok(Outcome::Stopped);
@@ -245,7 +245,7 @@ pub async fn transfer(f: &dyn Fetcher, src: &Source, part: &Path, from: u64, sto
                 match write_body(&mut file, &mut got.body, 0, src.total, stop, progress).await? {
                     Read::Done(n) if n == src.total => off = src.total,
                     // What arrived is a good start to continue from.
-                    Read::Stopped(_) => {
+                    Read::Stopped => {
                         file.flush().await.map_err(TransferError::Disk)?;
                         return Ok(Outcome::Stopped);
                     }

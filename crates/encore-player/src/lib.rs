@@ -72,6 +72,9 @@ struct State {
     radio_cursor: Option<String>,
     radio_loading: bool,
     radio_empty: u32,
+    /// The track generation an offline skip already moved on from, so a
+    /// failed load and the connection dropping don't both skip.
+    skipped_gen: Option<u64>,
     queue_loading: bool,
     last_queue: Vec<QueueEntry>,
     last_queue_rev: u64,
@@ -139,6 +142,7 @@ impl Player {
                 radio_cursor: None,
                 radio_loading: false,
                 radio_empty: 0,
+                skipped_gen: None,
                 queue_loading: false,
                 last_queue: vec![],
                 last_queue_rev: 0,
@@ -634,9 +638,10 @@ impl Player {
     async fn skip_unavailable(self: &Arc<Self>, my_gen: u64) {
         let (step, title, passed) = {
             let mut st = self.st.lock();
-            if st.track_gen != my_gen {
+            if st.track_gen != my_gen || st.skipped_gen == Some(my_gen) {
                 return;
             }
+            st.skipped_gen = Some(my_gen);
             let title = st.queue.current().map(|c| c.track.title.clone()).unwrap_or_default();
             let ok = self.avail();
             let step = st.queue.next_where(&ok);

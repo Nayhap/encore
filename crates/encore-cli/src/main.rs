@@ -999,7 +999,7 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
         DownloadsCmd::List => {
             let snap = dl.snapshot();
             out(json, &snap, |s| {
-                println!("{} songs, {} ({}){}", s.summary.songs, size(s.summary.bytes), dl.dir().display(), s.summary.message.as_ref().map(|m| format!(". {m}")).unwrap_or_default());
+                println!("{}, {} ({}){}", songs(s.summary.songs as usize), size(s.summary.bytes), dl.dir().display(), s.summary.message.as_ref().map(|m| format!(". {m}")).unwrap_or_default());
                 for i in &s.items {
                     let fmt = match (&i.codec, i.kbps) {
                         (Some(c), Some(k)) => format!("{c} {k} kbps"),
@@ -1033,7 +1033,7 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
         }
         DownloadsCmd::Unkeep { id } => {
             let r = dl.unkeep(&ItemId::parse(&id), None).map_err(e)?;
-            println!("no longer kept; {} songs removed", r.removed);
+            println!("no longer kept; {} removed", songs(r.removed as usize));
             return Ok(());
         }
         DownloadsCmd::Remove { videos } => {
@@ -1082,7 +1082,7 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
     let t0 = Instant::now();
     let wait = dl.settle().await;
     let s = dl.summary();
-    println!("{} songs downloaded, {} waiting, {} failed ({:.0}s)", s.songs, s.waiting, s.failed, t0.elapsed().as_secs_f64());
+    println!("{} downloaded, {} waiting, {} failed ({:.0}s)", songs(s.songs as usize), s.waiting, s.failed, t0.elapsed().as_secs_f64());
     if wait.is_some() {
         if let Some(m) = s.message {
             println!("{m}");
@@ -1174,4 +1174,8 @@ pub fn report(engine: &Engine, what: &str) {
         s.sample_rate,
         s.channels
     );
+}
+
+fn songs(n: usize) -> String {
+    if n == 1 { "1 song".into() } else { format!("{n} songs") }
 }
