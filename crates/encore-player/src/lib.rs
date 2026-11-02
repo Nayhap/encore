@@ -602,6 +602,19 @@ impl Player {
             let _ = self.tx.send(PlayerEvent::SessionExpired);
         }
         self.publish(false);
+        // The connection went while this song was loading and it isn't
+        // downloaded: go on as `set_online(false)` does for a stopped song.
+        if !self.online() {
+            let ok = self.avail();
+            let (missing, track_gen) = {
+                let st = self.st.lock();
+                (st.queue.current().is_some_and(|c| !ok(&c.track)), st.track_gen)
+            };
+            if missing {
+                self.skip_unavailable(track_gen).await;
+                return;
+            }
+        }
         if matches!(f.kind, PlayFailureKind::SetupNeeded | PlayFailureKind::Network | PlayFailureKind::Challenged) {
             let _ = self.tx.send(PlayerEvent::Notice(f.message.clone()));
         } else if autoskip {

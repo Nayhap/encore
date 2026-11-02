@@ -151,9 +151,10 @@ pub trait LoudnessSource: Send + Sync {
 
 /// Who is talking to YouTube: playback's resolves (playing, preloading)
 /// and background requests (downloads). A background request is admitted
-/// only while no playback resolve is in flight, checked and counted in one
-/// step, so pressing play is never slowed by the download queue (D23).
-/// Playback is always admitted.
+/// only while no playback resolve and no other background request is in
+/// flight, checked and counted in one step, so pressing play is never
+/// slowed by the download queue and song downloads and collection checks
+/// take turns (D23). Playback is always admitted.
 #[derive(Debug, Default)]
 pub struct PlaybackGate {
     /// (playback in flight, background in flight)
@@ -169,7 +170,7 @@ impl PlaybackGate {
     /// A background request may start now; hold the guard while it runs.
     pub fn try_background(self: &Arc<Self>) -> Option<GateGuard> {
         let mut c = self.count.lock();
-        if c.0 > 0 {
+        if c.0 > 0 || c.1 > 0 {
             return None;
         }
         c.1 += 1;
@@ -390,6 +391,7 @@ mod tests {
         let g = Arc::new(PlaybackGate::default());
         assert!(!g.busy());
         let bg = g.try_background().expect("nothing playing yet");
+        assert!(g.try_background().is_none(), "one background request at a time");
         let a = g.enter();
         assert!(g.try_background().is_none(), "playback first");
         let b = g.enter();

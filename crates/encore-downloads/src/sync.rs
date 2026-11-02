@@ -13,8 +13,12 @@ use encore_core::service::{GateGuard, More, MusicService, PlaybackGate, RequestC
 const MAX_ENTRIES: usize = 10_000;
 const MAX_PAGES: usize = 250;
 const MAX_TIME: Duration = Duration::from_secs(300);
-/// Between continuation pages, so a long playlist isn't read in a burst.
-const PAGE_GAP: Duration = Duration::from_millis(600);
+/// Between continuation pages, so a long playlist isn't read in a burst:
+/// about as far apart as song downloads (D23).
+#[cfg(not(test))]
+const PAGE_GAP: Duration = Duration::from_millis(2500);
+#[cfg(test)]
+const PAGE_GAP: Duration = Duration::ZERO;
 
 #[derive(Debug)]
 pub enum Traversal {
@@ -42,13 +46,15 @@ pub fn card_of(c: &Collection) -> CollectionCard {
     }
 }
 
-/// The saved order: (row key, the track that plays) for each playable row.
+/// The saved order: (row key, the track that plays) for each row, greyed
+/// out ones included: a song already downloaded stays while it's listed
+/// (the caller drops the others, which can't be downloaded now).
 /// D4: an album row listed by its music video plays the song, and the song
 /// is what is downloaded (`entry.track.id`), never the counterpart.
 pub fn members_of(entries: &[Entry]) -> Vec<(String, Track)> {
     entries
         .iter()
-        .filter(|e| e.track.playable && sanitize_key(e.track.id.remote()).is_some())
+        .filter(|e| sanitize_key(e.track.id.remote()).is_some())
         .map(|e| (e.set_video_id.clone().unwrap_or_else(|| e.entry_id.clone()), e.track.clone()))
         .collect()
 }
@@ -265,6 +271,7 @@ pub(crate) mod tests {
         let mut gone = entry("x");
         gone.track.playable = false;
         let m = members_of(&[e, gone]);
-        assert_eq!(ids(&m), vec!["song"]);
+        assert_eq!(ids(&m), vec!["song", "x"]);
+        assert!(!m[1].1.playable);
     }
 }

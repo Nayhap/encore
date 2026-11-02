@@ -291,10 +291,13 @@ impl DownloadManager {
             if !found.is_empty() {
                 tracing::warn!(songs = found.len(), "the downloads index was empty; finding the songs again from their files");
             }
+            // One that can't be saved now is found again by `reconcile`.
             for s in &found {
-                d.store.download_recover(RECOVERED, &s.row())?;
+                match d.store.download_recover(RECOVERED, &s.row()) {
+                    Ok(()) => recovered += 1,
+                    Err(e) => tracing::warn!(error = %e.message, "downloads: couldn't index a recovered song"),
+                }
             }
-            recovered = found.len();
         }
         let paused = d.store.get::<bool>(SETTINGS, PAUSED).ok().flatten().unwrap_or(false);
         let (tx, _) = broadcast::channel(256);
@@ -639,8 +642,20 @@ impl DownloadManager {
         let described: HashSet<String> = found.iter().filter_map(|s| s.row().file_name()).collect();
         for sc in &found {
             let r = sc.row();
-            if matches!(self.d.store.download_row(&r.video_id), Ok(Some(x)) if x.state != RowState::Ready) && matches!(self.d.store.download_restore(&r), Ok(true)) {
-                tracing::info!(video = %r.video_id, "an interrupted download was finished after all");
+            match self.d.store.download_row(&r.video_id) {
+                Ok(Some(x)) if x.state != RowState::Ready => {
+                    if matches!(self.d.store.download_restore(&r), Ok(true)) {
+                        tracing::info!(video = %r.video_id, "an interrupted download was finished after all");
+                    }
+                }
+                // Files are only unlinked before their row goes, so a
+                // described file without a row is a recovery that stopped
+                // halfway: index it now.
+                Ok(None) if r.file_name().is_some_and(|n| self.layout.file(&n).exists()) => match self.d.store.download_recover(RECOVERED, &r) {
+                    Ok(()) => tracing::info!(video = %r.video_id, "a downloaded song was found again from its file"),
+                    Err(e) => tracing::warn!(video = %r.video_id, error = %e.message, "downloads: couldn't index a found song"),
+                },
+                _ => {}
             }
         }
         let Ok(rd) = std::fs::read_dir(&self.layout.audio) else { return };
@@ -934,6 +949,12 @@ impl DownloadManager {
             return;
         }
         let s = &self.d.store;
+        // Greyed-out rows stay only if their song is already here: listed
+        // still, so its download is kept, but nothing new is fetched.
+        let mut t = t;
+        if let Traversal::Complete { members, .. } | Traversal::Partial { members, .. } = &mut t {
+            members.retain(|(_, tr)| tr.playable || !matches!(s.download_row(tr.id.remote()), Ok(None) | Ok(Some(DownloadRow { state: RowState::Queued | RowState::Failed | RowState::Deleting, .. }))));
+        }
         let (set, generation) = (id.as_str(), k.generation);
         let r = match &t {
             // A list that suddenly reads as empty is more likely a page
