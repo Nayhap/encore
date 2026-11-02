@@ -55,6 +55,9 @@ const HEADROOM: u64 = 64 * 1024 * 1024;
 const SYNC_EVERY: i64 = 6 * 3600;
 /// A check that failed is tried again this long after, when idle.
 const SYNC_RETRY: i64 = 30 * 60;
+/// Launch, account changes and reconnecting skip collections checked this
+/// recently, so a flaky connection doesn't read every list again each time.
+const SYNC_SOON: i64 = 15 * 60;
 /// When to ask again for lyrics nobody had.
 const LYRICS_RETRY: i64 = 7 * 24 * 3600;
 const GONE: &str = "This is no longer on YouTube Music, or it's private now. Your downloads of it stay.";
@@ -138,6 +141,9 @@ struct Mem {
     counts: Counts,
     last_progress: Option<Instant>,
     last_request: Option<Instant>,
+    /// When the stored pause flag was last read, so a download in progress
+    /// reads it about once a second rather than at every piece.
+    pause_read: Option<Instant>,
     /// Covers and lyrics that couldn't be fetched this session.
     art_tried: HashSet<String>,
     lyrics_tried: HashSet<String>,
@@ -313,6 +319,7 @@ impl DownloadManager {
                 counts: Counts::default(),
                 last_progress: None,
                 last_request: None,
+                pause_read: None,
                 art_tried: HashSet::new(),
                 lyrics_tried: HashSet::new(),
                 started: false,
@@ -643,8 +650,17 @@ impl DownloadManager {
                 continue;
             }
             let Some((vid, _)) = name.rsplit_once('-') else { continue };
-            let ready = matches!(self.d.store.download_row(vid), Ok(Some(x)) if x.state == RowState::Ready && x.file_name().as_deref() == Some(name.as_str()));
-            if !ready {
+            // Only a file the index can be read and says nothing of goes:
+            // an error reading the row keeps it.
+            let stray = match self.d.store.download_row(vid) {
+                Ok(Some(x)) => !(x.state == RowState::Ready && x.file_name().as_deref() == Some(name.as_str())),
+                Ok(None) => true,
+                Err(e) => {
+                    tracing::warn!(video = %vid, error = %e.message, "downloads: couldn't read a song's row; its file is kept");
+                    false
+                }
+            };
+            if stray {
                 files::remove(&e.path());
             }
         }
@@ -653,7 +669,11 @@ impl DownloadManager {
     /// Partial files no queued song will continue.
     fn clean_parts(&self) {
         for (vid, p) in self.layout.all_parts() {
-            let keep = matches!(self.d.store.download_row(&vid), Ok(Some(r)) if r.state == RowState::Queued);
+            let keep = match self.d.store.download_row(&vid) {
+                Ok(Some(r)) => r.state == RowState::Queued,
+                Ok(None) => false,
+                Err(_) => true,
+            };
             if !keep {
                 files::remove(&p);
             }
@@ -700,7 +720,7 @@ impl DownloadManager {
         self.emit_summary();
         // Reconnected: check this account's collections (D23).
         if on {
-            self.sync_due(0);
+            self.sync_due(SYNC_SOON);
         }
     }
 
@@ -791,7 +811,7 @@ impl DownloadManager {
     /// collections are checked, and the UI learns which are now "mine".
     pub fn account_changed(self: &Arc<Self>) {
         self.changed();
-        self.sync_due(0);
+        self.sync_due(SYNC_SOON);
     }
 
     /// Encore changed a playlist (D20) or liked songs: check it if kept.
@@ -815,7 +835,13 @@ impl DownloadManager {
             .unwrap_or_default()
             .into_iter()
             .filter(|k| k.account == account)
-            .filter(|k| k.synced.is_none_or(|s| n - s >= max_age) || (k.error.is_some() && k.checked.is_none_or(|c| n - c >= SYNC_RETRY.min(max_age.max(0)))))
+            .filter(|k| match k.synced {
+                // Never read to the end, or the last check failed: tried
+                // again on the retry clock, never straight after a check.
+                None => k.checked.is_none_or(|c| n - c >= SYNC_RETRY.min(max_age.max(0))),
+                Some(_) if k.error.is_some() => k.checked.is_none_or(|c| n - c >= SYNC_RETRY.min(max_age.max(0))),
+                Some(s) => n - s >= max_age,
+            })
             .map(|k| ItemId(k.set_id))
             .collect()
     }
@@ -867,6 +893,8 @@ impl DownloadManager {
             let id = job.id.clone();
             let ctx = job.ctx.clone();
             self.sync_once(job).await;
+            // The next list waits its turn like any other request (D23).
+            tokio::time::sleep(self.d.spacing.1).await;
             {
                 let mut m = self.mem.lock();
                 m.sync_running = None;
@@ -908,6 +936,12 @@ impl DownloadManager {
         let s = &self.d.store;
         let (set, generation) = (id.as_str(), k.generation);
         let r = match &t {
+            // A list that suddenly reads as empty is more likely a page
+            // Encore couldn't read than a real change: keep what's saved.
+            Traversal::Complete { card, members } if members.is_empty() && had => {
+                tracing::warn!(collection = %id, "a kept collection read as empty; keeping its songs");
+                s.kept_apply(&account, set, generation, None, Some(card), Some(CHECK_FAILED), false)
+            }
             Traversal::Complete { card, members } => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), None, false),
             // A first read that stopped short is still better than nothing.
             Traversal::Partial { card, members } if !had => s.kept_apply(&account, set, generation, Some(members.as_slice()), Some(card), Some(CHECK_FAILED), false),
@@ -1008,10 +1042,19 @@ impl DownloadManager {
     }
 
     fn should_stop(&self) -> bool {
-        if self.paused_now() {
-            return true;
-        }
-        !self.mem.lock().online
+        let fresh = {
+            let mut m = self.mem.lock();
+            if !m.online || m.paused {
+                return true;
+            }
+            let fresh = m.pause_read.is_some_and(|t| t.elapsed() < Duration::from_secs(1));
+            if !fresh {
+                m.pause_read = Some(Instant::now());
+            }
+            fresh
+        };
+        // The CLI pauses through the store (`encore-cli downloads pause`).
+        !fresh && self.paused_now()
     }
 
     async fn run(self: Arc<Self>) {

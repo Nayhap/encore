@@ -46,7 +46,7 @@
     const cur = player.current;
     if (cur && !downloads.has(cur.id)) out.push({ key: "a-dl", group: "Actions", icon: "download", title: "Download this song", sub: cur.title, hint: "D", run: () => void downloads.download([cur.id]) });
     const v = nav.view;
-    if (v.name === "collection" && !downloads.keptFor(v.id) && ui.online) out.push({ key: "a-dl-col", group: "Actions", icon: "download", title: "Download this playlist or album", sub: "Keep it downloaded and up to date", run: () => void downloads.keep(v.id) });
+    if (v.name === "collection" && !downloads.keptFor(v.id)?.mine && ui.online) out.push({ key: "a-dl-col", group: "Actions", icon: "download", title: "Download this playlist or album", sub: "Keep it downloaded and up to date", run: () => void downloads.keep(v.id) });
     const s = downloads.summary;
     if (s?.paused) out.push({ key: "a-dl-resume", group: "Actions", icon: "play", title: "Resume downloads", sub: "Downloads", run: () => downloads.pause(false) });
     else if (s?.waiting) out.push({ key: "a-dl-pause", group: "Actions", icon: "pause", title: "Pause downloads", sub: "Downloads", run: () => downloads.pause(true) });

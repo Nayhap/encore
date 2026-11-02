@@ -568,6 +568,8 @@ class Downloads {
   #loading: Promise<void> | null = null;
   /** Something changed while a snapshot was on its way: fetch another. */
   #again = false;
+  /** The newest revision an event announced while a snapshot was loading. */
+  #seen = -1n;
   #countsTimer = 0;
 
   available = $derived(this.summary?.available ?? false);
@@ -631,7 +633,7 @@ class Downloads {
       .catch(() => {})
       .finally(() => {
         this.#loading = null;
-        if (this.#again) void this.refresh();
+        if (this.#again || this.#seen > this.#rev) void this.refresh();
       });
     return this.#loading;
   }
@@ -647,23 +649,24 @@ class Downloads {
   }
 
   onSummary(s: DownloadsSummary) {
+    const r = big(s.revision);
     if (this.#rev < 0n || this.#loading) {
       // Not caught up yet: the snapshot on its way may be older than this.
-      this.#again = true;
+      // Progress at the same revision needs no other snapshot.
+      if (r > this.#seen) this.#seen = r;
       return;
     }
-    const r = big(s.revision);
     if (r < this.#rev) return;
     this.summary = s;
     if (r > this.#rev) void this.refresh();
   }
 
   onItem(e: DownloadItemEvent) {
+    const r = big(e.revision);
     if (this.#rev < 0n || this.#loading) {
-      this.#again = true;
+      if (r > this.#seen) this.#seen = r;
       return;
     }
-    const r = big(e.revision);
     if (r <= this.#rev) return;
     if (r !== this.#rev + 1n) return void this.refresh();
     this.#rev = r;
@@ -688,7 +691,8 @@ class Downloads {
     if (!tracks.length) return ui.say("These songs can't be downloaded");
     try {
       await call((a) => a.downloadTracks(tracks));
-      ui.say(tracks.length === 1 ? `Downloading “${tracks[0].title}”` : `Downloading ${songs(tracks.length)}`);
+      const what = tracks.length === 1 ? `“${tracks[0].title}”` : songs(tracks.length);
+      ui.say(ui.online ? `Downloading ${what}` : `${what[0].toUpperCase()}${what.slice(1)} will download when you're back online`);
     } catch (e: any) {
       ui.say(`Could not download: ${e.message}`);
     }
@@ -917,11 +921,12 @@ export function collectionMenu(id: string): MenuItem[] {
           { label: "Delete playlist…", icon: "trash", danger: true, disabled: needsOnline("delete a playlist"), run: () => deletePlaylist(id) },
         ]
       : [];
+  // Another account's copy doesn't stop this one keeping its own (D23).
   const kept = downloads.keptFor(id);
   const dl: MenuItem[] = !downloads.available
     ? []
-    : kept
-      ? [{ label: "Remove download…", icon: "downloaded", run: () => downloads.unkeep(id) }]
+    : kept?.mine
+      ? [{ label: "Remove download…", icon: "downloaded", run: () => downloads.unkeep(id, kept) }]
       : [{ label: "Download", icon: "download", disabled: ui.online ? undefined : KEEP_OFFLINE, run: () => void downloads.keep(id) }];
   return [
     { label: "Play", icon: "play", run: () => player.playCollection(id) },

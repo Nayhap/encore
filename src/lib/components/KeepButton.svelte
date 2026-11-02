@@ -8,7 +8,12 @@
   // mark only once every song is on this computer.
   let { id }: { id: string } = $props();
 
-  const k = $derived(downloads.keptFor(id));
+  // Only this account's copy: another account's is described under the
+  // header, and this one can still keep its own.
+  const k = $derived.by(() => {
+    const c = downloads.keptFor(id);
+    return c?.mine ? c : undefined;
+  });
   const reading = $derived(!!k && !k.songs && (downloads.syncing(id) || k.synced == null));
   const pending = $derived(!!k && k.ready + k.failed < k.songs);
   const complete = $derived(!!k && k.songs > 0 && k.ready === k.songs);
@@ -24,7 +29,7 @@
   function menu(e: MouseEvent) {
     if (!k) return;
     const items: MenuItem[] = [
-      { label: "Check for changes", icon: "repeat", disabled: needsOnline("check for changes") ?? (k.mine ? undefined : "Only the account that downloaded it can check it for changes."), run: () => downloads.sync(k.card.id) },
+      { label: "Check for changes", icon: "repeat", disabled: needsOnline("check for changes"), run: () => downloads.sync(k.card.id) },
       ...(k.failed ? [{ label: "Try failed songs again", icon: "download", run: () => downloads.retry() }] : []),
       { label: k.paused ? "Resume downloading" : "Pause downloading", icon: k.paused ? "play" : "pause", run: () => downloads.pauseKept(id, !k.paused, k) },
       { label: "Remove download…", icon: "trash", danger: true, run: () => downloads.unkeep(id, k) },
