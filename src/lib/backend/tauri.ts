@@ -26,6 +26,9 @@ export const tauriApi: Api = {
       events.historyEvent.listen((e) => h.history(e.payload as any)),
       events.runtimesEvent.listen((e) => h.runtimes(e.payload as any)),
       events.setupNeededEvent.listen((e) => h.setupNeeded(e.payload as any)),
+      events.downloadsEvent.listen((e) => h.downloads(e.payload as any)),
+      events.downloadItemEvent.listen((e) => h.downloadItem(e.payload as any)),
+      events.connectivityEvent.listen((e) => h.connectivity(e.payload.online)),
     ]);
     return () => offs.forEach((off) => off());
   },
@@ -93,5 +96,17 @@ export const tauriApi: Api = {
   signOut: () => u(commands.signOut()) as any,
   beginSignin: () => u(commands.beginSignin()) as any,
   cancelSignin: () => u(commands.cancelSignin()) as any,
+  downloadsSnapshot: () => u(commands.downloadsSnapshot()) as any,
+  downloadTracks: (t) => u(commands.downloadTracks(t)),
+  downloadRemove: (ids) => u(commands.downloadRemove(ids)),
+  downloadKeep: (id) => u(commands.downloadKeep(id)) as any,
+  downloadUnkeep: (id, a) => u(commands.downloadUnkeep(id, a)),
+  downloadsSync: (id) => u(commands.downloadsSync(id)) as any,
+  downloadsPause: (p) => u(commands.downloadsPause(p)) as any,
+  downloadPauseCollection: (id, p, a) => u(commands.downloadPauseCollection(id, p, a)) as any,
+  downloadsRetry: () => u(commands.downloadsRetry()) as any,
+  downloadsRemoveAll: () => u(commands.downloadsRemoveAll()) as any,
+  downloadsStorage: () => u(commands.downloadsStorage()),
+  connectivityCheck: () => u(commands.connectivityCheck()),
   artUrl: (key, size) => protocolUrl("art", `${key}?s=${size}`),
 };

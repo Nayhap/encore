@@ -1,12 +1,14 @@
 //! Lyrics chain (D12): YouTube Music timed lyrics, then LRCLIB `/api/get`
 //! (exact) and `/api/search` (scored on title + artist + version, duration
 //! within ±2 s), then YouTube Music plain lyrics, then LRCLIB plain.
-//! Positive results are cached for 30 days, misses for 1 day.
+//! Positive results are cached for 30 days, misses for 1 day. Lyrics kept
+//! with a download (D23) come first and are all there is offline.
 
 pub mod lrc;
 pub mod matching;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use encore_core::model::*;
@@ -47,6 +49,8 @@ pub struct LyricsService {
     store: Option<Arc<Store>>,
     http: reqwest::Client,
     lrclib_base: String,
+    /// Offline, nothing is fetched: only kept and cached lyrics are shown.
+    online: AtomicBool,
 }
 
 impl LyricsService {
@@ -56,7 +60,16 @@ impl LyricsService {
 
     pub fn with_base(service: Arc<dyn MusicService>, store: Option<Arc<Store>>, base: &str) -> Self {
         let http = reqwest::Client::builder().user_agent(UA).connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(8)).build().expect("http");
-        Self { service, store, http, lrclib_base: base.trim_end_matches('/').to_string() }
+        Self { service, store, http, lrclib_base: base.trim_end_matches('/').to_string(), online: AtomicBool::new(true) }
+    }
+
+    pub fn set_online(&self, on: bool) {
+        self.online.store(on, Ordering::Relaxed);
+    }
+
+    /// Lyrics kept with a download: `Some(None)` when the providers had none.
+    fn pinned(&self, id: &ItemId) -> Option<Option<Lyrics>> {
+        self.store.as_ref()?.pinned_lyrics(id.remote()).ok().flatten()
     }
 
     fn cache_get(&self, id: &ItemId) -> Option<Option<Lyrics>> {
@@ -84,8 +97,17 @@ impl LyricsService {
 
     /// Best lyrics for a track, from cache or the provider chain.
     pub async fn get(&self, track: &Track) -> Option<Lyrics> {
+        let online = self.online.load(Ordering::Relaxed);
+        match self.pinned(&track.id) {
+            Some(Some(l)) => return Some(l),
+            Some(None) if !online => return None,
+            _ => {}
+        }
         if let Some(c) = self.cache_get(&track.id) {
             return c;
+        }
+        if !online {
+            return None;
         }
         let r = self.fetch(track).await;
         match &r {
@@ -94,6 +116,13 @@ impl LyricsService {
             Err(_) => {}
         }
         r.ok().flatten()
+    }
+
+    /// The provider chain without any cache, for keeping lyrics with a
+    /// download: `Ok(None)` means no provider has lyrics for this song,
+    /// `Err` that one couldn't be asked (not worth remembering).
+    pub async fn fetch_for_download(&self, track: &Track) -> Result<Option<Lyrics>, String> {
+        self.fetch(track).await
     }
 
     async fn fetch(&self, track: &Track) -> Result<Option<Lyrics>, String> {

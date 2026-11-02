@@ -57,6 +57,7 @@
     ["S", "Shuffle"],
     ["R", "Change repeat mode"],
     ["L", "Like the current song"],
+    ["D", "Download the current song"],
     ["F", "Full-screen lyrics"],
     ["↑ ↓", "Volume"],
     [mod("K"), "Search and commands"],
@@ -69,10 +70,18 @@
   <div class="catch" role="presentation" onmousedown={() => (ui.menu = null)} oncontextmenu={(e) => { e.preventDefault(); ui.menu = null; }}></div>
   <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{pos.x}px" style:top="{pos.y}px" onkeydown={menuKey}>
     {#each ui.menu.items as it}
-      <button role="menuitem" class:danger={it.danger} onclick={() => { ui.menu = null; it.run(); }}>
-        {#if it.icon}<Icon name={it.icon} size={16} />{/if}
-        <span>{it.label}</span>
-      </button>
+      {#if it.disabled}
+        <!-- Not available now: still focusable, and says why when chosen. -->
+        <button role="menuitem" class="off" aria-disabled="true" title={it.disabled} onclick={() => { ui.menu = null; ui.say(it.disabled!); }}>
+          {#if it.icon}<Icon name={it.icon} size={16} />{/if}
+          <span>{it.label}</span>
+        </button>
+      {:else}
+        <button role="menuitem" class:danger={it.danger} onclick={() => { ui.menu = null; it.run(); }}>
+          {#if it.icon}<Icon name={it.icon} size={16} />{/if}
+          <span>{it.label}</span>
+        </button>
+      {/if}
     {/each}
   </div>
 {/if}
@@ -163,6 +172,12 @@
   .menu button.danger:hover,
   .menu button.danger:focus-visible {
     background: hsl(0 70% 55% / 0.14);
+  }
+  .menu button.off {
+    color: var(--dim);
+  }
+  .menu button.off :global(svg) {
+    color: var(--dim);
   }
   .confirm {
     width: min(420px, calc(100vw - 48px));

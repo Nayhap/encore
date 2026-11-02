@@ -77,6 +77,10 @@ pub struct Queue {
     /// Track ids of the last 50 plays, for radio de-duplication.
     #[serde(default)]
     recent: Vec<String>,
+    /// Entries passed over by the last `*_where` step (offline: songs that
+    /// aren't downloaded, D23).
+    #[serde(skip)]
+    passed: usize,
 }
 
 impl Default for Queue {
@@ -102,6 +106,7 @@ impl Queue {
             revision: 0,
             rng: seed | 1,
             recent: Vec::new(),
+            passed: 0,
         }
     }
 
@@ -135,13 +140,38 @@ impl Queue {
     /// Entry that would play after the current one without user action
     /// (used for preload). Repeat-one preloads nothing.
     pub fn upcoming(&self) -> Option<&QueueEntry> {
+        self.upcoming_where(&|_| true)
+    }
+
+    /// `upcoming`, passing over entries `ok` refuses.
+    pub fn upcoming_where(&self, ok: &dyn Fn(&Track) -> bool) -> Option<&QueueEntry> {
         let i = self.index?;
-        match self.repeat {
-            Repeat::One => None,
-            _ if i + 1 < self.entries.len() => self.entries.get(i + 1),
-            Repeat::All => self.entries.first(),
-            Repeat::Off => None,
+        if self.repeat == Repeat::One {
+            return None;
         }
+        self.find_after(i, self.repeat == Repeat::All, ok).map(|j| &self.entries[j])
+    }
+
+    /// How many entries the last `*_where` step passed over.
+    pub fn passed(&self) -> usize {
+        self.passed
+    }
+
+    /// The first entry after `from` that `ok` accepts, wrapping round to
+    /// `from` itself when `wrap`. Looks at each entry at most once.
+    fn find_after(&self, from: usize, wrap: bool, ok: &dyn Fn(&Track) -> bool) -> Option<usize> {
+        let n = self.entries.len();
+        let later = (from + 1..n).find(|&j| ok(&self.entries[j].track));
+        match later {
+            Some(j) => Some(j),
+            None if wrap => (0..=from.min(n.saturating_sub(1))).find(|&j| j < n && ok(&self.entries[j].track)),
+            None => None,
+        }
+    }
+
+    /// Entries between `from` and `to` going forward (with wrapping).
+    fn gap(&self, from: usize, to: usize) -> usize {
+        if to > from { to - from - 1 } else { self.entries.len() - from - 1 + to }
     }
     /// Remaining entries after the current one.
     pub fn remaining(&self) -> usize {
@@ -213,42 +243,84 @@ impl Queue {
 
     /// Explicit Next: bypasses repeat-one.
     pub fn next(&mut self) -> Step {
+        self.next_where(&|_| true)
+    }
+
+    /// Explicit Next to the first entry `ok` accepts. Offline, `ok` is
+    /// "downloaded" (D23); the entries passed over stay in the queue.
+    pub fn next_where(&mut self, ok: &dyn Fn(&Track) -> bool) -> Step {
+        self.passed = 0;
         let Some(i) = self.index else {
-            return if self.entries.is_empty() { Step::End } else { self.go(0) };
+            return match self.entries.iter().position(|e| ok(&e.track)) {
+                Some(j) => {
+                    self.passed = j;
+                    self.go(j)
+                }
+                None => Step::End,
+            };
         };
-        if i + 1 < self.entries.len() {
-            return self.go(i + 1);
-        }
-        match self.repeat {
-            Repeat::All => self.go(0),
-            _ if self.autoplay => Step::NeedRadio,
-            _ => Step::End,
+        let wrap = self.repeat == Repeat::All;
+        match self.find_after(i, wrap, ok) {
+            Some(j) => {
+                self.passed = self.gap(i, j);
+                self.go(j)
+            }
+            None => {
+                self.passed = self.entries.len() - i - 1;
+                if !wrap && self.autoplay { Step::NeedRadio } else { Step::End }
+            }
         }
     }
 
     /// Natural end of the current track.
     pub fn on_ended(&mut self) -> Step {
+        self.on_ended_where(&|_| true)
+    }
+
+    /// Natural end, to the first entry `ok` accepts. Repeat-one restarts the
+    /// current entry as long as `ok` accepts it.
+    pub fn on_ended_where(&mut self, ok: &dyn Fn(&Track) -> bool) -> Step {
+        self.passed = 0;
         let Some(i) = self.index else { return Step::End };
-        if self.repeat == Repeat::One {
+        if self.repeat == Repeat::One && self.entries.get(i).is_some_and(|e| ok(&e.track)) {
             return Step::Restart;
         }
-        if i + 1 < self.entries.len() {
-            return self.go(i + 1);
-        }
-        match self.repeat {
-            Repeat::All => self.go(0),
-            // Autoplay runs only when repeat is off (repeat-all wraps instead).
-            Repeat::Off if self.autoplay => Step::NeedRadio,
-            _ => Step::End,
+        match self.find_after(i, self.repeat == Repeat::All, ok) {
+            Some(j) => {
+                self.passed = self.gap(i, j);
+                self.go(j)
+            }
+            None => {
+                self.passed = self.entries.len() - i - 1;
+                match self.repeat {
+                    // Autoplay runs only when repeat is off (repeat-all wraps instead).
+                    Repeat::Off if self.autoplay => Step::NeedRadio,
+                    _ => Step::End,
+                }
+            }
         }
     }
 
     /// Previous: restart when more than 3 s in or at the first entry.
     pub fn prev(&mut self, position: f64) -> Step {
-        match self.index {
+        self.prev_where(position, &|_| true)
+    }
+
+    /// Previous, to the nearest earlier entry `ok` accepts.
+    pub fn prev_where(&mut self, position: f64, ok: &dyn Fn(&Track) -> bool) -> Step {
+        self.passed = 0;
+        let Some(i) = self.index else { return Step::End };
+        let here = self.entries.get(i).is_some_and(|e| ok(&e.track));
+        if position > 3.0 && here {
+            return Step::Restart;
+        }
+        match (0..i).rev().find(|&j| ok(&self.entries[j].track)) {
+            Some(j) => {
+                self.passed = i - j - 1;
+                self.go(j)
+            }
+            None if here => Step::Restart,
             None => Step::End,
-            Some(i) if position > 3.0 || i == 0 => Step::Restart,
-            Some(i) => self.go(i - 1),
         }
     }
 
@@ -670,6 +742,50 @@ mod tests {
         q.set_repeat(Repeat::All);
         q.jump(&q.entries()[4].uid.clone()).unwrap();
         assert_eq!(q.upcoming().unwrap().track.title, "a");
+    }
+
+    // Offline (D23): only some songs are downloaded.
+    fn only(names: &'static [&'static str]) -> impl Fn(&Track) -> bool {
+        move |t: &Track| names.contains(&t.title.as_str())
+    }
+
+    #[test]
+    fn offline_steps_pass_over_missing_songs() {
+        let mut q = Queue::new(1);
+        q.replace(vec![t("a"), t("b"), t("c")], 0, None, false, Origin::Collection).unwrap();
+        q.set_autoplay(false);
+        let ok = only(&["a", "c"]);
+        assert_eq!(q.upcoming_where(&ok).unwrap().track.title, "c", "preload agrees with the next step");
+        assert_eq!(q.on_ended_where(&ok), Step::Play(2));
+        assert_eq!(q.passed(), 1);
+        assert_eq!(ids(&q), vec!["a", "b", "c"], "the missing song stays in the queue");
+        assert_eq!(q.prev_where(1.0, &ok), Step::Play(0), "previous passes over it too");
+        assert_eq!(q.next_where(&ok), Step::Play(2));
+        assert_eq!(q.next_where(&ok), Step::End);
+    }
+
+    #[test]
+    fn offline_repeat_one_and_repeat_all() {
+        let mut q = Queue::new(1);
+        q.replace(vec![t("a"), t("b"), t("c")], 0, None, false, Origin::Collection).unwrap();
+        q.set_repeat(Repeat::One);
+        assert_eq!(q.on_ended_where(&only(&["a"])), Step::Restart, "a downloaded song repeats");
+        assert_eq!(q.next_where(&only(&["a", "c"])), Step::Play(2), "explicit Next still moves on");
+        q.set_repeat(Repeat::All);
+        assert_eq!(q.on_ended_where(&only(&["a", "c"])), Step::Play(0), "wraps over the missing song");
+        assert_eq!(q.on_ended_where(&only(&["a"])), Step::Play(0), "only itself left: plays again");
+    }
+
+    #[test]
+    fn offline_nothing_downloaded_ends() {
+        let mut q = Queue::new(1);
+        q.replace(vec![t("a"), t("b"), t("c")], 0, None, false, Origin::Collection).unwrap();
+        q.set_repeat(Repeat::All);
+        let none = only(&[]);
+        assert_eq!(q.on_ended_where(&none), Step::End);
+        assert!(q.upcoming_where(&none).is_none());
+        assert_eq!(q.prev_where(0.0, &none), Step::End);
+        assert_eq!(q.index(), Some(0), "the place in the queue is kept");
     }
 
     #[test]

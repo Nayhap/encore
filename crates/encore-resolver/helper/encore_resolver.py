@@ -17,7 +17,7 @@ import sys
 import time
 import traceback
 
-PROTOCOL = 1
+PROTOCOL = 2
 
 # The host speaks UTF-8 JSON. Python's pipes default to the system code page
 # on Windows (cp1252, cp932...), which garbles or rejects non-ASCII paths such
@@ -106,6 +106,13 @@ def make_jar(cookies):
 PREFERENCE = ["141", "140", "774", "251", "250", "249", "139"]
 
 
+def decodable(f):
+    """AAC in MP4 or Opus in WebM: what Encore's decoder plays (D5)."""
+    ext = f.get("ext")
+    acodec = str(f.get("acodec") or "")
+    return (ext in ("m4a", "mp4") and acodec.startswith("mp4a")) or (ext == "webm" and acodec.startswith("opus"))
+
+
 def pick(formats):
     audio = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") and f.get("url")]
     audio = [f for f in audio if not f.get("has_drm")]
@@ -119,6 +126,8 @@ def pick(formats):
     for itag in PREFERENCE:
         if itag in by_id:
             return by_id[itag]
+    # Anything else only if Encore can decode it.
+    pool = [f for f in pool if decodable(f)]
     if pool:
         return max(pool, key=lambda f: f.get("abr") or f.get("tbr") or 0)
     return None

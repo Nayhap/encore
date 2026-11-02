@@ -3,7 +3,7 @@ members = ["src-tauri", "crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.95"
@@ -16,6 +16,7 @@ encore-audio = { path = "crates/encore-audio" }
 encore-lyrics = { path = "crates/encore-lyrics" }
 encore-resolver = { path = "crates/encore-resolver" }
 encore-player = { path = "crates/encore-player" }
+encore-downloads = { path = "crates/encore-downloads" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

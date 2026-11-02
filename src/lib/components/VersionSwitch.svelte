@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { QueueEntry } from "$lib/backend";
-  import { lookupVersion, playOtherVersion, versions } from "$lib/state.svelte";
+  import { lookupVersion, needsOnline, playOtherVersion, ui, versions } from "$lib/state.svelte";
 
   // Song | Video for the entry that is playing (D21). Shown only once a pair
   // is known; "Video" plays the music video's audio.
@@ -10,8 +10,10 @@
   const pair = $derived(versions.get(t.id));
   let busy = $state(false);
 
+  // Offline the other version can't be looked up or played (D23).
+  const off = $derived(needsOnline("switch versions"));
   $effect(() => {
-    if (t.kind === "song" || t.kind === "video") void lookupVersion(t);
+    if ((t.kind === "song" || t.kind === "video") && ui.online) void lookupVersion(t);
   });
 
   async function pick(kind: "song" | "video") {
@@ -27,8 +29,8 @@
 
 {#if pair && (t.kind === "song" || t.kind === "video")}
   <div class="vs" role="radiogroup" aria-label="Version" aria-busy={busy}>
-    <button role="radio" aria-checked={t.kind === "song"} disabled={busy} title={t.kind === "song" ? "Playing the song" : "Play the song"} onclick={() => pick("song")}>Song</button>
-    <button role="radio" aria-checked={t.kind === "video"} disabled={busy} title={t.kind === "video" ? "Playing the music video's audio" : "Play the music video's audio"} onclick={() => pick("video")}>Video</button>
+    <button role="radio" aria-checked={t.kind === "song"} disabled={busy || !!off} title={off ?? (t.kind === "song" ? "Playing the song" : "Play the song")} onclick={() => pick("song")}>Song</button>
+    <button role="radio" aria-checked={t.kind === "video"} disabled={busy || !!off} title={off ?? (t.kind === "video" ? "Playing the music video's audio" : "Play the music video's audio")} onclick={() => pick("video")}>Video</button>
   </div>
 {/if}
 

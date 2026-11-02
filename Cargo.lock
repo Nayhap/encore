@@ -1413,12 +1413,14 @@ dependencies = [
 
 [[package]]
 name = "encore"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "async-trait",
  "dirs 6.0.0",
  "encore-audio",
  "encore-auth",
  "encore-core",
+ "encore-downloads",
  "encore-lyrics",
  "encore-player",
  "encore-resolver",
@@ -1447,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "encore-audio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cpal",
  "hex",
@@ -1466,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "encore-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -1495,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "encore-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1504,6 +1506,7 @@ dependencies = [
  "encore-audio",
  "encore-auth",
  "encore-core",
+ "encore-downloads",
  "encore-lyrics",
  "encore-player",
  "encore-resolver",
@@ -1517,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "encore-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -1535,8 +1538,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-downloads"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "encore-audio",
+ "encore-core",
+ "encore-lyrics",
+ "hex",
+ "libc",
+ "parking_lot 0.13.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "specta",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "encore-lyrics"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "encore-core",
@@ -1550,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "encore-player"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "encore-audio",
@@ -1565,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "encore-resolver"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -1590,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "encore-ytm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "encore-auth",

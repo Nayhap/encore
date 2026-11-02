@@ -1,6 +1,6 @@
 [package]
 name = "encore"
-version = "0.3.0"
+version = "0.4.0"
 description = "Encore, a YouTube Music desktop client"
 authors = ["Encore"]
 edition = "2024"
@@ -31,6 +31,8 @@ encore-audio.workspace = true
 encore-lyrics.workspace = true
 encore-resolver.workspace = true
 encore-player.workspace = true
+encore-downloads.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 url.workspace = true

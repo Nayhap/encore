@@ -58,6 +58,16 @@ export type Counterpart = B.Counterpart_Serialize;
 export type SharedSegment = B.SharedSegment;
 export type PlaylistsEvent = B.PlaylistsEvent_Serialize;
 export type HistoryEvent = B.HistoryEvent;
+export type DownloadItem = B.DownloadItem_Serialize;
+export type DownloadItemEvent = B.DownloadItemEvent_Serialize;
+export type DownloadState = B.DownloadState;
+export type DownloadWait = B.DownloadWait;
+export type DownloadsSummary = B.DownloadsSummary_Serialize;
+export type DownloadsSnapshot = B.DownloadsSnapshot_Serialize;
+export type DownloadRemoved = B.DownloadRemoved_Serialize;
+export type DownloadsStorage = B.DownloadsStorage;
+export type KeptCollection = B.KeptCollection_Serialize;
+export type ActiveDownload = B.ActiveDownload_Serialize;
 
 /** Mock-only procedural artwork (dev without Tauri). */
 export type Motif = "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks";

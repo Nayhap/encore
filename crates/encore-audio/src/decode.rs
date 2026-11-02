@@ -425,6 +425,39 @@ pub fn decode_all(spec: &SourceSpec, start: f64) -> Result<(Vec<f32>, u32, &'sta
     Ok((out, o.rate, o.codec))
 }
 
+/// Check that a finished download will play (D23): the container opens with
+/// the decoders Encore registers, and its first `packets` audio packets
+/// decode. Returns the codec and the duration, when the container gives one.
+pub fn validate_file(path: &std::path::Path, packets: usize) -> Result<(&'static str, Option<f64>), String> {
+    let mut o = open(&SourceSpec::File(path.to_path_buf()), None)?;
+    let mut decoded = 0usize;
+    let mut errors = 0usize;
+    while decoded < packets {
+        let p = match o.format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(e) => return Err(format!("damaged audio: {e}")),
+        };
+        if p.track_id != o.track_id {
+            continue;
+        }
+        match o.decoder.decode(&p) {
+            Ok(_) => decoded += 1,
+            Err(SymError::DecodeError(_)) => {
+                errors += 1;
+                if errors > 8 {
+                    return Err("too many decode errors".into());
+                }
+            }
+            Err(e) => return Err(format!("decoder failed: {e}")),
+        }
+    }
+    if decoded == 0 {
+        return Err("no audio could be decoded".into());
+    }
+    Ok((o.codec, o.duration))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +488,18 @@ mod tests {
         assert!(rms(&pcm) > 0.05);
         let f = freq(&pcm[8820..pcm.len() - 8820], rate);
         assert!((f - 440.0).abs() < 3.0, "freq {f}");
+    }
+
+    #[test]
+    fn validates_whole_files_and_refuses_cut_ones() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for (n, c) in [("tone-aac.m4a", "aac"), ("tone-opus.webm", "opus")] {
+            assert_eq!(validate_file(&dir.join(n), 16).unwrap().0, c);
+        }
+        let cut = std::env::temp_dir().join(format!("encore-cut-{}.m4a", std::process::id()));
+        std::fs::write(&cut, &std::fs::read(dir.join("tone-aac.m4a")).unwrap()[..200]).unwrap();
+        assert!(validate_file(&cut, 16).is_err());
+        let _ = std::fs::remove_file(&cut);
     }
 
     #[test]
