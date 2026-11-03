@@ -13,7 +13,7 @@ import { simCancelSleep, simClearLoop, simLoop, simSleep } from "../mock";
 const sleep = { mode: null as T.SleepMode | null, deadline: 0 };
 
 /** The snapshot's reserved fields (D26, D36), read by ../mock.ts. A private
- *  session is lane D's to start; it sets `private` here. */
+ *  session is lane D's to start; it sets `privateUntil` here. */
 export const mockPlayer = {
   loop: null as T.LoopRange | null,
   /** Repeat-one, set aside while a loop runs (D26). */
@@ -24,7 +24,11 @@ export const mockPlayer = {
   },
   /** The timer's raw state, for the simulated player. */
   sleepState: sleep,
-  private: null as T.PrivateSession | null,
+  /** Unix ms a private session ends at (lane D starts it), like the player's clock (D36). */
+  privateUntil: null as number | null,
+  get private(): T.PrivateSession | null {
+    return this.privateUntil == null ? null : { remaining: Math.max(0, (this.privateUntil - Date.now()) / 1000) };
+  },
 };
 
 export const mockPlayback: PlaybackApi = {

@@ -43,6 +43,8 @@ class Player {
   abLoop = $state<LoopRange | null>(null);
   sleep = $state<SleepTimer | null>(null);
   privateSession = $state<PrivateSession | null>(null);
+  /** When `privateSession` arrived: its `remaining` counts from here. */
+  privateSessionAt = 0;
 
   current: Track | undefined = $derived(this.index != null ? this.queue[this.index]?.track : undefined);
   currentEntry: QueueEntry | undefined = $derived(this.index != null ? this.queue[this.index] : undefined);
@@ -109,6 +111,7 @@ class Player {
     this.abLoop = s.loop ?? null;
     this.sleep = s.sleep ?? null;
     this.privateSession = s.private ?? null;
+    this.privateSessionAt = Date.now();
     const sg = big(s.seekGen);
     if (trackChanged || sg > this.#seekGen || this.#localSeek < 0n) {
       this.#seekGen = sg;

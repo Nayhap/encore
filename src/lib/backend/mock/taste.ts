@@ -16,11 +16,10 @@ const PRIVATE_FOR = 3600;
 
 let blocked: T.Blocked[] = [];
 let hidePodcasts = false;
-let privateUntil: number | null = null;
 let privateTimer: ReturnType<typeof setTimeout> | undefined;
 const subs = new Set<(s: T.TasteState) => void>();
 
-const state = (): T.TasteState => ({ blocked: structuredClone(blocked), hidePodcasts, privateUntil: privateUntil ? String(privateUntil) : null });
+const state = (): T.TasteState => ({ blocked: structuredClone(blocked), hidePodcasts });
 const emit = () => subs.forEach((h) => h(state()));
 
 if (q.has("blocked")) {
@@ -36,11 +35,9 @@ if (q.has("blocked")) {
 
 function setPrivate(on: boolean) {
   clearTimeout(privateTimer);
-  privateUntil = on ? now() + PRIVATE_FOR : null;
-  mockPlayer.private = on ? { remaining: PRIVATE_FOR } : null;
+  mockPlayer.privateUntil = on ? Date.now() + PRIVATE_FOR * 1000 : null;
   if (on) privateTimer = setTimeout(() => setPrivate(false), PRIVATE_FOR * 1000);
   mockKit.publish();
-  emit();
 }
 if (q.has("private")) setTimeout(() => setPrivate(true), 50);
 
@@ -69,7 +66,7 @@ export const mockTaste: TasteApi = {
   },
   async setPrivate(on) {
     setPrivate(on);
-    return mockKit.delay(state(), 40);
+    return mockKit.delay(null, 40);
   },
   async subscribe(h) {
     subs.add(h);
@@ -78,7 +75,7 @@ export const mockTaste: TasteApi = {
 };
 
 /** Whether the simulated history should leave a play out (D36). */
-export const mockPrivate = () => privateUntil !== null;
+export const mockPrivate = () => mockPlayer.privateUntil !== null;
 
 /** A shelf of podcast episodes for the mock Home, so hiding them shows. */
 export function mockPodcastShelf(): T.Shelf {

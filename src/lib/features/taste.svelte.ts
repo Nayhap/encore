@@ -21,13 +21,10 @@ const UNDO_MS = 8000;
 class Taste {
   blocked = $state<Blocked[]>([]);
   hidePodcasts = $state(false);
-  /** Unix ms a private session ends at (from Rust). */
-  privateUntil = $state<number | null>(null);
   /** The offer to undo the last block, shown above the player bar. */
   undo = $state<{ id: number; text: string; kind: BlockKind; target: string } | null>(null);
   /** A clock for the private session's countdown. */
   now = $state(Date.now());
-  #tick: ReturnType<typeof setInterval> | undefined;
 
   #tracks = $derived(new Set(this.blocked.filter((b) => b.kind === "track").map((b) => b.target)));
   #artists = $derived(new Set(this.blocked.filter((b) => b.kind === "artist").map((b) => b.target)));
@@ -35,12 +32,6 @@ class Taste {
   apply(s: TasteState) {
     this.blocked = s.blocked;
     this.hidePodcasts = s.hidePodcasts;
-    this.privateUntil = s.privateUntil ? Number(s.privateUntil) * 1000 : null;
-    clearInterval(this.#tick);
-    if (this.privateUntil) {
-      this.now = Date.now();
-      this.#tick = setInterval(() => (this.now = Date.now()), 15000);
-    }
   }
 
   /** A song blocked by itself, its other version, or one of its artists. */
@@ -109,7 +100,12 @@ class Taste {
   // ---------- private session ----------
 
   get private() {
-    return !!player.privateSession || !!this.privateUntil;
+    return !!player.privateSession;
+  }
+  /** Unix ms the private session ends at; the player keeps the clock (D36). */
+  get privateUntil() {
+    const r = player.privateSession?.remaining;
+    return r == null ? null : player.privateSessionAt + r * 1000;
   }
   /** Whole minutes left, or null when it runs until Encore quits. */
   get privateLeft() {
@@ -124,7 +120,8 @@ class Taste {
 
   async setPrivate(on: boolean) {
     try {
-      this.apply(await call((a) => a.features.taste.setPrivate(on)));
+      await call((a) => a.features.taste.setPrivate(on));
+      this.now = Date.now();
       ui.say(on ? "Private session for the next hour. YouTube still sees what you play and search, but it isn't added to your history." : "Private session ended");
     } catch (e) {
       ui.say(`Could not change that: ${(e as BackendError).message}`, "error");
@@ -148,7 +145,10 @@ const leftText = () => taste.privateLeftText;
 registerFeature({
   name: "taste",
   subscribe: () => call((a) => a.features.taste.subscribe((s) => taste.apply(s))),
-  load: async () => taste.apply(await call((a) => a.features.taste.state())),
+  load: async () => {
+    taste.apply(await call((a) => a.features.taste.state()));
+    setInterval(() => (taste.now = Date.now()), 15000);
+  },
 });
 
 // Track menus: after Download.

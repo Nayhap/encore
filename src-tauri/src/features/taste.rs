@@ -6,12 +6,12 @@
 //! filter answer without the database. Blocking a song also tells YouTube
 //! "Not interested" when a row of it carried that token this session, once
 //! the undo window has passed. A private session lasts an hour, or until
-//! Encore quits; the player's flag stops history reporting (D18) and lane E's
-//! scrobbles and presence follow it. Local stats still record (D30).
+//! Encore quits; the player keeps its clock, and its flag stops history
+//! reporting (D18), scrobbles and presence (D31). Local stats still record (D30).
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use encore_core::error::Result;
@@ -23,7 +23,7 @@ use encore_core::store::Store;
 use encore_ytm::YtMusic;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_specta::Event;
 
 use crate::core::{Core, SETTINGS};
@@ -34,16 +34,12 @@ const HIDE_PODCASTS: &str = "hide_podcasts";
 /// How long "Undo" is offered before YouTube hears "Not interested".
 const UNDO_WINDOW: Duration = Duration::from_secs(10);
 /// A private session's length.
-const PRIVATE_FOR: i64 = 3600;
+const PRIVATE_FOR: Duration = Duration::from_secs(3600);
 
 /// This area's state, as `core.features.taste`.
 #[derive(Default)]
 pub struct State {
     shared: Arc<Shared>,
-    /// Bumps on every start or end of a private session: an expiry timer
-    /// from an older one does nothing.
-    private_gen: AtomicU64,
-    private_until: Mutex<Option<i64>>,
     /// Per blocked song, bumped by every block or unblock of it: a pending
     /// "Not interested" from before an undo is never sent.
     feedback_gen: Mutex<HashMap<ItemId, u64>>,
@@ -93,11 +89,9 @@ pub struct TasteState {
     /// The current owner's block list, newest first.
     pub blocked: Vec<Blocked>,
     pub hide_podcasts: bool,
-    /// Unix seconds a private session ends at, while one runs.
-    pub private_until: Option<String>,
 }
 
-/// `taste`: the block list, a setting or the private session changed.
+/// `taste`: the block list or a setting changed.
 #[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
 pub struct TasteEvent(pub TasteState);
 
@@ -118,7 +112,7 @@ fn state(core: &Core, list: Option<Vec<Blocked>>) -> Result<TasteState> {
         Some(l) => l,
         None => core.store.blocked_list(&owner(core))?,
     };
-    Ok(TasteState { blocked, hide_podcasts: t.shared.hide_podcasts.load(Ordering::Relaxed), private_until: t.private_until.lock().map(|u| u.to_string()) })
+    Ok(TasteState { blocked, hide_podcasts: t.shared.hide_podcasts.load(Ordering::Relaxed) })
 }
 
 fn changed(app: &AppHandle, s: &TasteState) {
@@ -153,10 +147,8 @@ pub async fn taste_block(app: AppHandle, core: S<'_>, kind: BlockKind, target: I
     let s = state(&core, Some(list))?;
     changed(&app, &s);
 
-    let set = core.features.taste.shared.set(&core.store, &owner);
-    if core.player.snapshot().current.is_some_and(|c| set.blocks(&c.track)) {
-        core.player.next().await;
-    }
+    // Blocked songs leave Up next at once; the one playing moves on (D36).
+    core.player.admission_changed().await;
     if kind == BlockKind::Track {
         let my = {
             let mut g = core.features.taste.feedback_gen.lock();
@@ -192,6 +184,7 @@ pub async fn taste_unblock(app: AppHandle, core: S<'_>, kind: BlockKind, target:
     let list = core.features.taste.shared.reload(&core.store, &owner)?;
     let s = state(&core, Some(list))?;
     changed(&app, &s);
+    core.player.admission_changed().await;
     Ok(s)
 }
 
@@ -205,31 +198,15 @@ pub async fn taste_set_hide_podcasts(app: AppHandle, core: S<'_>, on: bool) -> R
     Ok(s)
 }
 
-/// Start a private session (an hour, or until Encore quits) or end it.
+/// Start a private session (an hour) or end it. The player keeps the clock
+/// and ends it on time (D36); its snapshot carries the time left.
 #[tauri::command]
 #[specta::specta]
-pub async fn taste_private(app: AppHandle, core: S<'_>, on: bool) -> Result<TasteState> {
-    let t = &core.features.taste;
-    let my = t.private_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    *t.private_until.lock() = on.then(|| encore_core::store::now() + PRIVATE_FOR);
-    core.player.set_private(on);
+pub async fn taste_private(core: S<'_>, on: bool) -> Result<()> {
     if on {
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(PRIVATE_FOR as u64)).await;
-            let core = app2.state::<Arc<Core>>();
-            let t = &core.features.taste;
-            if t.private_gen.load(Ordering::SeqCst) != my {
-                return;
-            }
-            *t.private_until.lock() = None;
-            core.player.set_private(false);
-            if let Ok(s) = state(&core, None) {
-                changed(&app2, &s);
-            }
-        });
+        core.player.start_private_session(Some(PRIVATE_FOR));
+    } else {
+        core.player.end_private_session();
     }
-    let s = state(&core, None)?;
-    changed(&app, &s);
-    Ok(s)
+    Ok(())
 }

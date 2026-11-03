@@ -14,7 +14,7 @@ export interface TasteApi {
   unblock(kind: BlockKind, target: ItemId): Promise<TasteState>;
   setHidePodcasts(on: boolean): Promise<TasteState>;
   /** Start (an hour) or end a private session. */
-  setPrivate(on: boolean): Promise<TasteState>;
+  setPrivate(on: boolean): Promise<null>;
   subscribe(h: (s: TasteState) => void): Promise<() => void>;
 }
 

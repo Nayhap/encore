@@ -66,8 +66,7 @@ pub async fn saved_queues_list(core: S<'_>) -> Result<Vec<SavedQueueInfo>> {
 #[specta::specta]
 pub async fn saved_queue_save(core: S<'_>, name: String) -> Result<SavedQueueInfo> {
     let owner = owner(&core);
-    let queue = core.player.queue_clone();
-    let position = core.player.snapshot().position;
+    let (queue, position) = core.player.queue_and_position();
     core.store.saved_queue_save(&owner, &name, &queue, position)
 }
 
@@ -82,9 +81,7 @@ pub async fn saved_queue_restore(core: S<'_>, id: String) -> Result<()> {
     };
     let live = core.player.queue_clone();
     let queue = continue_from(saved, &live)?;
-    core.player.stop();
-    core.player.restore(queue, position);
-    Ok(())
+    core.player.restore_paused(queue, position)
 }
 
 /// The saved queue, numbered after the live one so the UI's splices keep

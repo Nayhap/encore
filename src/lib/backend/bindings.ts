@@ -149,6 +149,108 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
+	/**  Loop the song playing between `a` and `b` seconds. */
+	loopSet: (a: number | null, b: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_set", { a, b })),
+	loopClear: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_clear")),
+	/**  Start the sleep timer; `minutes` for `SleepMode::Timer`. */
+	sleepSet: (mode: SleepMode, minutes: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_set", { mode, minutes })),
+	sleepCancel: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_cancel")),
+	/**
+	 *  Plays, Last.fm counts and tempos for `rows`, from what Encore keeps
+	 *  locally; nothing is fetched. The owner is the account now (D25 rule 7).
+	 */
+	librarySortFacts: (rows: SortRow_Deserialize[]) => typedError<SortFacts_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_sort_facts", { rows })),
+	/**
+	 *  Release years of albums (`ytm:MPRE…`) for sorting by year: cached years
+	 *  at once, the rest one album page at a time in the background (D34).
+	 */
+	libraryYears: (albumIds: ItemId[]) => typedError<YearsStart, AppError_Serialize>(__TAURI_INVOKE("library_years", { albumIds })),
+	/**  Stop looking up years (the list was left or sorted otherwise). */
+	libraryYearsStop: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_years_stop")),
+	/**
+	 *  Like (or unlike) many songs: one request each, paced through the
+	 *  background lane so YouTube sees a person, not a script (D34). Returns
+	 *  the job; answers arrive as `LibraryLikeEvent`s.
+	 */
+	libraryLike: (trackIds: ItemId[], liked: boolean) => typedError<number, AppError_Serialize>(__TAURI_INVOKE("library_like", { trackIds, liked })),
+	/**  Stop a like job; songs already answered stay as they are. */
+	libraryLikeStop: (job: number) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_like_stop", { job })),
+	/**
+	 *  Read an artist's releases from the links its page gave (the `MPAD…`
+	 *  "Albums" and "Singles and EPs" shelves' `more`, params and all). The
+	 *  first page of each is read in turn like any page someone opened; the
+	 *  rest through the background lane (D10, D35).
+	 */
+	libraryDiscography: (links: PageLink_Deserialize[]) => typedError<Discography_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_discography", { links })),
+	/**  This account's bookmarks, newest first. */
+	bookmarksList: () => typedError<Bookmark_Serialize[], AppError_Serialize>(__TAURI_INVOKE("bookmarks_list")),
+	/**
+	 *  Bookmark a page or a song; with `position`, a moment in the song. The
+	 *  same thing twice gives back the bookmark already there.
+	 */
+	bookmarksAdd: (target: BookmarkTarget_Deserialize, position: number | null, title: string, subtitle: string, art: ArtRef_Deserialize | null) => typedError<Bookmark_Serialize, AppError_Serialize>(__TAURI_INVOKE("bookmarks_add", { target, position, title, subtitle, art })),
+	bookmarksRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("bookmarks_remove", { id })),
+	savedQueuesList: () => typedError<SavedQueueInfo_Serialize[], AppError_Serialize>(__TAURI_INVOKE("saved_queues_list")),
+	/**
+	 *  Keep the queue as it is now (order, uids, the song and the position in
+	 *  it) under `name`; the same name again replaces that copy.
+	 */
+	savedQueueSave: (name: string) => typedError<SavedQueueInfo_Serialize, AppError_Serialize>(__TAURI_INVOKE("saved_queue_save", { name })),
+	/**
+	 *  Put a saved queue back in place of the current one, paused at its song
+	 *  and position, with its order, uids, shuffle and repeat. Autoplay stays
+	 *  as the user has it now: it's a setting, not part of a queue.
+	 */
+	savedQueueRestore: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("saved_queue_restore", { id })),
+	savedQueueRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("saved_queue_remove", { id })),
+	foldersList: () => typedError<Folder_Serialize[], AppError_Serialize>(__TAURI_INVOKE("folders_list")),
+	/**  A new folder, holding `items` to begin with (may be none). */
+	foldersCreate: (name: string, items: CollectionCard_Deserialize[]) => typedError<Folder_Serialize, AppError_Serialize>(__TAURI_INVOKE("folders_create", { name, items })),
+	foldersRename: (id: string, name: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_rename", { id, name })),
+	/**  Delete a folder and its cover; the playlists and albums in it stay. */
+	foldersRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_remove", { id })),
+	foldersSetCollapsed: (id: string, collapsed: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_set_collapsed", { id, collapsed })),
+	/**  File a playlist or album in a folder (out of any other one). */
+	foldersAdd: (id: string, card: CollectionCard_Deserialize) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_add", { id, card })),
+	foldersRemoveItem: (id: string, item: ItemId) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_remove_item", { id, item })),
+	foldersMoveItem: (id: string, item: ItemId, before: ItemId | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_move_item", { id, item, before })),
+	/**
+	 *  Ask for a picture and make it the folder's cover (a local art key).
+	 *  `false` when the user cancelled.
+	 */
+	foldersChooseCover: (id: string) => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("folders_choose_cover", { id })),
+	foldersClearCover: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_clear_cover", { id })),
+	/**
+	 *  Save a folder's links as a `.encorefolder` file where the user says.
+	 *  `false` when the user cancelled.
+	 */
+	foldersExport: (id: string) => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("folders_export", { id })),
+	/**
+	 *  Open a `.encorefolder` file and make a new folder from its links.
+	 *  `None` when the user cancelled.
+	 */
+	foldersImport: () => typedError<Folder_Serialize | null, AppError_Serialize>(__TAURI_INVOKE("folders_import")),
+	tasteState: () => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_state")),
+	/**
+	 *  Block a song or an artist. A song that is playing (or an artist's)
+	 *  is skipped at once; a song's "Not interested" goes to YouTube after the
+	 *  undo window, if a row of it carried the token.
+	 */
+	tasteBlock: (kind: BlockKind, target: ItemId, label: string, detail: string | null) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_block", { kind, target, label, detail })),
+	tasteUnblock: (kind: BlockKind, target: ItemId) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_unblock", { kind, target })),
+	tasteSetHidePodcasts: (on: boolean) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_set_hide_podcasts", { on })),
+	/**
+	 *  Start a private session (an hour) or end it. The player keeps the clock
+	 *  and ends it on time (D36); its snapshot carries the time left.
+	 */
+	tastePrivate: (on: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("taste_private", { on })),
+	/**  The months with plays, and since when Encore has counted. */
+	statsOverview: () => typedError<StatsOverview_Serialize, AppError_Serialize>(__TAURI_INVOKE("stats_overview")),
+	statsPeriod: (period: StatsPeriod_Deserialize) => typedError<ListeningStats_Serialize, AppError_Serialize>(__TAURI_INVOKE("stats_period", { period })),
+	/**  Counted plays per song (by `ItemId`), for "your plays" sorting. */
+	statsPlayCounts: (ids: ItemId[]) => typedError<{ [key in string]: number }, AppError_Serialize>(__TAURI_INVOKE("stats_play_counts", { ids })),
+	/**  Forget the current owner's plays (Settings → Storage). */
+	statsClear: () => typedError<number, AppError_Serialize>(__TAURI_INVOKE("stats_clear")),
 	lastfmStatus: () => typedError<LastfmStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("lastfm_status")),
 	/**
 	 *  Step one: check the key and secret with Last.fm and return the page
@@ -192,6 +294,8 @@ export const events = {
 	downloadsEvent: makeEvent<DownloadsEvent_Serialize, DownloadsEvent_Deserialize>("downloads-event"),
 	historyEvent: makeEvent<HistoryEvent, HistoryEvent>("history-event"),
 	lastfmEvent: makeEvent<LastfmEvent_Serialize, LastfmEvent_Deserialize>("lastfm-event"),
+	libraryLikeEvent: makeEvent<LibraryLikeEvent_Serialize, LibraryLikeEvent_Deserialize>("library-like-event"),
+	libraryYearEvent: makeEvent<LibraryYearEvent_Serialize, LibraryYearEvent_Deserialize>("library-year-event"),
 	lyricsEvent: makeEvent<LyricsEvent_Serialize, LyricsEvent_Deserialize>("lyrics-event"),
 	noticeEvent: makeEvent<NoticeEvent_Serialize, NoticeEvent_Deserialize>("notice-event"),
 	playerPositionEvent: makeEvent<PlayerPositionEvent_Serialize, PlayerPositionEvent_Deserialize>("player-position-event"),
@@ -202,6 +306,8 @@ export const events = {
 	runtimesEvent: makeEvent<RuntimesEvent_Serialize, RuntimesEvent_Deserialize>("runtimes-event"),
 	setupNeededEvent: makeEvent<SetupNeededEvent_Serialize, SetupNeededEvent_Deserialize>("setup-needed-event"),
 	signinEvent: makeEvent<SigninEvent_Serialize, SigninEvent_Deserialize>("signin-event"),
+	statsEvent: makeEvent<StatsEvent, StatsEvent>("stats-event"),
+	tasteEvent: makeEvent<TasteEvent_Serialize, TasteEvent_Deserialize>("taste-event"),
 };
 
 /* Types */
@@ -394,6 +500,68 @@ export type AuthState_Serialize = { state: "anonymous" } |
 { state: "choosingChannel"; channels: AccountChannel_Serialize[]; source: string } | { state: "signedIn"; channel: AccountChannel_Serialize; channels: AccountChannel_Serialize[]; source: string; premium: boolean | null } | 
 /**  The stored session stopped working; offer re-import / sign-in. */
 { state: "expired"; source: string; reason: string };
+
+export type BlockKind = "track" | "artist";
+
+export type Blocked = Blocked_Serialize | Blocked_Deserialize;
+
+export type Blocked_Deserialize = {
+	kind: BlockKind,
+	target: ItemId,
+	/**  The song's title or the artist's name. */
+	label: string,
+	/**  A song's artist line. */
+	detail?: string | null,
+	created: string,
+};
+
+export type Blocked_Serialize = {
+	kind: BlockKind,
+	target: ItemId,
+	/**  The song's title or the artist's name. */
+	label: string,
+	/**  A song's artist line. */
+	detail: string | null,
+	created: string,
+};
+
+export type Bookmark = Bookmark_Serialize | Bookmark_Deserialize;
+
+export type BookmarkKind = "page" | "track" | 
+/**  A song at a time: opening it plays from there. */
+"moment";
+
+export type BookmarkTarget = BookmarkTarget_Serialize | BookmarkTarget_Deserialize;
+
+export type BookmarkTarget_Deserialize = { type: "page"; value: PageRef_Deserialize } | { type: "track"; value: Track_Deserialize };
+
+export type BookmarkTarget_Serialize = { type: "page"; value: PageRef_Serialize } | { type: "track"; value: Track_Serialize };
+
+export type Bookmark_Deserialize = {
+	id: string,
+	kind: BookmarkKind,
+	target: BookmarkTarget_Deserialize,
+	/**  Seconds into the song, for a moment. */
+	position?: number | null,
+	title: string,
+	subtitle: string,
+	art?: ArtRef_Deserialize | null,
+	/**  Unix seconds, as a string on the wire (D13). */
+	created: string,
+};
+
+export type Bookmark_Serialize = {
+	id: string,
+	kind: BookmarkKind,
+	target: BookmarkTarget_Serialize,
+	/**  Seconds into the song, for a moment. */
+	position: number | null,
+	title: string,
+	subtitle: string,
+	art: ArtRef_Serialize | null,
+	/**  Unix seconds, as a string on the wire (D13). */
+	created: string,
+};
 
 export type Bootstrap = Bootstrap_Serialize | Bootstrap_Deserialize;
 
@@ -618,6 +786,33 @@ export type Credit_Deserialize = {
 export type Credit_Serialize = {
 	name: string,
 	id: ItemId | null,
+};
+
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography = Discography_Serialize | Discography_Deserialize;
+
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography_Deserialize = {
+	releases: CollectionCard_Deserialize[],
+	complete: boolean,
+};
+
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography_Serialize = {
+	releases: CollectionCard_Serialize[],
+	complete: boolean,
 };
 
 /**  One downloaded, or downloading, song. */
@@ -870,6 +1065,38 @@ export type ErrorCode = "network" | "authRequired" | "sessionExpired" | "notFoun
 /**  Superseded by a newer request or an account switch. */
 "stale" | "unsupported" | "outcomeUnknown" | "rejected" | "invalidArgument" | "keychain" | "internal";
 
+export type Folder = Folder_Serialize | Folder_Deserialize;
+
+export type FolderItem = FolderItem_Serialize | FolderItem_Deserialize;
+
+export type FolderItem_Deserialize = {
+	itemId: ItemId,
+	card: CollectionCard_Deserialize,
+};
+
+export type FolderItem_Serialize = {
+	itemId: ItemId,
+	card: CollectionCard_Serialize,
+};
+
+export type Folder_Deserialize = {
+	id: string,
+	name: string,
+	/**  An opaque local art key (served by `art://`, never a path). */
+	cover?: string | null,
+	collapsed: boolean,
+	items: FolderItem_Deserialize[],
+};
+
+export type Folder_Serialize = {
+	id: string,
+	name: string,
+	/**  An opaque local art key (served by `art://`, never a path). */
+	cover: string | null,
+	collapsed: boolean,
+	items: FolderItem_Serialize[],
+};
+
 /**  A play was reported to the history: the History page refreshes if open. */
 export type HistoryEvent = {
 	trackId: string,
@@ -1053,6 +1280,33 @@ export type LastfmStatus_Serialize = {
 	error: string | null,
 };
 
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent = LibraryLikeEvent_Serialize | LibraryLikeEvent_Deserialize;
+
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent_Deserialize = {
+	job: number,
+	trackId?: ItemId | null,
+	outcome?: MutationOutcome | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	/**  Why it ended early, for the user. */
+	error?: string | null,
+};
+
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent_Serialize = {
+	job: number,
+	trackId: ItemId | null,
+	outcome: MutationOutcome | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	/**  Why it ended early, for the user. */
+	error: string | null,
+};
+
 export type LibraryPage = LibraryPage_Serialize | LibraryPage_Deserialize;
 
 export type LibraryPage_Deserialize = {
@@ -1068,6 +1322,80 @@ export type LibraryPage_Serialize = {
 };
 
 export type LibrarySection = "playlists" | "albums" | "artists" | "songs" | "liked" | "subscriptions" | "history";
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent = LibraryYearEvent_Serialize | LibraryYearEvent_Deserialize;
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent_Deserialize = {
+	job: number,
+	albumId?: string | null,
+	year?: number | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	stopped: boolean,
+};
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent_Serialize = {
+	job: number,
+	albumId: string | null,
+	year: number | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	stopped: boolean,
+};
+
+export type ListeningStats = ListeningStats_Serialize | ListeningStats_Deserialize;
+
+export type ListeningStats_Deserialize = {
+	period: StatsPeriod_Deserialize,
+	/**  Everything heard, counted or not. */
+	minutes: number | null,
+	/**  Plays that met the counting rule. */
+	plays: number,
+	/**  Different songs among them. */
+	songs: number,
+	topSongs: TopTrack_Deserialize[],
+	topArtists: TopCredit_Deserialize[],
+	topAlbums: TopCredit_Deserialize[],
+	/**  Minutes heard by the local hour a play started in, 0–23. */
+	byHour: (number | null)[],
+	/**  Songs counted for the first time in this period. */
+	newSongs: number,
+	/**  The most played of them. */
+	newTop: Track_Deserialize[],
+};
+
+export type ListeningStats_Serialize = {
+	period: StatsPeriod_Serialize,
+	/**  Everything heard, counted or not. */
+	minutes: number | null,
+	/**  Plays that met the counting rule. */
+	plays: number,
+	/**  Different songs among them. */
+	songs: number,
+	topSongs: TopTrack_Serialize[],
+	topArtists: TopCredit_Serialize[],
+	topAlbums: TopCredit_Serialize[],
+	/**  Minutes heard by the local hour a play started in, 0–23. */
+	byHour: (number | null)[],
+	/**  Songs counted for the first time in this period. */
+	newSongs: number,
+	/**  The most played of them. */
+	newTop: Track_Serialize[],
+};
 
 /**  An A–B loop, in seconds of the current song. */
 export type LoopRange = {
@@ -1183,6 +1511,27 @@ export type PageLink_Serialize = {
 	/**  Hue for coloured mood buttons. */
 	hue: number | null,
 };
+
+/**
+ *  A page that can be opened again: the same routes as the UI's `View`.
+ *  Links keep their `params` (an artist's "All songs" needs them), never a
+ *  continuation cursor.
+ */
+export type PageRef = PageRef_Serialize | PageRef_Deserialize;
+
+/**
+ *  A page that can be opened again: the same routes as the UI's `View`.
+ *  Links keep their `params` (an artist's "All songs" needs them), never a
+ *  continuation cursor.
+ */
+export type PageRef_Deserialize = { name: "collection"; id: ItemId; params?: string | null } | { name: "artist"; id: ItemId } | { name: "page"; browseId: string; params?: string | null; title?: string | null };
+
+/**
+ *  A page that can be opened again: the same routes as the UI's `View`.
+ *  Links keep their `params` (an artist's "All songs" needs them), never a
+ *  continuation cursor.
+ */
+export type PageRef_Serialize = { name: "collection"; id: ItemId; params: string | null } | { name: "artist"; id: ItemId } | { name: "page"; browseId: string; params: string | null; title: string | null };
 
 export type Page_Deserialize = {
 	title?: string | null,
@@ -1566,6 +1915,33 @@ export type RuntimesEvent_Deserialize = RuntimeStatus_Deserialize;
  */
 export type RuntimesEvent_Serialize = RuntimeStatus_Serialize;
 
+/**  A saved queue as listed (the queue itself stays in Rust until restored). */
+export type SavedQueueInfo = SavedQueueInfo_Serialize | SavedQueueInfo_Deserialize;
+
+/**  A saved queue as listed (the queue itself stays in Rust until restored). */
+export type SavedQueueInfo_Deserialize = {
+	id: string,
+	name: string,
+	songs: number,
+	duration?: number | null,
+	/**  The song it restores to. */
+	current?: Track_Deserialize | null,
+	position: number | null,
+	updated: string,
+};
+
+/**  A saved queue as listed (the queue itself stays in Rust until restored). */
+export type SavedQueueInfo_Serialize = {
+	id: string,
+	name: string,
+	songs: number,
+	duration: number | null,
+	/**  The song it restores to. */
+	current: Track_Serialize | null,
+	position: number | null,
+	updated: string,
+};
+
 export type SearchFilter = "songs" | "videos" | "albums" | "artists" | "communityPlaylists" | "featuredPlaylists";
 
 export type SearchResults = SearchResults_Serialize | SearchResults_Deserialize;
@@ -1793,6 +2169,102 @@ export type SongFile_Serialize = {
 	bytes: number | null,
 };
 
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts = SortFacts_Serialize | SortFacts_Deserialize;
+
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts_Deserialize = {
+	/**  Counted plays in Encore (D30), by track id. */
+	plays: { [key in string]: number },
+	lastfm?: { [key in string]: number } | null,
+	/**  Estimated tempo (D28), by track id. */
+	bpm: { [key in string]: number | null },
+};
+
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts_Serialize = {
+	/**  Counted plays in Encore (D30), by track id. */
+	plays: { [key in string]: number },
+	lastfm: { [key in string]: number } | null,
+	/**  Estimated tempo (D28), by track id. */
+	bpm: { [key in string]: number | null },
+};
+
+/**  One row, as far as sorting needs it. */
+export type SortRow = SortRow_Serialize | SortRow_Deserialize;
+
+/**  One row, as far as sorting needs it. */
+export type SortRow_Deserialize = {
+	id: ItemId,
+	/**  The other version of the recording: its plays count too. */
+	counterpart?: ItemId | null,
+	title: string,
+	artist: string,
+};
+
+/**  One row, as far as sorting needs it. */
+export type SortRow_Serialize = {
+	id: ItemId,
+	/**  The other version of the recording: its plays count too. */
+	counterpart: ItemId | null,
+	title: string,
+	artist: string,
+};
+
+/**  `stats`: a play was counted or ended, so open stats can refresh. */
+export type StatsEvent = null;
+
+export type StatsOverview = StatsOverview_Serialize | StatsOverview_Deserialize;
+
+export type StatsOverview_Deserialize = {
+	/**  Months with plays, newest first. */
+	months: StatsPeriod_Deserialize[],
+	/**  Unix seconds of the first play, if any. */
+	since?: string | null,
+	plays: number,
+};
+
+export type StatsOverview_Serialize = {
+	/**  Months with plays, newest first. */
+	months: StatsPeriod_Serialize[],
+	/**  Unix seconds of the first play, if any. */
+	since: string | null,
+	plays: number,
+};
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod = StatsPeriod_Serialize | StatsPeriod_Deserialize;
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod_Deserialize = {
+	year: number,
+	month?: number | null,
+};
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod_Serialize = {
+	year: number,
+	month: number | null,
+};
+
 export type StreamInfo = StreamInfo_Serialize | StreamInfo_Deserialize;
 
 export type StreamInfo_Deserialize = {
@@ -1811,6 +2283,70 @@ export type StreamInfo_Serialize = {
 	fromCache: boolean,
 	seekable: boolean,
 	authenticated: boolean,
+};
+
+/**  `taste`: the block list or a setting changed. */
+export type TasteEvent = TasteEvent_Serialize | TasteEvent_Deserialize;
+
+/**  `taste`: the block list or a setting changed. */
+export type TasteEvent_Deserialize = TasteState_Deserialize;
+
+/**  `taste`: the block list or a setting changed. */
+export type TasteEvent_Serialize = TasteState_Serialize;
+
+export type TasteState = TasteState_Serialize | TasteState_Deserialize;
+
+export type TasteState_Deserialize = {
+	/**  The current owner's block list, newest first. */
+	blocked: Blocked_Deserialize[],
+	hidePodcasts: boolean,
+};
+
+export type TasteState_Serialize = {
+	/**  The current owner's block list, newest first. */
+	blocked: Blocked_Serialize[],
+	hidePodcasts: boolean,
+};
+
+/**  An artist or an album, ranked. */
+export type TopCredit = TopCredit_Serialize | TopCredit_Deserialize;
+
+/**  An artist or an album, ranked. */
+export type TopCredit_Deserialize = {
+	name: string,
+	id?: ItemId | null,
+	/**  The cover of its most played song. */
+	art?: ArtRef_Deserialize | null,
+	/**  An album's artist line. */
+	detail?: string | null,
+	plays: number,
+	minutes: number | null,
+};
+
+/**  An artist or an album, ranked. */
+export type TopCredit_Serialize = {
+	name: string,
+	id: ItemId | null,
+	/**  The cover of its most played song. */
+	art: ArtRef_Serialize | null,
+	/**  An album's artist line. */
+	detail: string | null,
+	plays: number,
+	minutes: number | null,
+};
+
+export type TopTrack = TopTrack_Serialize | TopTrack_Deserialize;
+
+export type TopTrack_Deserialize = {
+	track: Track_Deserialize,
+	plays: number,
+	minutes: number | null,
+};
+
+export type TopTrack_Serialize = {
+	track: Track_Serialize,
+	plays: number,
+	minutes: number | null,
 };
 
 export type Track = Track_Serialize | Track_Deserialize;
@@ -1896,6 +2432,18 @@ export type Word_Serialize = {
 	t: number | null,
 	end: number | null,
 	text: string,
+};
+
+/**
+ *  A year lookup started: what the cache already knew, and how many albums
+ *  are being read now (at most `YEARS_LIMIT`; `skipped` more were not).
+ */
+export type YearsStart = {
+	job: number,
+	/**  Album id → year; `None`: the album gives no year. */
+	known: { [key in string]: number | null },
+	pending: number,
+	skipped: number,
 };
 
 /* Tauri Specta runtime */
