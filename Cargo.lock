@@ -1641,6 +1641,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-wiki"
+version = "0.4.0"
+dependencies = [
+ "encore-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "unicode-normalization",
+ "url",
+]
+
+[[package]]
 name = "encore-ytm"
 version = "0.4.0"
 dependencies = [
