@@ -40,6 +40,7 @@ use video::formats::{self, Candidate, Skipped};
 use video::playability::{self, Challenge, Playability, Restriction};
 use video::player::{self, CallError};
 use video::player_js::{Player, PlayerJs, PlayerJsError};
+use video::webpage;
 
 /// yt-dlp's version and commit the extractor was ported from.
 pub const YT_DLP_VERSION: &str = "2026.10.26";
@@ -286,10 +287,10 @@ pub struct NativeResolver {
     solved: jsc::cache::SolvedCache,
     cache: Mutex<HashMap<String, Cached>>,
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// The visitor YouTube gave signed-out requests (in memory only).
-    anon_visitor: Mutex<Option<String>>,
-    /// Where a signed-out resolve gets its visitor first: encore-ytm's,
-    /// so the app presents one visitor to YouTube (D37).
+    /// The signed-out session (watch page cookies and visitor, memory only).
+    anon: tokio::sync::Mutex<Option<webpage::AnonSession>>,
+    /// Where a signed-out resolve gets its visitor when the watch page gave
+    /// none: encore-ytm's (D37).
     visitor_source: Mutex<Option<VisitorSource>>,
     notice: Mutex<Option<String>>,
     /// Encore is quitting or installing an update (D24).
@@ -313,14 +314,15 @@ impl NativeResolver {
             solved: Default::default(),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
-            anon_visitor: Mutex::new(None),
+            anon: tokio::sync::Mutex::new(None),
             visitor_source: Mutex::new(None),
             notice: Mutex::new(None),
             closed: AtomicBool::new(false),
         })
     }
 
-    /// Signed-out resolves take their visitor from here when it has one.
+    /// Signed-out resolves take their visitor from here when the watch page
+    /// gave none.
     pub fn set_visitor_source(&self, f: VisitorSource) {
         *self.visitor_source.lock() = Some(f);
     }
@@ -382,9 +384,11 @@ impl NativeResolver {
             return Err(fail(PlayFailureKind::Unavailable, "This isn't a YouTube song Encore can play."));
         }
         // The identity is frozen here, for every request of this resolve.
-        let shared = self.visitor_source.lock().as_ref().and_then(|f| f());
-        let mut id = Identity::from_auth(auth, shared.or_else(|| self.anon_visitor.lock().clone()));
+        let mut id = Identity::from_auth(auth, None);
         diag.signed_in = id.is_authenticated();
+        if !id.is_authenticated() {
+            self.anonymous(&mut id, video_id).await;
+        }
         let key = Self::cache_key(video_id, &id, opts);
         let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
         let _g = lock.lock().await;
@@ -498,11 +502,32 @@ impl NativeResolver {
             }
             None => {
                 let f = failure(&causes, id.is_authenticated());
+                // A bot check signed out: the next resolve starts a new session.
+                if f.kind == PlayFailureKind::Challenged && !id.is_authenticated() {
+                    *self.anon.lock().await = None;
+                }
                 if f.message == NEEDS_UPDATE {
                     *self.notice.lock() = Some(NEEDS_UPDATE.into());
                 }
                 Err(f)
             }
+        }
+    }
+
+    /// Signed out: the session the watch page starts (`video::webpage`),
+    /// kept for a while; encore-ytm's visitor if the page gave none.
+    async fn anonymous(&self, id: &mut Identity, video_id: &str) {
+        let mut g = self.anon.lock().await;
+        if !g.as_ref().is_some_and(|s| s.fresh()) {
+            *g = webpage::load(&self.http, video_id).await;
+            tracing::info!(ok = g.is_some(), visitor = g.as_ref().is_some_and(|s| s.visitor.is_some()), "signed-out session from the watch page");
+        }
+        if let Some(s) = g.as_ref() {
+            id.anon_cookies = Some(s.cookie_header());
+            id.visitor_data = s.visitor.clone();
+        }
+        if id.visitor_data.is_none() {
+            id.visitor_data = self.visitor_source.lock().as_ref().and_then(|f| f());
         }
     }
 
@@ -538,16 +563,6 @@ impl NativeResolver {
         };
         if self.closed.load(Ordering::SeqCst) {
             return Err(Cause::Closed);
-        }
-        // Signed out, the visitor YouTube hands out is kept for the next
-        // requests, as a device keeps its own.
-        if !id.is_authenticated() {
-            if let Some(v) = pr["responseContext"]["visitorData"].as_str().filter(|v| v.len() < 256) {
-                if id.visitor_data.is_none() {
-                    id.visitor_data = Some(v.to_string());
-                }
-                self.anon_visitor.lock().get_or_insert_with(|| v.to_string());
-            }
         }
         attempt.status = Some(playability::status(&pr).to_string());
         if playability::other_video(&pr, video_id).is_some() {

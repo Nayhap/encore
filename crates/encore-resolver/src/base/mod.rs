@@ -34,6 +34,9 @@ pub struct Identity {
     /// The manager's user session id, for the brand `_u` hash.
     pub user_session_id: Option<String>,
     pub visitor_data: Option<String>,
+    /// Signed out: the watch page's cookies (`video::webpage`), with the
+    /// consent ones.
+    pub anon_cookies: Option<String>,
 }
 
 impl std::fmt::Debug for Identity {
@@ -44,7 +47,7 @@ impl std::fmt::Debug for Identity {
 
 impl Identity {
     pub fn anonymous(visitor_data: Option<String>) -> Self {
-        Identity { key: "anonymous".into(), jar: None, auth_user: 0, page_id: None, user_session_id: None, visitor_data }
+        Identity { key: "anonymous".into(), jar: None, auth_user: 0, page_id: None, user_session_id: None, visitor_data, anon_cookies: None }
     }
 
     pub fn from_auth(auth: Option<&ResolveAuth>, anonymous_visitor: Option<String>) -> Self {
@@ -60,6 +63,7 @@ impl Identity {
             page_id: a.page_id.clone(),
             user_session_id: a.user_session_id.clone(),
             visitor_data: a.visitor_data.clone(),
+            anon_cookies: None,
         }
     }
 
@@ -110,7 +114,7 @@ pub fn api_headers(c: &InnertubeClient, id: &Identity, now: u64) -> Vec<(String,
             }
             h.push(("Cookie".into(), with_pref(&jar.header_for(&url))));
         }
-        None => h.push(("Cookie".into(), "SOCS=CAI; PREF=hl=en&tz=UTC".into())),
+        None => h.push(("Cookie".into(), id.anon_cookies.clone().unwrap_or_else(|| "SOCS=CAI; PREF=hl=en&tz=UTC".into()))),
     }
     h
 }

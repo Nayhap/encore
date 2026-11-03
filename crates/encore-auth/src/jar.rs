@@ -123,7 +123,15 @@ impl CookieJar {
                     }
                 }
                 "path" if v.starts_with('/') => path = v.to_string(),
-                "expires" => expires = httpdate::parse_http_date(v).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).or(Some(0)),
+                // YouTube writes the Netscape form, "Sun, 02-May-2027 16:14:47
+                // GMT", which `httpdate` doesn't read; with the dashes as
+                // spaces it is the IMF form it does. A date that still can't
+                // be read keeps the cookie for the session rather than
+                // deleting it.
+                "expires" => {
+                    let parse = |s: &str| httpdate::parse_http_date(s).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+                    expires = parse(v).or_else(|| parse(&v.replacen('-', " ", 2)));
+                }
                 "max-age" => max_age = v.parse::<i64>().ok(),
                 "secure" => secure = true,
                 "httponly" => http_only = true,
@@ -200,6 +208,21 @@ mod tests {
         // foreign domain ignored
         assert!(!j.apply_set_cookie(&u, "EVIL=1; Domain=.example.com"));
         assert_eq!(j.len(), 1);
+    }
+
+    #[test]
+    fn youtubes_dashed_expiry_dates_are_read() {
+        let mut j = CookieJar::default();
+        let u = url::Url::parse("https://www.youtube.com/watch?v=x").unwrap();
+        assert!(j.apply_set_cookie(&u, "VISITOR_INFO1_LIVE=v; Domain=.youtube.com; Expires=Sun, 02-May-2027 16:14:47 GMT; Path=/; Secure; HttpOnly"));
+        assert_eq!(j.get("VISITOR_INFO1_LIVE", "www.youtube.com"), Some("v"));
+        assert!(j.records()[0].expires.is_some_and(|e| e > 1_800_000_000 && e < 1_820_000_000));
+        // The past, dashed, still deletes.
+        assert!(j.apply_set_cookie(&u, "VISITOR_INFO1_LIVE=; Domain=.youtube.com; Expires=Wed, 07-Feb-2024 16:14:47 GMT; Path=/"));
+        assert_eq!(j.get("VISITOR_INFO1_LIVE", "www.youtube.com"), None);
+        // Unreadable: kept for the session.
+        assert!(j.apply_set_cookie(&u, "Y=1; Domain=.youtube.com; Expires=someday"));
+        assert_eq!(j.get("Y", "www.youtube.com"), Some("1"));
     }
 
     #[test]
