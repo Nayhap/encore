@@ -123,7 +123,6 @@ struct Mem {
     revision: u64,
     paused: bool,
     online: bool,
-    setup_ready: bool,
     disk_full: bool,
     elsewhere: bool,
     breaker: Breaker,
@@ -177,7 +176,6 @@ pub struct DownloadManager {
 
 enum JobError {
     Challenged,
-    SetupNeeded,
     DiskFull,
     /// Worth another try later; counts toward the limit.
     Retry(String),
@@ -254,9 +252,6 @@ fn wait_of(m: &Mem) -> Option<(DownloadWait, String)> {
     if m.disk_full {
         return Some((DownloadWait::DiskFull, "Your disk is full. Free some space, then choose Try again.".into()));
     }
-    if !m.setup_ready {
-        return Some((DownloadWait::SetupNeeded, "Set up playback to download songs.".into()));
-    }
     None
 }
 
@@ -312,7 +307,6 @@ impl DownloadManager {
                 revision: 1,
                 paused,
                 online: true,
-                setup_ready: true,
                 disk_full: false,
                 elsewhere: false,
                 breaker: Breaker::default(),
@@ -773,15 +767,6 @@ impl DownloadManager {
         }
     }
 
-    /// The player components are (or aren't) there to resolve with (D22).
-    pub fn set_setup_ready(&self, on: bool) {
-        let changed = std::mem::replace(&mut self.mem.lock().setup_ready, on) != on;
-        if changed {
-            self.wake.notify_one();
-            self.emit_summary();
-        }
-    }
-
     /// Settings → Downloads: measured on disk.
     pub fn storage(&self) -> DownloadsStorage {
         let bytes = files::dir_size(&self.layout.audio) + files::dir_size(&self.layout.art);
@@ -1095,7 +1080,7 @@ impl DownloadManager {
             if expired {
                 m.breaker.until = None;
             }
-            let d = if m.paused || !m.online || m.disk_full || !m.setup_ready || m.breaker.stopped {
+            let d = if m.paused || !m.online || m.disk_full || m.breaker.stopped {
                 Some(Duration::from_secs(60))
             } else {
                 m.breaker.until.map(|u| u.saturating_duration_since(Instant::now()))
@@ -1223,10 +1208,6 @@ impl DownloadManager {
                 self.challenged();
                 let _ = s.download_requeue(&vid, attempt, None, false, None);
             }
-            Err(JobError::SetupNeeded) => {
-                self.set_setup_ready(false);
-                let _ = s.download_requeue(&vid, attempt, None, false, None);
-            }
             Err(JobError::DiskFull) => {
                 self.mem.lock().disk_full = true;
                 let _ = s.download_requeue(&vid, attempt, None, false, None);
@@ -1284,7 +1265,6 @@ impl DownloadManager {
                 // Only the extractor's bot check counts here (D23): a refused
                 // URL was already resolved again by the resolver.
                 PlayFailureKind::Challenged => JobError::Challenged,
-                PlayFailureKind::SetupNeeded => JobError::SetupNeeded,
                 PlayFailureKind::Network => {
                     self.network_error();
                     JobError::Retry(f.message)

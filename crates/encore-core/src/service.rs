@@ -308,12 +308,19 @@ impl std::fmt::Debug for CookieRecord {
     }
 }
 
-/// Identity a resolve runs under.
+/// Identity a resolve runs under, taken once when it starts (D2, D37).
 #[derive(Clone, Debug, Default)]
 pub struct ResolveAuth {
     pub cookies: Vec<CookieRecord>,
     pub auth_user: u32,
     pub page_id: Option<String>,
+    /// The manager's user session id, for a brand channel's `_u` hash.
+    pub user_session_id: Option<String>,
+    /// The session's visitor, shared with the D18 `/player` call.
+    pub visitor_data: Option<String>,
+    /// Account, channel and session generation: resolved URLs are cached
+    /// under it, and a result for another key is stale.
+    pub key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -344,9 +351,6 @@ pub enum PlayFailureKind {
     SessionExpired,
     Network,
     Unknown,
-    /// The player components aren't installed yet (D22): not the song's
-    /// fault, so it isn't skipped; the app offers the setup instead.
-    SetupNeeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, thiserror::Error)]

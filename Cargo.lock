@@ -1642,26 +1642,22 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "encore-auth",
  "encore-core",
- "flate2",
- "futures-util",
  "hex",
- "libc",
  "parking_lot 0.13.0",
+ "regex",
  "reqwest",
  "rquickjs",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "sha3",
  "specta",
- "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-util",
  "tracing",
- "zip",
+ "url",
 ]
 
 [[package]]
@@ -7587,7 +7583,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
 dependencies = [
  "crc32fast",
- "flate2",
  "getrandom 0.4.3",
  "indexmap 2.14.2",
  "memchr",

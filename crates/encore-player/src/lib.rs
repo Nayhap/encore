@@ -78,9 +78,6 @@ struct State {
     /// during loading).
     pending_pos: f64,
     skips: u32,
-    /// The current song stopped because the player components weren't
-    /// installed; it starts once they are (D22).
-    awaiting_setup: bool,
     radio_cursor: Option<String>,
     radio_loading: bool,
     radio_empty: u32,
@@ -201,7 +198,6 @@ impl Player {
                 preloading: false,
                 pending_pos: 0.0,
                 skips: 0,
-                awaiting_setup: false,
                 radio_cursor: None,
                 radio_loading: false,
                 radio_empty: 0,
@@ -588,7 +584,6 @@ impl Player {
             st.loaded = None;
             st.preload = None;
             st.error = None;
-            st.awaiting_setup = false;
             st.skips = 0;
             st.radio_cursor = None;
             st.radio_empty = 0;
@@ -1010,7 +1005,6 @@ impl Player {
             st.seek_gen += 1;
             st.phase = Phase::Loading;
             st.error = None;
-            st.awaiting_setup = false;
             st.pending_pos = start;
             st.loaded = None;
             st.last_duration = cur.track.duration;
@@ -1055,9 +1049,8 @@ impl Player {
             let (res, path) = match local {
                 Some((s, p)) => (Ok(s), Some(p)),
                 None => {
-                    let auth = (me.auth)();
                     let _busy = me.gate.enter();
-                    (me.resolver.resolve(&vid, auth.as_ref()).await, None)
+                    (me.resolve_as_now(&vid).await, None)
                 }
             };
             match &res {
@@ -1099,19 +1092,6 @@ impl Player {
     }
 
     async fn fail_current(self: &Arc<Self>, f: PlayFailure) {
-        // Not the song's fault: keep it, paused, and ask for the setup.
-        if f.kind == PlayFailureKind::SetupNeeded {
-            {
-                let mut st = self.st.lock();
-                st.error = None;
-                st.phase = Phase::Paused;
-                st.loaded = None;
-                st.awaiting_setup = true;
-            }
-            self.publish(false);
-            let _ = self.tx.send(PlayerEvent::SetupNeeded);
-            return;
-        }
         let (title, skips, autoskip) = {
             let mut st = self.st.lock();
             st.error = Some(f.clone());
@@ -1144,7 +1124,7 @@ impl Player {
                 return;
             }
         }
-        if matches!(f.kind, PlayFailureKind::SetupNeeded | PlayFailureKind::Network | PlayFailureKind::Challenged) {
+        if matches!(f.kind, PlayFailureKind::Network | PlayFailureKind::Challenged) {
             let _ = self.tx.send(PlayerEvent::Notice(f.message.clone()));
         } else if autoskip {
             let _ = self.tx.send(PlayerEvent::Notice(format!("Skipped “{title}”: {}", f.message)));
@@ -1338,15 +1318,32 @@ impl Player {
         }
     }
 
+    /// Resolve as whoever is signed in now. A result that comes back after
+    /// the account or channel changed belongs to the old identity (D2): it
+    /// is dropped and the song resolved again as the new one.
+    async fn resolve_as_now(&self, vid: &str) -> std::result::Result<ResolvedStream, PlayFailure> {
+        let key = |a: &Option<ResolveAuth>| a.as_ref().map(|a| a.key.clone());
+        let mut auth = (self.auth)();
+        for _ in 0..2 {
+            let r = self.resolver.resolve(vid, auth.as_ref()).await;
+            let now = (self.auth)();
+            if key(&now) == key(&auth) {
+                return r;
+            }
+            tracing::info!(video = vid, "the account changed during a resolve; resolving again");
+            auth = now;
+        }
+        self.resolver.resolve(vid, auth.as_ref()).await
+    }
+
     async fn preload(self: &Arc<Self>, entry: QueueEntry) {
         let vid = entry.track.id.remote().to_string();
         let (res, path) = match self.local_source(&vid) {
             Some((s, p)) => (Ok(s), Some(p)),
             None if !self.online() => (Err(PlayFailure::new(PlayFailureKind::Network, "offline")), None),
             None => {
-                let auth = (self.auth)();
                 let _busy = self.gate.enter();
-                (self.resolver.resolve(&vid, auth.as_ref()).await, None)
+                (self.resolve_as_now(&vid).await, None)
             }
         };
         let ok = self.avail();
@@ -1794,19 +1791,6 @@ impl Player {
         }
         self.publish(false);
         self.send_anchor();
-    }
-
-    /// The player components were just installed: start the song that was
-    /// waiting for them, if any.
-    pub fn resume_after_setup(self: &Arc<Self>) {
-        let pos = {
-            let mut st = self.st.lock();
-            if !std::mem::take(&mut st.awaiting_setup) || st.phase != Phase::Paused || st.queue.current().is_none() {
-                return;
-            }
-            st.pending_pos
-        };
-        self.play_current(pos);
     }
 
     pub fn resume(&self) {

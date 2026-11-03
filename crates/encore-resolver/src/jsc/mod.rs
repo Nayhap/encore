@@ -5,6 +5,7 @@
 //! commit in `upstream.toml`. The solver itself is yt-dlp-ejs, vendored
 //! verbatim in `vendor/ejs/` and run by [`quickjs::QuickJsSolver`].
 
+pub mod cache;
 pub mod ejs;
 pub mod quickjs;
 

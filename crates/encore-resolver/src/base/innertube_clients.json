@@ -1,0 +1,148 @@
+{
+  "_upstream": "yt-dlp yt_dlp/extractor/youtube/_base.py INNERTUBE_CLIENTS (lines 97-405) and WEB_PO_TOKEN_POLICIES (71-94) at b77c9304e1c4220cca450c583491904daf8455af",
+  "_how": "Entry for entry as upstream, same keys. Keys starting with _ are Encore's notes: _line is the upstream line, _comment the upstream comment above the entry. Defaults that build_innertube_clients() fills in (_base.py:430-458) are left out here and applied in clients.rs. WEB_PO_TOKEN_POLICIES is written out where upstream spreads it. Only the keys Encore reads are kept; upstream's PLAYER_PO_TOKEN_POLICY and SUBS_PO_TOKEN_POLICY are kept for diffing.",
+  "web": {
+    "_line": 98,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "WEB", "clientVersion": "2.20260708.00.00" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 1,
+    "SUPPORTS_COOKIES": true,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "dash": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "hls": { "required": false, "recommended": true }
+    },
+    "PLAYER_PO_TOKEN_POLICY": { "required": false },
+    "SUBS_PO_TOKEN_POLICY": { "required": false }
+  },
+  "web_safari": {
+    "_line": 111,
+    "_comment": "Safari UA returns pre-merged video+audio 144p/240p/360p/720p/1080p HLS formats. Since 2026.07, HLS formats are only returned with some logged-in or \"trusted\" sessions",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "WEB", "clientVersion": "2.20260708.00.00", "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 1,
+    "SUPPORTS_COOKIES": true,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "dash": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "hls": { "required": false, "recommended": true }
+    },
+    "PLAYER_PO_TOKEN_POLICY": { "required": false },
+    "SUBS_PO_TOKEN_POLICY": { "required": false }
+  },
+  "web_embedded": {
+    "_line": 123,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "2.20260708.00.00", "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 56,
+    "SUPPORTS_COOKIES": true
+  },
+  "web_music": {
+    "_line": 134,
+    "INNERTUBE_HOST": "music.youtube.com",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20260707.12.00" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 67,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "dash": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "hls": { "required": false, "recommended": true }
+    },
+    "SUPPORTS_COOKIES": true,
+    "SUPPORTS_AD_PLAYBACK_CONTEXT": true
+  },
+  "web_creator": {
+    "_line": 165,
+    "_comment": "This client now requires sign-in for every video",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "WEB_CREATOR", "clientVersion": "1.20260708.06.00" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 62,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "dash": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "hls": { "required": false, "recommended": true }
+    },
+    "REQUIRE_AUTH": true,
+    "SUPPORTS_COOKIES": true
+  },
+  "android": {
+    "_line": 194,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "ANDROID", "clientVersion": "21.26.364", "androidSdkVersion": 30, "userAgent": "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip", "osName": "Android", "osVersion": "11" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 3,
+    "REQUIRE_JS_PLAYER": false,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_with_player_token": true },
+      "dash": { "required": true, "recommended": true, "not_required_with_player_token": true },
+      "hls": { "required": false, "recommended": true, "not_required_with_player_token": true }
+    },
+    "PLAYER_PO_TOKEN_POLICY": { "required": false, "recommended": true }
+  },
+  "android_vr": {
+    "_line": 230,
+    "_comment": "\"Made for kids\" videos aren't available with this client. Using a clientVersion>1.65 may return SABR streams only. Since 2026.07, intermittent/selective POT enforcement has been observed for non-HLS formats. Since 2026.08.17, ALL formats (including live HLS and itag 18) are 403'd with version 1.65.10",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "ANDROID_VR", "clientVersion": "1.65.10", "deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32, "userAgent": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip", "osName": "Android", "osVersion": "12L" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 28,
+    "REQUIRE_JS_PLAYER": false,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_with_player_token": true },
+      "dash": { "required": true, "recommended": true, "not_required_with_player_token": true },
+      "hls": { "required": false, "recommended": true, "not_required_with_player_token": true }
+    },
+    "PLAYER_PO_TOKEN_POLICY": { "required": false, "recommended": true }
+  },
+  "ios": {
+    "_line": 266,
+    "_comment": "iOS clients have HLS live streams. Setting device model to get 60fps formats.",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "IOS", "clientVersion": "21.26.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "userAgent": "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)", "osName": "iPhone", "osVersion": "18.3.2.22D82" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 5,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_with_player_token": true },
+      "hls": { "required": true, "recommended": true, "not_required_with_player_token": true }
+    },
+    "PLAYER_PO_TOKEN_POLICY": { "required": false, "recommended": true },
+    "REQUIRE_JS_PLAYER": false
+  },
+  "visionos": {
+    "_line": 296,
+    "_comment": "\"Made for kids\" videos aren't available with this client",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "VISIONOS", "clientVersion": "1.02", "deviceMake": "Apple", "deviceModel": "RealityDevice17,1", "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15", "osName": "visionOS", "osVersion": "26.5.23O471" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 101,
+    "REQUIRE_JS_PLAYER": false
+  },
+  "mweb": {
+    "_line": 313,
+    "_comment": "mweb has 'ultralow' formats",
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "MWEB", "clientVersion": "2.20260708.05.00", "userAgent": "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 2,
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "dash": { "required": true, "recommended": true, "not_required_for_premium": true, "not_required_with_player_token": false },
+      "hls": { "required": false, "recommended": true }
+    },
+    "SUPPORTS_COOKIES": true,
+    "SUPPORTS_AD_PLAYBACK_CONTEXT": true
+  },
+  "tv": {
+    "_line": 344,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "TVHTML5", "clientVersion": "7.20260707.07.00", "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 7,
+    "SUPPORTS_COOKIES": true
+  },
+  "tv_downgraded": {
+    "_line": 356,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "TVHTML5", "clientVersion": "5.20260707", "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 7,
+    "SUPPORTS_COOKIES": true
+  },
+  "tv_samsung": {
+    "_line": 367,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "TVHTML5", "clientVersion": "5.20260707", "deviceMake": "Samsung", "deviceModel": "UKS9800", "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1", "osName": "Tizen", "osVersion": "2.4.0" } },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 7,
+    "SUPPORTS_COOKIES": true
+  },
+  "tv_simply": {
+    "_line": 382,
+    "INNERTUBE_CONTEXT": { "client": { "clientName": "TVHTML5_SIMPLY", "clientVersion": "1.0" } },
+    "GVS_PO_TOKEN_POLICY": {
+      "https": { "required": true, "recommended": true },
+      "dash": { "required": true, "recommended": true },
+      "hls": { "required": false, "recommended": true }
+    },
+    "INNERTUBE_CONTEXT_CLIENT_NAME": 75
+  }
+}
