@@ -70,6 +70,9 @@ class Player {
     if (!a.playing) return;
     const dt = Math.min((performance.now() - a.at) / 1000, 2);
     let p = a.pos + dt;
+    // Inside an A–B loop the engine wraps at B (D26, lane A).
+    const l = this.abLoop;
+    if (l?.a != null && l.b != null && a.pos < l.b && p >= l.b) p = l.a + ((p - l.b) % Math.max(l.b - l.a, 0.001));
     if (this.duration != null) p = Math.min(p, this.duration);
     this.position = p;
   };

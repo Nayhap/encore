@@ -111,6 +111,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             // One block per area, each appended to only by its lane
             // (foundation.md): `features::<area>::<command>,` lines.
             // features: playback (lane A)
+            features::playback::loop_set,
+            features::playback::loop_clear,
+            features::playback::sleep_set,
+            features::playback::sleep_cancel,
 
             // features: library tools (lane B)
 

@@ -149,54 +149,12 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
-	/**  This account's bookmarks, newest first. */
-	bookmarksList: () => typedError<Bookmark_Serialize[], AppError_Serialize>(__TAURI_INVOKE("bookmarks_list")),
-	/**
-	 *  Bookmark a page or a song; with `position`, a moment in the song. The
-	 *  same thing twice gives back the bookmark already there.
-	 */
-	bookmarksAdd: (target: BookmarkTarget_Deserialize, position: number | null, title: string, subtitle: string, art: ArtRef_Deserialize | null) => typedError<Bookmark_Serialize, AppError_Serialize>(__TAURI_INVOKE("bookmarks_add", { target, position, title, subtitle, art })),
-	bookmarksRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("bookmarks_remove", { id })),
-	savedQueuesList: () => typedError<SavedQueueInfo_Serialize[], AppError_Serialize>(__TAURI_INVOKE("saved_queues_list")),
-	/**
-	 *  Keep the queue as it is now (order, uids, the song and the position in
-	 *  it) under `name`; the same name again replaces that copy.
-	 */
-	savedQueueSave: (name: string) => typedError<SavedQueueInfo_Serialize, AppError_Serialize>(__TAURI_INVOKE("saved_queue_save", { name })),
-	/**
-	 *  Put a saved queue back in place of the current one, paused at its song
-	 *  and position, with its order, uids, shuffle and repeat. Autoplay stays
-	 *  as the user has it now: it's a setting, not part of a queue.
-	 */
-	savedQueueRestore: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("saved_queue_restore", { id })),
-	savedQueueRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("saved_queue_remove", { id })),
-	foldersList: () => typedError<Folder_Serialize[], AppError_Serialize>(__TAURI_INVOKE("folders_list")),
-	/**  A new folder, holding `items` to begin with (may be none). */
-	foldersCreate: (name: string, items: CollectionCard_Deserialize[]) => typedError<Folder_Serialize, AppError_Serialize>(__TAURI_INVOKE("folders_create", { name, items })),
-	foldersRename: (id: string, name: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_rename", { id, name })),
-	/**  Delete a folder and its cover; the playlists and albums in it stay. */
-	foldersRemove: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_remove", { id })),
-	foldersSetCollapsed: (id: string, collapsed: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_set_collapsed", { id, collapsed })),
-	/**  File a playlist or album in a folder (out of any other one). */
-	foldersAdd: (id: string, card: CollectionCard_Deserialize) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_add", { id, card })),
-	foldersRemoveItem: (id: string, item: ItemId) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_remove_item", { id, item })),
-	foldersMoveItem: (id: string, item: ItemId, before: ItemId | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_move_item", { id, item, before })),
-	/**
-	 *  Ask for a picture and make it the folder's cover (a local art key).
-	 *  `false` when the user cancelled.
-	 */
-	foldersChooseCover: (id: string) => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("folders_choose_cover", { id })),
-	foldersClearCover: (id: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("folders_clear_cover", { id })),
-	/**
-	 *  Save a folder's links as a `.encorefolder` file where the user says.
-	 *  `false` when the user cancelled.
-	 */
-	foldersExport: (id: string) => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("folders_export", { id })),
-	/**
-	 *  Open a `.encorefolder` file and make a new folder from its links.
-	 *  `None` when the user cancelled.
-	 */
-	foldersImport: () => typedError<Folder_Serialize | null, AppError_Serialize>(__TAURI_INVOKE("folders_import")),
+	/**  Loop the song playing between `a` and `b` seconds. */
+	loopSet: (a: number | null, b: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_set", { a, b })),
+	loopClear: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_clear")),
+	/**  Start the sleep timer; `minutes` for `SleepMode::Timer`. */
+	sleepSet: (mode: SleepMode, minutes: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_set", { mode, minutes })),
+	sleepCancel: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_cancel")),
 };
 
 /** Events */
@@ -382,44 +340,6 @@ export type AuthState_Serialize = { state: "anonymous" } |
 { state: "choosingChannel"; channels: AccountChannel_Serialize[]; source: string } | { state: "signedIn"; channel: AccountChannel_Serialize; channels: AccountChannel_Serialize[]; source: string; premium: boolean | null } | 
 /**  The stored session stopped working; offer re-import / sign-in. */
 { state: "expired"; source: string; reason: string };
-
-export type Bookmark = Bookmark_Serialize | Bookmark_Deserialize;
-
-export type BookmarkKind = "page" | "track" | 
-/**  A song at a time: opening it plays from there. */
-"moment";
-
-export type BookmarkTarget = BookmarkTarget_Serialize | BookmarkTarget_Deserialize;
-
-export type BookmarkTarget_Deserialize = { type: "page"; value: PageRef_Deserialize } | { type: "track"; value: Track_Deserialize };
-
-export type BookmarkTarget_Serialize = { type: "page"; value: PageRef_Serialize } | { type: "track"; value: Track_Serialize };
-
-export type Bookmark_Deserialize = {
-	id: string,
-	kind: BookmarkKind,
-	target: BookmarkTarget_Deserialize,
-	/**  Seconds into the song, for a moment. */
-	position?: number | null,
-	title: string,
-	subtitle: string,
-	art?: ArtRef_Deserialize | null,
-	/**  Unix seconds, as a string on the wire (D13). */
-	created: string,
-};
-
-export type Bookmark_Serialize = {
-	id: string,
-	kind: BookmarkKind,
-	target: BookmarkTarget_Serialize,
-	/**  Seconds into the song, for a moment. */
-	position: number | null,
-	title: string,
-	subtitle: string,
-	art: ArtRef_Serialize | null,
-	/**  Unix seconds, as a string on the wire (D13). */
-	created: string,
-};
 
 export type Bootstrap = Bootstrap_Serialize | Bootstrap_Deserialize;
 
@@ -896,38 +816,6 @@ export type ErrorCode = "network" | "authRequired" | "sessionExpired" | "notFoun
 /**  Superseded by a newer request or an account switch. */
 "stale" | "unsupported" | "outcomeUnknown" | "rejected" | "invalidArgument" | "keychain" | "internal";
 
-export type Folder = Folder_Serialize | Folder_Deserialize;
-
-export type FolderItem = FolderItem_Serialize | FolderItem_Deserialize;
-
-export type FolderItem_Deserialize = {
-	itemId: ItemId,
-	card: CollectionCard_Deserialize,
-};
-
-export type FolderItem_Serialize = {
-	itemId: ItemId,
-	card: CollectionCard_Serialize,
-};
-
-export type Folder_Deserialize = {
-	id: string,
-	name: string,
-	/**  An opaque local art key (served by `art://`, never a path). */
-	cover?: string | null,
-	collapsed: boolean,
-	items: FolderItem_Deserialize[],
-};
-
-export type Folder_Serialize = {
-	id: string,
-	name: string,
-	/**  An opaque local art key (served by `art://`, never a path). */
-	cover: string | null,
-	collapsed: boolean,
-	items: FolderItem_Serialize[],
-};
-
 /**  A play was reported to the history: the History page refreshes if open. */
 export type HistoryEvent = {
 	trackId: string,
@@ -1203,27 +1091,6 @@ export type PageLink_Serialize = {
 	/**  Hue for coloured mood buttons. */
 	hue: number | null,
 };
-
-/**
- *  A page that can be opened again: the same routes as the UI's `View`.
- *  Links keep their `params` (an artist's "All songs" needs them), never a
- *  continuation cursor.
- */
-export type PageRef = PageRef_Serialize | PageRef_Deserialize;
-
-/**
- *  A page that can be opened again: the same routes as the UI's `View`.
- *  Links keep their `params` (an artist's "All songs" needs them), never a
- *  continuation cursor.
- */
-export type PageRef_Deserialize = { name: "collection"; id: ItemId; params?: string | null } | { name: "artist"; id: ItemId } | { name: "page"; browseId: string; params?: string | null; title?: string | null };
-
-/**
- *  A page that can be opened again: the same routes as the UI's `View`.
- *  Links keep their `params` (an artist's "All songs" needs them), never a
- *  continuation cursor.
- */
-export type PageRef_Serialize = { name: "collection"; id: ItemId; params: string | null } | { name: "artist"; id: ItemId } | { name: "page"; browseId: string; params: string | null; title: string | null };
 
 export type Page_Deserialize = {
 	title?: string | null,
@@ -1596,33 +1463,6 @@ export type RuntimesEvent_Deserialize = RuntimeStatus_Deserialize;
  *  (D22).
  */
 export type RuntimesEvent_Serialize = RuntimeStatus_Serialize;
-
-/**  A saved queue as listed (the queue itself stays in Rust until restored). */
-export type SavedQueueInfo = SavedQueueInfo_Serialize | SavedQueueInfo_Deserialize;
-
-/**  A saved queue as listed (the queue itself stays in Rust until restored). */
-export type SavedQueueInfo_Deserialize = {
-	id: string,
-	name: string,
-	songs: number,
-	duration?: number | null,
-	/**  The song it restores to. */
-	current?: Track_Deserialize | null,
-	position: number | null,
-	updated: string,
-};
-
-/**  A saved queue as listed (the queue itself stays in Rust until restored). */
-export type SavedQueueInfo_Serialize = {
-	id: string,
-	name: string,
-	songs: number,
-	duration: number | null,
-	/**  The song it restores to. */
-	current: Track_Serialize | null,
-	position: number | null,
-	updated: string,
-};
 
 export type SearchFilter = "songs" | "videos" | "albums" | "artists" | "communityPlaylists" | "featuredPlaylists";
 
