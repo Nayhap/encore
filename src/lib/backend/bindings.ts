@@ -149,6 +149,12 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
+	/**  Loop the song playing between `a` and `b` seconds. */
+	loopSet: (a: number | null, b: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_set", { a, b })),
+	loopClear: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("loop_clear")),
+	/**  Start the sleep timer; `minutes` for `SleepMode::Timer`. */
+	sleepSet: (mode: SleepMode, minutes: number | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_set", { mode, minutes })),
+	sleepCancel: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("sleep_cancel")),
 };
 
 /** Events */
