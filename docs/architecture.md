@@ -29,12 +29,12 @@ not depend on Tauri, so they can be tested and run from the command line.
 
 | Crate | What it does |
 |---|---|
-| `encore-core` | Domain types, the `MusicService` and `StreamResolver` traits, the queue, the SQLite store, artwork keys, log redaction. |
+| `encore-core` | Domain types, the `MusicService` and `StreamResolver` traits, the queue, the SQLite store with its backups and the local data of `local` (bookmarks, folders, the play log, ...), the paced background lane for long lists (`paging`), artwork keys, log redaction. |
 | `encore-ytm` | YouTube Music's internal API (`WEB_REMIX`, plus `ANDROID_MUSIC` for lyrics). Typed parsers for its responses, continuations, likes, playlist management, history, song/video pairs, play reporting to history, account and channel listing. |
 | `encore-auth` | The cookie jar, the `SAPISIDHASH` authorization header (including brand channels), cookie readers for Chromium browsers, Firefox and Safari, and the Keychain session store. |
 | `encore-resolver` | Downloads, verifies and keeps the player components (Python, Deno, yt-dlp; D22), and runs the pinned yt-dlp on them as a long-lived helper. Cookies are passed per request in memory, never written to disk. Each URL is probed before playback. |
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
-| `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. |
+| `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. Its play observer writes every audible play to the local log. |
 | `encore-lyrics` | YouTube Music timed lyrics, then LRCLIB synced, then plain lyrics. Scores LRCLIB matches by title, artist and duration, and caches results. |
 | `encore-downloads` | Songs kept for offline listening (D23): one worker resolves through the yt-dlp helper and fetches checked HTTP ranges, one queue checks kept playlists, albums and liked songs for changes, and lyrics and covers are kept alongside. It depends on `encore-core`, `encore-audio` and `encore-lyrics`; the player reaches it only through `encore-core`'s `LocalAudio` trait and asks it for a song's file before resolving anything. |
 | `encore-cli` | A headless tool that exercises every crate against live YouTube Music. |
@@ -53,6 +53,17 @@ bindings are generated into `src/lib/backend/bindings.ts` by `cargo test`.
 - **Events carry revisions**, so a late event for an old track or an old seek is ignored.
 - **Artwork** loads through an `art://` protocol that takes opaque keys, checks the host,
   and caches to disk. The cover's dominant hue is computed once and drives the UI accent.
+
+## Feature areas
+
+Features from 0.5 on live in areas with the same three seams on each side,
+so they can grow apart: `src-tauri/src/features/<area>.rs` (commands,
+events, state, an `install` run at startup), `src/lib/backend/features/<area>.ts`
+and `backend/mock/<area>.ts` (the area's calls, under `api.features`), and
+`src/lib/features/<area>.svelte.ts` (its UI state). Shared surfaces don't
+list feature actions themselves: track, collection, artist and player bar
+menus, the palette, the player bar's chips and single-key shortcuts ask the
+lists in `src/lib/features/hooks.ts`, which each area adds to.
 
 ## Sign-in
 

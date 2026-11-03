@@ -46,6 +46,16 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # fell behind on quick song changes.
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 tauri-plugin-single-instance = "2"
+# features: one block per lane, appended to only by that lane.
+# features: playback (lane A)
+
+# features: library tools (lane B)
+
+# features: saved (lane C)
+
+# features: taste and stats (lane D)
+
+# features: integrations (lane E)
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -90,6 +90,15 @@ bun run check                        # svelte-check
 ```
 
 Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
+
+To check that a real database migrates and comes back from its backups,
+point the ignored tests at a **copy** (they change the file):
+
+```sh
+cp ~/Library/Application\ Support/app.encore.desktop/encore.sqlite /tmp/db/
+ENCORE_TEST_DB=/tmp/db/encore.sqlite cargo test -p encore-core real_database_migrates -- --ignored
+ENCORE_TEST_DB=/tmp/db/encore.sqlite cargo test -p encore-core real_database_restores -- --ignored
+```
 Personal fields are scrubbed when they are recorded; never commit a recording
 made with your own session without running it through `encore-cli record`.
 
@@ -159,7 +168,8 @@ cookies, tokens or tracking URLs.
 | What | macOS | Windows | Linux |
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
-| Library cache, settings, queue, lyrics cache, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Library cache, settings, queue, lyrics cache, your bookmarks, folders and play log, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Backups of the database (the newest three, daily and before an update changes it) | `~/Library/Application Support/app.encore.desktop/backups/` | `%LOCALAPPDATA%\app.encore.desktop\backups\` | `~/.local/share/app.encore.desktop/backups/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
 | Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
