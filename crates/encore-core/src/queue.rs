@@ -462,6 +462,29 @@ impl Queue {
         self.bump();
     }
 
+    /// Drop the entries after the current one that `keep` refuses (blocked
+    /// songs, radio rows once Autoplay is off). Returns how many went.
+    pub fn retain_upcoming(&mut self, keep: impl Fn(&QueueEntry) -> bool) -> usize {
+        let split = self.index.map(|i| i + 1).unwrap_or(0);
+        let before = self.entries.len();
+        let mut dropped = HashSet::new();
+        let mut i = 0;
+        self.entries.retain(|e| {
+            let k = i < split || keep(e);
+            i += 1;
+            if !k {
+                dropped.insert(e.uid.clone());
+            }
+            k
+        });
+        if dropped.is_empty() {
+            return 0;
+        }
+        self.canon.retain(|u| !dropped.contains(u));
+        self.bump();
+        before - self.entries.len()
+    }
+
     pub fn set_shuffle(&mut self, on: bool) {
         if on == self.shuffle {
             return;
@@ -722,6 +745,20 @@ mod tests {
         let added = q.extend_radio(vec![t("va"), t("vb"), with("c", "vc"), t("vc"), with("vb2", "b"), t("d")]);
         assert_eq!(added, 2);
         assert_eq!(ids(&q), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn retain_upcoming_keeps_history_and_current() {
+        let mut q = q5();
+        q.next();
+        q.next(); // c current
+        let n = q.retain_upcoming(|e| e.track.title != "a" && e.track.title != "c" && e.track.title != "e");
+        assert_eq!(n, 1, "only e is upcoming and refused");
+        assert_eq!(ids(&q), vec!["a", "b", "c", "d"]);
+        assert_eq!(q.current().unwrap().track.title, "c");
+        q.set_shuffle(true);
+        q.set_shuffle(false);
+        assert_eq!(ids(&q), vec!["a", "b", "c", "d"], "a dropped entry never comes back");
     }
 
     #[test]

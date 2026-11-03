@@ -106,6 +106,9 @@ pub struct Player {
     gate: Arc<PlaybackGate>,
     /// A private session runs (D36): no history, no Last.fm, no presence.
     private: Arc<AtomicBool>,
+    /// When the private session ends by itself; `None` while one runs:
+    /// until Encore quits.
+    private_until: Mutex<Option<Instant>>,
     /// What may join the queue (D36, D27); lane A asks it.
     admission: Mutex<Option<Arc<dyn Admission>>>,
 }
@@ -166,6 +169,7 @@ impl Player {
             link: Arc::new(AtomicU64::new(0)),
             gate: Arc::new(PlaybackGate::default()),
             private: Arc::new(AtomicBool::new(false)),
+            private_until: Mutex::new(None),
             admission: Mutex::new(None),
         });
         p.engine.set_volume(0.8);
@@ -219,16 +223,46 @@ impl Player {
         plays::PlayObserver::spawn(self.subscribe(), sink, Arc::new(move || svc.context().account), self.online.clone(), self.private.clone())
     }
 
-    /// Start or end a private session (D36). The flag is shared with the
-    /// history reporter and the play observer; the snapshot shows it.
+    /// Start or end a private session (D36) that lasts until Encore quits.
+    /// The flag is shared with the history reporter and the play observer;
+    /// the snapshot shows it.
     pub fn set_private(&self, on: bool) {
-        if self.private.swap(on, Ordering::SeqCst) != on {
-            self.publish(false);
-        }
+        if on { self.start_private_session(None) } else { self.end_private_session() }
     }
 
     pub fn private(&self) -> bool {
         self.private.load(Ordering::SeqCst)
+    }
+
+    /// Start a private session (D36): for `length` (lane D offers an hour),
+    /// or until Encore quits with `None`. Starting again while one runs
+    /// sets its new end. The player's tick ends it on time and says so.
+    pub fn start_private_session(&self, length: Option<Duration>) {
+        *self.private_until.lock() = length.map(|l| Instant::now() + l);
+        self.private.store(true, Ordering::SeqCst);
+        self.publish(false);
+    }
+
+    /// End the private session now, if one runs.
+    pub fn end_private_session(&self) {
+        *self.private_until.lock() = None;
+        if self.private.swap(false, Ordering::SeqCst) {
+            self.publish(false);
+        }
+    }
+
+    /// The private session, as the snapshot shows it.
+    pub fn private_session(&self) -> Option<PrivateSession> {
+        self.private().then(|| PrivateSession { remaining: self.private_until.lock().map(|u| u.saturating_duration_since(Instant::now()).as_secs_f64()) })
+    }
+
+    /// Called by the tick: a timed private session that ran out ends.
+    fn expire_private(&self) {
+        let due = self.private() && self.private_until.lock().is_some_and(|u| Instant::now() >= u);
+        if due {
+            self.end_private_session();
+            let _ = self.tx.send(PlayerEvent::Notice("Your private session ended.".into()));
+        }
     }
 
     /// What may join the queue from now on (D36, D27).
@@ -391,6 +425,63 @@ impl Player {
         let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
     }
 
+    /// Replace the queue with a saved one (lane C's saved queues, D33),
+    /// paused at `position` in its current song: the order, uids, current
+    /// entry, shuffle and repeat come from `queue`, Autoplay stays as the
+    /// user has it now. Whatever was playing stops; nothing plays until the
+    /// user presses play.
+    pub fn restore_paused(&self, mut queue: Queue, position: f64) -> Result<()> {
+        if queue.current().is_none() {
+            return Err(AppError::invalid("This saved queue is empty."));
+        }
+        {
+            let mut st = self.st.lock();
+            queue.autoplay = st.queue.autoplay;
+            st.queue = queue;
+            st.track_gen += 1;
+            st.seek_gen += 1;
+            st.loaded = None;
+            st.preload = None;
+            st.error = None;
+            st.awaiting_setup = false;
+            st.skips = 0;
+            st.radio_cursor = None;
+            st.radio_empty = 0;
+            st.last_duration = st.queue.current().and_then(|c| c.track.duration);
+            let end = st.last_duration.map(|d| (d - 0.25).max(0.0)).unwrap_or(f64::MAX);
+            st.pending_pos = if position.is_finite() { position.clamp(0.0, end) } else { 0.0 };
+            st.phase = Phase::Paused;
+        }
+        self.engine.stop();
+        self.publish(true);
+        let cur = self.st.lock().queue.current().cloned();
+        let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
+        Ok(())
+    }
+
+    /// The queue and the position in its current song, for saving it.
+    pub fn queue_and_position(&self) -> (Queue, f64) {
+        let st = self.st.lock();
+        (st.queue.clone(), self.position_locked(&st))
+    }
+
+    /// The block list (or another admission rule) changed (lane D, D36):
+    /// songs it now refuses leave what's up next, and if the song playing is
+    /// one of them, playback moves on as Next does.
+    pub async fn admission_changed(self: &Arc<Self>) {
+        let Some(a) = self.admission.lock().clone() else { return };
+        let skip = {
+            let mut st = self.st.lock();
+            st.queue.retain_upcoming(|e| a.admits(&e.track));
+            st.queue.current().is_some_and(|c| !a.admits(&c.track)) && matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading)
+        };
+        self.check_preload();
+        self.publish(false);
+        if skip {
+            self.next().await;
+        }
+    }
+
     // ---------- snapshots ----------
 
     fn position_locked(&self, st: &State) -> f64 {
@@ -438,7 +529,7 @@ impl Player {
             queue_loading: st.queue_loading,
             ab_loop: None,
             sleep: None,
-            private: self.private().then_some(PrivateSession { remaining: None }),
+            private: self.private_session(),
         }
     }
 
@@ -806,6 +897,7 @@ impl Player {
     }
 
     async fn tick(self: &Arc<Self>) {
+        self.expire_private();
         let (phase, pos, dur, upcoming, need_radio) = {
             let st = self.st.lock();
             let snap = self.snapshot_locked(&st);
