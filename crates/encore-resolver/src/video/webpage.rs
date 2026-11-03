@@ -24,7 +24,7 @@ use regex::Regex;
 pub const SESSION_TTL: Duration = Duration::from_secs(6 * 3600);
 const MAX_PAGE_BYTES: usize = 8 << 20;
 
-static YTCFG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""VISITOR_DATA"\s*:\s*"([^"]{8,256})""#).unwrap());
+static YTCFG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""VISITOR_DATA"\s*:\s*"([^"]{8,2048})""#).unwrap());
 
 /// What `_initialize_consent` and `_initialize_pref` set.
 pub fn consent_jar() -> CookieJar {
@@ -93,6 +93,8 @@ mod tests {
     fn the_visitor_is_read_from_ytcfg() {
         assert_eq!(visitor_data(r#"ytcfg.set({"VISITOR_DATA":"CgtABCDEFGH%3D%3D","X":1})"#).as_deref(), Some("CgtABCDEFGH%3D%3D"));
         assert_eq!(visitor_data("nothing"), None);
+        let long = "C".repeat(700);
+        assert_eq!(visitor_data(&format!(r#""VISITOR_DATA":"{long}""#)).map(|v| v.len()), Some(700), "visitor tokens are several hundred characters now");
     }
 
     #[test]

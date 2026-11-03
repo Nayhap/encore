@@ -1139,6 +1139,9 @@ async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::
                 a.outcome
             );
         }
+        if let Some(x) = &d.session {
+            println!("  session: {x}");
+        }
         println!("  player: {}", d.player.as_deref().unwrap_or("-"));
         for s in &d.solves {
             println!("  solve: {} ms ({}{}{})", s.ms, if s.preprocessed { "preprocessed" } else { "cold" }, if s.n { ", n" } else { "" }, if s.sig { ", signature" } else { "" });

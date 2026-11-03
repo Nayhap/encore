@@ -168,7 +168,8 @@ impl InnerTube {
         }
         if st.visitor.is_none() {
             if let Some(v) = scrape(&body, "\"VISITOR_DATA\":\"") {
-                if v.len() < 200 {
+                // Visitor tokens are several hundred characters long now.
+                if v.len() < 2048 {
                     st.visitor = Some(v);
                 }
             }

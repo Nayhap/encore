@@ -92,6 +92,9 @@ pub struct Diagnostics {
     pub waited_secs: u64,
     pub probes: u32,
     pub cached: bool,
+    /// Signed out: the session in use (cookie names and whether a visitor
+    /// came with it, never values).
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -387,7 +390,7 @@ impl NativeResolver {
         let mut id = Identity::from_auth(auth, None);
         diag.signed_in = id.is_authenticated();
         if !id.is_authenticated() {
-            self.anonymous(&mut id, video_id).await;
+            diag.session = Some(self.anonymous(&mut id, video_id).await);
         }
         let key = Self::cache_key(video_id, &id, opts);
         let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
@@ -516,7 +519,7 @@ impl NativeResolver {
 
     /// Signed out: the session the watch page starts (`video::webpage`),
     /// kept for a while; encore-ytm's visitor if the page gave none.
-    async fn anonymous(&self, id: &mut Identity, video_id: &str) {
+    async fn anonymous(&self, id: &mut Identity, video_id: &str) -> String {
         let mut g = self.anon.lock().await;
         if !g.as_ref().is_some_and(|s| s.fresh()) {
             *g = webpage::load(&self.http, video_id).await;
@@ -526,9 +529,12 @@ impl NativeResolver {
             id.anon_cookies = Some(s.cookie_header());
             id.visitor_data = s.visitor.clone();
         }
+        let from_page = id.visitor_data.is_some();
         if id.visitor_data.is_none() {
             id.visitor_data = self.visitor_source.lock().as_ref().and_then(|f| f());
         }
+        let names: Vec<&str> = g.as_ref().map(|s| s.jar.records().iter().map(|c| c.name.as_str()).collect()).unwrap_or_default();
+        format!("cookies [{}], visitor {}", names.join(", "), if from_page { "from the watch page" } else if id.visitor_data.is_some() { "from encore-ytm" } else { "none" })
     }
 
     async fn player(&self, diag: &mut Diagnostics) -> Result<Player, Cause> {
