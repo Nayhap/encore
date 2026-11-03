@@ -83,6 +83,12 @@ export type PrivateSession = B.PrivateSession_Serialize;
 // features: taste and stats (lane D)
 
 // features: integrations (lane E)
+export type LastfmStatus = B.LastfmStatus_Serialize;
+export type PresenceStatus = B.PresenceStatus;
+export type WikiExtract = B.WikiExtract_Serialize;
+export type SongDetails = B.SongDetails_Serialize;
+export type SongFile = B.SongFile_Serialize;
+export type AudioAnalysis = B.AudioAnalysis_Serialize;
 
 
 /** Mock-only procedural artwork (dev without Tauri). */

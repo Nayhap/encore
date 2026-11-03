@@ -2,7 +2,7 @@
   import { isTauri } from "$lib/backend";
   import { commands } from "$lib/backend/bindings";
   import { isMac, os } from "$lib/platform";
-  import { ui, type Theme } from "$lib/state.svelte";
+  import { ambience, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
   const themes: { v: Theme; label: string; icon: string }[] = [
@@ -37,6 +37,16 @@
     </div>
     <input type="checkbox" role="switch" bind:checked={ui.tint} />
   </label>
+  <!-- Lane E: the cover ambience (D27), under the colour it needs. Linux has no blur (D17), so no row. -->
+  {#if os !== "linux"}
+    <label class="row">
+      <div>
+        <b>Cover ambience</b>
+        <p>{ui.tint ? "A soft, blurred wash of the cover behind now playing and full-screen lyrics." : "Turn on colour from artwork to use the cover's ambience."}</p>
+      </div>
+      <input type="checkbox" role="switch" checked={ambience.enabled && ui.tint} disabled={!ui.tint} style:opacity={ui.tint ? null : 0.45} onchange={(e) => ambience.set(e.currentTarget.checked)} />
+    </label>
+  {/if}
   {#if !isMac}
     <label class="row">
       <div>
