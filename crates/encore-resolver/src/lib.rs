@@ -115,6 +115,9 @@ pub struct Attempt {
     pub formats: usize,
     pub skipped: Skipped,
     pub ms: u64,
+    /// The answer as `playability::recordable` keeps it, for fixtures.
+    #[serde(skip)]
+    pub recorded: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -575,7 +578,7 @@ impl NativeResolver {
                 search.refused(Cause::Refused(0));
                 continue;
             };
-            let mut attempt = Attempt { client: key.clone(), outcome: String::new(), status: None, reason: None, itag: None, formats: 0, skipped: Skipped::default(), ms: 0 };
+            let mut attempt = Attempt { client: key.clone(), outcome: String::new(), status: None, reason: None, itag: None, formats: 0, skipped: Skipped::default(), ms: 0, recorded: None };
             let r = self.ask(video_id, c, id, &mut plan, &mut attempt, diag).await;
             attempt.ms = t0.elapsed().as_millis() as u64;
             let stop = match r {
@@ -682,6 +685,7 @@ impl NativeResolver {
             return Err(Cause::Closed);
         }
         attempt.status = Some(playability::status(&pr).to_string());
+        attempt.recorded = Some(playability::recordable(&pr));
         let (reason, sub) = playability::reasons(&pr);
         let reason = [reason, sub.unwrap_or_default()].iter().filter(|r| !r.is_empty()).cloned().collect::<Vec<_>>().join(". ");
         if !reason.is_empty() {

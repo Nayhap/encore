@@ -1,0 +1,12 @@
+{
+  "playabilityStatus": {
+    "desktopLegacyAgeGateReason": 1,
+    "reason": "Sign in to confirm your age",
+    "status": "LOGIN_REQUIRED"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "SZJvDhaSDnc"
+  }
+}

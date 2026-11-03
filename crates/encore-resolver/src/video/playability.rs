@@ -98,10 +98,37 @@ pub fn other_video(pr: &Value, video_id: &str) -> Option<String> {
     }
 }
 
+/// What of a player response the classification reads, with nothing that
+/// identifies anyone: for recorded fixtures (`encore-cli resolve --record`).
+/// Tracking and context parameters go, and every address becomes `<url>`.
+pub fn recordable(pr: &Value) -> Value {
+    fn scrub(v: &Value) -> Value {
+        match v {
+            Value::Object(m) => Value::Object(
+                m.iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "trackingParams" | "clickTrackingParams" | "contextParams" | "serializedContextData" | "visitorData" | "loggingDirectives"))
+                    .map(|(k, v)| (k.clone(), scrub(v)))
+                    .collect(),
+            ),
+            Value::Array(a) => Value::Array(a.iter().map(scrub).collect()),
+            Value::String(s) if s.starts_with("http") || s.starts_with("//") => Value::String("<url>".into()),
+            v => v.clone(),
+        }
+    }
+    let d = &pr["videoDetails"];
+    serde_json::json!({
+        "playabilityStatus": scrub(&pr["playabilityStatus"]),
+        "videoDetails": { "videoId": d["videoId"], "isLive": d["isLive"], "isUpcoming": d["isUpcoming"] },
+    })
+}
+
 pub fn classify(pr: &Value) -> Playability {
     let st = status(pr);
     let (reason, sub) = reasons(pr);
-    let r = format!("{reason} {}", sub.as_deref().unwrap_or("")).to_ascii_lowercase();
+    // The TV and visionOS clients say only "Please sign in" for a private
+    // video; the reason is in `messages`.
+    let messages: Vec<&str> = pr["playabilityStatus"]["messages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let r = format!("{reason} {} {}", sub.as_deref().unwrap_or(""), messages.join(" ")).to_ascii_lowercase();
     if st == "OK" {
         if pr["videoDetails"]["isLive"].as_bool() == Some(true) || pr["videoDetails"]["isUpcoming"].as_bool() == Some(true) {
             return Playability::Restricted(Restriction::Live);

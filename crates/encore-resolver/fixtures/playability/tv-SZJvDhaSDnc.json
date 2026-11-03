@@ -1,0 +1,55 @@
+{
+  "playabilityStatus": {
+    "desktopLegacyAgeGateReason": 1,
+    "errorScreen": {
+      "playerErrorCommandRenderer": {
+        "command": {
+          "authRequiredCommand": {
+            "dismissalCommand": {
+              "commandExecutorCommand": {
+                "commands": [
+                  {
+                    "signalAction": {
+                      "signal": "HISTORY_BACK"
+                    }
+                  },
+                  {
+                    "signalAction": {
+                      "signal": "CLOSE_POPUP"
+                    }
+                  }
+                ]
+              }
+            },
+            "identityActionContext": {
+              "eventTrigger": "ACCOUNT_EVENT_TRIGGER_PLAYER",
+              "nextEndpoint": {
+                "commandExecutorCommand": {
+                  "commands": [
+                    {
+                      "signalAction": {
+                        "signal": "CLOSE_POPUP"
+                      }
+                    },
+                    {
+                      "signalAction": {
+                        "signal": "RELOAD_PLAYER"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "reason": "Sign in to confirm your age",
+    "status": "LOGIN_REQUIRED"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "SZJvDhaSDnc"
+  }
+}

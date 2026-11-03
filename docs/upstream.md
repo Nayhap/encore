@@ -70,10 +70,14 @@ Then, by hand:
 2. Update `upstream.toml`: the commit, the version, the ejs pins, new fixture
    players. If the solver tests changed, update `tests/ejs_players.rs` from
    `tests.ts` and `test_ejs_integration.py`.
-3. `cargo test -p encore-resolver` (the corpus is fetched once into
+3. When YouTube words a refusal differently, record it: `encore-cli resolve
+   <id> --record crates/encore-resolver/fixtures/playability` writes each
+   client's answer, scrubbed (`playability::recordable`), and
+   `tests/playability_fixtures.rs` lists what each should classify as.
+4. `cargo test -p encore-resolver` (the corpus is fetched once into
    `$ENCORE_EJS_PLAYERS`; it then runs offline). The bundle hash test fails
    if `vendor/ejs/` and `upstream.toml` disagree.
-4. Run the live checks below, then ship it as a normal release (D24): solver
+5. Run the live checks below, then ship it as a normal release (D24): solver
    code only ever reaches users inside a signed Encore.
 
 ### Live checks

@@ -1,0 +1,62 @@
+{
+  "playabilityStatus": {
+    "errorScreen": {
+      "playerInterstitialRenderer": {
+        "content": {
+          "interstitialViewModel": {
+            "description": {
+              "content": "If the owner of this video has granted you access, please sign in."
+            },
+            "logo": {
+              "sources": [
+                {
+                  "height": 40,
+                  "url": "<url>",
+                  "width": 176
+                }
+              ]
+            },
+            "primaryButton": {
+              "buttonViewModel": {
+                "onTap": {
+                  "innertubeCommand": {
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "rootVe": 83769,
+                        "url": "<url>",
+                        "webPageType": "WEB_PAGE_TYPE_UNKNOWN"
+                      }
+                    },
+                    "signInEndpoint": {
+                      "nextEndpoint": {
+                        "urlEndpoint": {
+                          "url": ""
+                        }
+                      }
+                    }
+                  }
+                },
+                "style": "BUTTON_VIEW_MODEL_STYLE_OVERLAY",
+                "title": "Sign in",
+                "type": "BUTTON_VIEW_MODEL_TYPE_FILLED"
+              }
+            },
+            "title": {
+              "content": "This video is private"
+            }
+          }
+        }
+      }
+    },
+    "messages": [
+      "This is a private video. Please sign in to verify that you may see it."
+    ],
+    "reason": "This video is private",
+    "status": "LOGIN_REQUIRED"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": null
+  }
+}

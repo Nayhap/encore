@@ -116,6 +116,10 @@ enum Cmd {
         /// times.
         #[arg(long)]
         diagnostics: bool,
+        /// Write each client's playability answer, scrubbed, into this
+        /// folder as `<client>-<video>.json` (resolver fixtures).
+        #[arg(long)]
+        record: Option<PathBuf>,
     },
     /// Stream a video through the engine (resolver + range cache + preload).
     Play {
@@ -567,7 +571,7 @@ async fn run(cli: Cli) -> Result<()> {
             let ctx = svc.context();
             library(&svc, &ctx, LibrarySection::Playlists, true, m, j).await?;
         }
-        Cmd::Resolve { video_id, client, diagnostics } => {
+        Cmd::Resolve { video_id, client, diagnostics, record } => {
             let auth = match cli.auth.unwrap_or(AuthMode::Anonymous) {
                 AuthMode::Anonymous => None,
                 AuthMode::Session => {
@@ -575,7 +579,7 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(svc.it.resolve_auth().ok_or_else(|| anyhow!("--auth session needs a signed-in session with a channel (encore-cli whoami)"))?)
                 }
             };
-            resolve(&svc, ItemId::parse(&video_id).remote(), auth.as_ref(), client, diagnostics, j).await?;
+            resolve(&svc, ItemId::parse(&video_id).remote(), auth.as_ref(), client, diagnostics, j, record).await?;
         }
     }
     Ok(())
@@ -1109,7 +1113,7 @@ fn encore_cli_auth(it: &InnerTube) -> Option<encore_core::service::ResolveAuth> 
     it.resolve_auth()
 }
 
-async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::service::ResolveAuth>, client: Option<String>, diagnostics: bool, json: bool) -> Result<()> {
+async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::service::ResolveAuth>, client: Option<String>, diagnostics: bool, json: bool, record: Option<PathBuf>) -> Result<()> {
     // The visitor music.youtube.com hands out, as the app shares it.
     svc.it.bootstrap().await;
     let r = cli_resolver(svc);
@@ -1124,6 +1128,16 @@ async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::
         e => e,
     };
     let secs = t1.elapsed().as_secs_f64();
+    if let Some(dir) = &record {
+        std::fs::create_dir_all(dir)?;
+        for a in &d.attempts {
+            if let Some(v) = &a.recorded {
+                let f = dir.join(format!("{}-{video_id}.json", a.client));
+                std::fs::write(&f, encore_core::redact::redact(&serde_json::to_string_pretty(v)?) + "\n")?;
+                println!("recorded {}", f.display());
+            }
+        }
+    }
     if json {
         let v = serde_json::json!({
             "ok": res.is_ok(),

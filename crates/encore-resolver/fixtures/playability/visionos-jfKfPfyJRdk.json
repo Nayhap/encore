@@ -1,0 +1,12 @@
+{
+  "playabilityStatus": {
+    "playableInEmbed": true,
+    "reason": "This live stream recording is not available.",
+    "status": "UNPLAYABLE"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "jfKfPfyJRdk"
+  }
+}

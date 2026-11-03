@@ -1,0 +1,105 @@
+{
+  "playabilityStatus": {
+    "errorScreen": {
+      "playerErrorCommandRenderer": {
+        "command": {
+          "showEngagementPanelEndpoint": {
+            "engagementPanel": {
+              "engagementPanelSectionListRenderer": {
+                "content": {
+                  "sectionListRenderer": {
+                    "contents": [
+                      {
+                        "itemSectionRenderer": {
+                          "contents": [
+                            {
+                              "compactLinkRenderer": {
+                                "serviceEndpoint": {
+                                  "commandExecutorCommand": {
+                                    "commands": [
+                                      {
+                                        "signalAction": {
+                                          "signal": "CLOSE_POPUP"
+                                        }
+                                      },
+                                      {
+                                        "signalAction": {
+                                          "signal": "RELOAD_PAGE_EB"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                },
+                                "title": {
+                                  "runs": [
+                                    {
+                                      "text": "Got it"
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                "header": {
+                  "overlayPanelHeaderRenderer": {
+                    "subtitle": {
+                      "runs": [
+                        {
+                          "text": "The YouTube app needs to restart"
+                        }
+                      ]
+                    },
+                    "title": {
+                      "runs": [
+                        {
+                          "text": "Something went wrong"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "onUserCloseOverrideCommand": {
+                  "commandExecutorCommand": {
+                    "commands": [
+                      {
+                        "signalAction": {
+                          "signal": "HISTORY_BACK"
+                        }
+                      },
+                      {
+                        "signalAction": {
+                          "signal": "CLOSE_POPUP"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "identifier": {
+              "surface": "ENGAGEMENT_PANEL_SURFACE_WATCH",
+              "tag": "kabuki-reload-high-error"
+            }
+          }
+        }
+      }
+    },
+    "reason": "The page needs to be reloaded.",
+    "skip": {
+      "playabilityErrorSkipConfig": {
+        "skipOnPlayabilityError": false
+      }
+    },
+    "status": "UNPLAYABLE"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "4D7u5KF7SP8"
+  }
+}
