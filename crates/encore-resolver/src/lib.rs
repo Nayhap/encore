@@ -277,6 +277,8 @@ fn redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
+pub type VisitorSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 pub struct NativeResolver {
     http: reqwest::Client,
     player_js: PlayerJs,
@@ -286,6 +288,9 @@ pub struct NativeResolver {
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The visitor YouTube gave signed-out requests (in memory only).
     anon_visitor: Mutex<Option<String>>,
+    /// Where a signed-out resolve gets its visitor first: encore-ytm's,
+    /// so the app presents one visitor to YouTube (D37).
+    visitor_source: Mutex<Option<VisitorSource>>,
     notice: Mutex<Option<String>>,
     /// Encore is quitting or installing an update (D24).
     closed: AtomicBool,
@@ -309,9 +314,15 @@ impl NativeResolver {
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             anon_visitor: Mutex::new(None),
+            visitor_source: Mutex::new(None),
             notice: Mutex::new(None),
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// Signed-out resolves take their visitor from here when it has one.
+    pub fn set_visitor_source(&self, f: VisitorSource) {
+        *self.visitor_source.lock() = Some(f);
     }
 
     pub fn solver(&self) -> &Arc<QuickJsSolver> {
@@ -371,7 +382,8 @@ impl NativeResolver {
             return Err(fail(PlayFailureKind::Unavailable, "This isn't a YouTube song Encore can play."));
         }
         // The identity is frozen here, for every request of this resolve.
-        let mut id = Identity::from_auth(auth, self.anon_visitor.lock().clone());
+        let shared = self.visitor_source.lock().as_ref().and_then(|f| f());
+        let mut id = Identity::from_auth(auth, shared.or_else(|| self.anon_visitor.lock().clone()));
         diag.signed_in = id.is_authenticated();
         let key = Self::cache_key(video_id, &id, opts);
         let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();

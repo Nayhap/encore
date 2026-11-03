@@ -175,6 +175,13 @@ impl InnerTube {
         }
     }
 
+    /// The visitor of this identity (scraped from music.youtube.com signed
+    /// out, the session's signed in). Not a secret; shared with the
+    /// resolver so the stream `/player` presents the same visitor (D37).
+    pub fn visitor_data(&self) -> Option<String> {
+        self.state.read().visitor.clone()
+    }
+
     /// Who stream resolves go out as (D37): the session's cookies and
     /// channel, its visitor, and a key that changes with the epoch, so a
     /// sign-in or channel switch never gets the old identity's URLs. `None`

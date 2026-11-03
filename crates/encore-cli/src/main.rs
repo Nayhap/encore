@@ -575,7 +575,7 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(svc.it.resolve_auth().ok_or_else(|| anyhow!("--auth session needs a signed-in session with a channel (encore-cli whoami)"))?)
                 }
             };
-            resolve(&ItemId::parse(&video_id).remote().to_string(), auth.as_ref(), client, diagnostics, j).await?;
+            resolve(&svc, &ItemId::parse(&video_id).remote().to_string(), auth.as_ref(), client, diagnostics, j).await?;
         }
     }
     Ok(())
@@ -847,7 +847,7 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
     if offline && report {
         bail!("--report needs a connection; leave out --offline");
     }
-    let resolver = cli_resolver();
+    let resolver = cli_resolver(&svc);
     let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
@@ -984,7 +984,7 @@ fn size(b: f64) -> String {
 
 async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<()> {
     use encore_downloads::{DownloadState, DownloadsUpdate};
-    let resolver = cli_resolver();
+    let resolver = cli_resolver(&svc);
     // No playback cache here: opening it clears its partial files, which may
     // be the running app's. Songs are fetched instead of copied from it.
     let (dl, _) = cli_downloads(svc.clone(), resolver, None).await?;
@@ -1086,9 +1086,13 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
     Ok(())
 }
 
-/// The native resolver on the app's cache folder (player scripts only).
-fn cli_resolver() -> Arc<encore_resolver::NativeResolver> {
-    encore_resolver::NativeResolver::new(encore_resolver::ResolverConfig::default_paths())
+/// The native resolver on the app's cache folder (player scripts only),
+/// with encore-ytm's visitor for signed-out resolves, as in the app.
+fn cli_resolver(svc: &Arc<YtMusic>) -> Arc<encore_resolver::NativeResolver> {
+    let r = encore_resolver::NativeResolver::new(encore_resolver::ResolverConfig::default_paths());
+    let it = svc.it.clone();
+    r.set_visitor_source(Arc::new(move || it.visitor_data()));
+    r
 }
 
 /// The app's data folder, or `$ENCORE_DATA_DIR` (tests that must not
@@ -1104,8 +1108,10 @@ fn encore_cli_auth(it: &InnerTube) -> Option<encore_core::service::ResolveAuth> 
     it.resolve_auth()
 }
 
-async fn resolve(video_id: &str, auth: Option<&encore_core::service::ResolveAuth>, client: Option<String>, diagnostics: bool, json: bool) -> Result<()> {
-    let r = cli_resolver();
+async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::service::ResolveAuth>, client: Option<String>, diagnostics: bool, json: bool) -> Result<()> {
+    // The visitor music.youtube.com hands out, as the app shares it.
+    svc.it.bootstrap().await;
+    let r = cli_resolver(svc);
     let t1 = Instant::now();
     let (res, d) = r.resolve_with(video_id, auth, &encore_resolver::ResolveOptions { client }).await;
     let secs = t1.elapsed().as_secs_f64();
