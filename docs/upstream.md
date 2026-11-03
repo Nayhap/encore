@@ -118,4 +118,11 @@ asking again is how an address gets flagged.
   limits, a fresh runtime per solve, and the preprocessed player kept in
   memory (yt-dlp keeps none).
 - **Failures are kinds** (D4), not yt-dlp's error text.
-- **A preroll wait over 15 s** makes Encore try the next client first.
+- **A preroll wait over 15 s** makes Encore try the next client first, and
+  the wait itself happens in `StreamResolver::ready`, outside the resolve.
+- **Private videos** are also recognised from `playabilityStatus.messages`
+  (the TV clients' reason is only "Please sign in"); a `LOGIN_REQUIRED`
+  signed in is an expired session only when it asks to sign in and no client
+  named a restriction.
+- **A bot check or a refused session wins** over a stream another client
+  gave (yt-dlp would play the stream).
