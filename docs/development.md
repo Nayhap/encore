@@ -65,6 +65,13 @@ and plays a simulated install. Add `?ready` to start with them installed,
 `?setupfail` to see the first install fail, or `?updating` to see a quiet
 update.
 
+For updates (D24), an automatic check runs 3 seconds in: `?update` finds
+Encore 0.5.0 and downloads it, `?update-manual` has automatic updates off,
+`?update-deb` is a `.deb` install (a link instead of an update),
+`?update-fail` makes checks fail, `?update-translocated` runs from a
+translocated copy on macOS, and `?updated` starts just after an update,
+with its "What's new".
+
 For downloads, `?downloaded` starts with a playlist kept and downloaded and
 one song on its own, `?offline` starts offline (switching the browser's
 network off and on flips it too), and `?dlfail` makes every third download
@@ -161,7 +168,7 @@ cookies, tokens or tracking URLs.
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
 | Library cache, settings, queue, lyrics cache, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
-| Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
+| Audio (1 GB) and artwork (256 MB) caches, a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `updates\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
@@ -176,6 +183,34 @@ To move to newer ones, change all four together, taking each checksum from
 the project's own release (python-build-standalone's `SHA256SUMS`, Deno's
 `.sha256sum` files, PyPI's `sha256` digests), and run `cargo test`. Users who
 already set up playback get the new versions on their next launch.
+
+## Updates
+
+Encore updates itself from GitHub releases (D24). The publish checklist,
+how to pull a release and who holds the signing key are in
+[releases.md](releases.md).
+
+- **Signing.** Release builds sign each updater package with a minisign
+  key: `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  are Actions secrets, given to the build step only. The public key is
+  `plugins.updater.pubkey` in `tauri.conf.json`. `tauri.conf.json` has
+  `bundle.createUpdaterArtifacts` off, so `bun run tauri build`, CI and
+  forks need no key; the release workflow turns it on with
+  `--config '{"bundle":{"createUpdaterArtifacts":true}}'`. To build signed
+  packages locally, set both variables and pass the same option.
+- **The manifest.** `scripts/release-manifest.sh <tag> <dist>` writes
+  `latest.json` from the release's files and refuses on a missing or
+  doubled platform, a version that differs from the tag, or a signature
+  that doesn't verify (it needs `jq` and `minisign`).
+  `scripts/test-release-manifest.sh` tests it with a throwaway key.
+- **Testing an update.** Put one https URL in `update-endpoint` in the data
+  folder and Encore checks that manifest instead of GitHub's (http is
+  refused; the log says which endpoint it uses). To try a real update,
+  build two versions with signed packages (`--config
+  '{"version":"0.4.90",…}'`), serve the newer one's `.app.tar.gz` and a
+  `latest.json` pointing at it over https (`tailscale serve` gives a
+  trusted certificate without changing the system's trust), and point the
+  older one at it. Development builds never check.
 
 ## Known issues
 
@@ -196,13 +231,18 @@ All systems:
 - Downloading many songs in a row can still make YouTube ask for a bot
   check. Downloads then wait 10 minutes, then 30, then stop until you try
   again.
+- Installs from the `.deb` don't update themselves; Encore links to the
+  new release instead.
 
 macOS:
 
 - Started from Finder, Encore may not see your browser profiles. Give it Full
   Disk Access, or start it from a terminal.
 - Each unsigned build asks once for access to the saved session in the
-  Keychain.
+  Keychain, so each update does too.
+- Encore updates itself only from a folder it can write to. Opened from the
+  disk image or from Downloads (a translocated copy), it asks to be moved
+  to Applications first.
 - Switching audio output (for example to AirPods) causes a short gap.
 
 Windows:
