@@ -54,12 +54,12 @@ impl Limits {
 }
 
 /// Why a read stopped before the end.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Stop {
     /// The service sent no progress (`More::Stalled`).
     Stalled,
-    /// A request failed (its message).
-    Failed(String),
+    /// A request failed.
+    Failed(crate::error::AppError),
     /// Too many songs, pages or too long.
     Limit,
     /// `go_on` said to stop (offline, another account, the queue changed).
@@ -107,7 +107,7 @@ pub async fn read_rest(
         }
         let Some(r) = page(service, ctx, &cursor, gate, pace, go_on).await else { return Err(Stop::Cancelled) };
         pages += 1;
-        let (more, next) = r.map_err(|e| Stop::Failed(e.message))?;
+        let (more, next) = r.map_err(Stop::Failed)?;
         entries += more.len();
         // The answer may land after the caller moved on.
         if !go_on() {

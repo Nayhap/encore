@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
+use encore_core::paging::{self, Pace};
 use encore_core::queue::{QueueSource, Repeat};
-use encore_core::service::LocalAudio;
+use encore_core::service::{LocalAudio, More};
 use encore_downloads::{DownloadManager, DownloadRemoved, DownloadsSnapshot, DownloadsStorage};
 use encore_player::{PlayerSnapshot, QueueSnapshot};
 use encore_resolver::RuntimeStatus;
@@ -41,7 +42,11 @@ pub struct Bootstrap {
 #[serde(rename_all = "camelCase")]
 pub struct EntriesPage {
     pub entries: Vec<Entry>,
+    /// The next page, if the list goes on.
     pub cursor: Option<String>,
+    /// The service said the list ended here (D10): without it, a list with
+    /// no cursor stopped early (stalled) and may be longer.
+    pub complete: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -161,7 +166,8 @@ pub async fn home(core: S<'_>) -> Result<Page> {
     tracing::info!("command: home");
     let svc = core.service();
     let ctx = svc.context();
-    core.cached("home", || async { svc.home(&ctx).await }, strip_page).await
+    let p = core.cached("home", || async { svc.home(&ctx).await }, strip_page).await?;
+    Ok(crate::features::taste::filter_page(&core, p))
 }
 
 #[tauri::command]
@@ -169,7 +175,8 @@ pub async fn home(core: S<'_>) -> Result<Page> {
 pub async fn explore(core: S<'_>) -> Result<Page> {
     let svc = core.service();
     let ctx = svc.context();
-    core.cached("explore", || async { svc.explore(&ctx).await }, strip_page).await
+    let p = core.cached("explore", || async { svc.explore(&ctx).await }, strip_page).await?;
+    Ok(crate::features::taste::filter_page(&core, p))
 }
 
 #[tauri::command]
@@ -178,14 +185,16 @@ pub async fn browse_page(core: S<'_>, browse_id: String, params: Option<String>)
     let svc = core.service();
     let ctx = svc.context();
     let key = format!("page:{browse_id}:{}", params.as_deref().unwrap_or(""));
-    core.cached(&key, || async { svc.browse_page(&ctx, &browse_id, params.as_deref()).await }, strip_page).await
+    let p = core.cached(&key, || async { svc.browse_page(&ctx, &browse_id, params.as_deref()).await }, strip_page).await?;
+    Ok(crate::features::taste::filter_page(&core, p))
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn more_shelves(core: S<'_>, cursor: String) -> Result<Page> {
     let svc = core.service();
-    core.net(svc.more_shelves(&svc.context(), &cursor).await)
+    let p = core.net(svc.more_shelves(&svc.context(), &cursor).await)?;
+    Ok(crate::features::taste::filter_page(&core, p))
 }
 
 #[tauri::command]
@@ -214,30 +223,44 @@ pub async fn suggestions(core: S<'_>, query: String) -> Result<Vec<String>> {
 }
 
 /// Offline, a kept collection shows its saved order, all of it (D23).
+/// `params` comes with links that carry them (an artist's "All songs"),
+/// and is followed as given.
 #[tauri::command]
 #[specta::specta]
-pub async fn collection(core: S<'_>, id: ItemId) -> Result<Collection> {
+pub async fn collection(core: S<'_>, id: ItemId, params: Option<String>) -> Result<Collection> {
     let svc = core.service();
     let ctx = svc.context();
-    let key = format!("collection:{id}");
+    let key = match &params {
+        None => format!("collection:{id}"),
+        Some(p) => format!("collection:{id}:{p}"),
+    };
     let kept = || core.downloads.as_ref().and_then(|d| d.collection(&ctx.account, &id));
     if !core.connectivity.online() {
         if let Some(c) = kept() {
             return Ok(c);
         }
     }
-    match core.cached(&key, || async { svc.collection(&ctx, &id).await }, |c: &mut Collection| c.cursor = None).await {
+    match core.cached(&key, || async { svc.collection_at(&ctx, &id, params.as_deref()).await }, |c: &mut Collection| c.cursor = None).await {
         Err(e) if e.code == ErrorCode::Network => kept().ok_or(e),
         r => r,
     }
 }
 
+/// The next page of a collection on view, through the paced lane: it waits
+/// for its turn after playback and other background requests (D10, D23).
 #[tauri::command]
 #[specta::specta]
 pub async fn collection_more(core: S<'_>, cursor: String) -> Result<EntriesPage> {
     let svc = core.service();
-    let (entries, cursor) = core.net(svc.collection_more(&svc.context(), &cursor).await)?;
-    Ok(EntriesPage { entries, cursor })
+    let ctx = svc.context();
+    let same = || svc.context() == ctx;
+    let r = paging::page(&*svc, &ctx, &cursor, &core.player.gate(), Pace::Interactive, &same).await.ok_or_else(AppError::stale)?;
+    let (entries, more) = core.net(r)?;
+    Ok(match more {
+        More::Next(c) => EntriesPage { entries, cursor: Some(c), complete: false },
+        More::Ended => EntriesPage { entries, cursor: None, complete: true },
+        More::Stalled => EntriesPage { entries, cursor: None, complete: false },
+    })
 }
 
 #[tauri::command]
@@ -293,8 +316,8 @@ pub async fn play_tracks(core: S<'_>, tracks: Vec<Track>, start: u32, source: Op
 
 #[tauri::command]
 #[specta::specta]
-pub async fn play_collection(core: S<'_>, id: ItemId, start: u32, shuffle: bool) -> Result<()> {
-    core.player.play_collection(&id, start as usize, shuffle).await
+pub async fn play_collection(core: S<'_>, id: ItemId, start: u32, shuffle: bool, params: Option<String>) -> Result<()> {
+    core.player.play_collection(&id, params.as_deref(), start as usize, shuffle).await
 }
 
 #[tauri::command]

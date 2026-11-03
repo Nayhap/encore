@@ -194,9 +194,10 @@ impl HistoryReporter {
     /// online. `link` counts connection changes: even while online, odd
     /// while offline. A play, its report and every ping belong to the
     /// connection they started on; once it changes they are dropped, even if
-    /// the connection is back by then (D23). `on_registered` runs after a
-    /// play's first ping was accepted.
-    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
+    /// the connection is back by then (D23). `private` is set during a
+    /// private session (D36). `on_registered` runs after a play's first
+    /// ping was accepted.
+    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, private: Arc<AtomicBool>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let (send_tx, mut send_rx) = mpsc::channel::<Queued>(SEND_QUEUE);
         let link2 = link.clone();
         // One ping at a time, in order.
@@ -224,7 +225,7 @@ impl HistoryReporter {
                 }
             }
         });
-        tokio::spawn(run(events, reporter, enabled, link, send_tx));
+        tokio::spawn(run(events, reporter, enabled, link, private, send_tx));
     }
 }
 
@@ -233,6 +234,8 @@ async fn run(
     reporter: Arc<dyn PlayReporter>,
     enabled: Arc<AtomicBool>,
     link: Arc<AtomicU64>,
+    // A private session runs (D36): lane D stops reporting while it's set.
+    _private: Arc<AtomicBool>,
     send: mpsc::Sender<Queued>,
 ) {
     let t0 = Instant::now();
@@ -518,7 +521,7 @@ mod tests {
         PlayerEvent::State(PlayerSnapshot {
             revision: "1".into(), track_gen: tg.to_string(), seek_gen: "0".into(), phase, playing: phase == Phase::Playing, current: Some(entry(id)), index: Some(0),
             position: pos, duration: Some(200.0), shuffle: false, repeat: Repeat::Off, autoplay: false, volume: 1.0, muted: false, source: None, stream: None,
-            error: None, skipped_in_a_row: 0, queue_loading: false, no_output: false,
+            error: None, skipped_in_a_row: 0, queue_loading: false, no_output: false, ab_loop: None, sleep: None, private: None,
         })
     }
     fn anchor(tg: u64, pos: f64) -> PlayerEvent {
@@ -530,7 +533,7 @@ mod tests {
         let log = Arc::new(Log::default());
         let reg = Arc::new(Mutex::new(Vec::new()));
         let r2 = reg.clone();
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(AtomicU64::new(0)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
         (tx, log, reg)
     }
 
@@ -539,7 +542,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         let log = Arc::new(Log::default());
         let link = Arc::new(AtomicU64::new(1));
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(|_: &ItemId| {}));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(AtomicBool::new(false)), Arc::new(|_: &ItemId| {}));
         tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
         for i in 1..=6 {
             tx.send(anchor(1, i as f64 * 0.5)).unwrap();
@@ -563,7 +566,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         let log = Arc::new(Log::default());
         let link = Arc::new(AtomicU64::new(0));
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(|_: &ItemId| {}));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(AtomicBool::new(false)), Arc::new(|_: &ItemId| {}));
         tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
         for i in 1..=6 {
             tx.send(anchor(1, i as f64 * 0.5)).unwrap();

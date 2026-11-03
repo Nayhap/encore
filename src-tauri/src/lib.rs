@@ -5,6 +5,7 @@ mod commands;
 mod connectivity;
 mod core;
 mod events;
+mod features;
 mod logging;
 mod media;
 mod selftest;
@@ -107,6 +108,18 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             window::snap_layouts,
             window::set_system_titlebar,
             window::get_system_titlebar,
+            // One block per area, each appended to only by its lane
+            // (foundation.md): `features::<area>::<command>,` lines.
+            // features: playback (lane A)
+
+            // features: library tools (lane B)
+
+            // features: saved (lane C)
+
+            // features: taste and stats (lane D)
+
+            // features: integrations (lane E)
+
         ])
         .events(collect_events![
             PlayerStateEvent,
@@ -123,7 +136,17 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             SetupNeededEvent,
             DownloadsEvent,
             DownloadItemEvent,
-            ConnectivityEvent
+            ConnectivityEvent,
+            // features: playback (lane A)
+
+            // features: library tools (lane B)
+
+            // features: saved (lane C)
+
+            // features: taste and stats (lane D)
+
+            // features: integrations (lane E)
+
         ])
 }
 
@@ -252,8 +275,10 @@ pub fn run() {
             let _ = w.set_focus();
         }
     }));
-    app.plugin(tauri_plugin_opener::init())
-        .invoke_handler(builder.invoke_handler())
+    let app = app.plugin(tauri_plugin_opener::init());
+    // features: plugins, one `let app = app.plugin(...);` line per lane.
+
+    app.invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
             let uri = req.uri().to_string();
@@ -354,14 +379,12 @@ pub fn run() {
             if let Some(d) = &core.downloads {
                 d.set_setup_ready(core.resolver.runtimes().status().usable);
                 d.start();
-                // The index was lost and rebuilt from the song files (D23).
-                let n = d.recovered();
-                if n > 0 {
-                    let text = format!("Encore's database was damaged and replaced. It found your {n} downloaded songs again; download playlists and albums again to keep them up to date.");
-                    if let Some(text) = core.startup_notice(text) {
-                        let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&handle);
-                    }
-                }
+            }
+            // A damaged database was replaced (D11), and downloaded songs
+            // the index no longer knew were found from their files (D23).
+            let found = core.downloads.as_ref().map(|d| d.recovered()).unwrap_or(0);
+            if let Some(text) = core.recovery_notice(found).and_then(|t| core.startup_notice(t)) {
+                let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&handle);
             }
             // Plays go to YouTube Music history while the setting is on (D18).
             let h4 = handle.clone();
@@ -369,6 +392,7 @@ pub fn run() {
                 let _ = HistoryEvent { track_id: id.0.clone() }.emit(&h4);
             }));
             media::install(&handle, core.clone());
+            features::install(&handle, &core);
             keepalive(handle.clone(), core.clone());
             // Player components (D22): progress goes to the UI; a finished
             // install starts the song that was waiting for it. Components the

@@ -8,6 +8,7 @@
 //! aren't downloaded, using one rule (`avail`), and radio waits (D23).
 
 pub mod history;
+pub mod plays;
 pub mod types;
 
 use std::collections::HashMap;
@@ -21,7 +22,9 @@ use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
 use encore_core::queue::{Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
 use encore_core::redact::Secret;
-use encore_core::service::{LocalAudio, MusicService, PlayFailure, PlayFailureKind, PlayReporter, PlaybackGate, ResolveAuth, ResolvedStream, StreamResolver};
+use encore_core::local::plays::PlaySink;
+use encore_core::paging::{self, Limits, Pace, Stop};
+use encore_core::service::{Admission, LocalAudio, MusicService, PlayFailure, PlayFailureKind, PlayReporter, PlaybackGate, ResolveAuth, ResolvedStream, StreamResolver};
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
@@ -30,7 +33,6 @@ pub use types::*;
 pub const PRELOAD_LEAD: f64 = 20.0;
 const MAX_AUTO_SKIPS: u32 = 3;
 const RADIO_LOW_WATER: usize = 3;
-const SHUFFLE_ENUM_LIMIT: usize = 10_000;
 /// How long a newly chosen song must stay chosen before its stream is
 /// resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
@@ -102,6 +104,10 @@ pub struct Player {
     link: Arc<AtomicU64>,
     /// Held while a play or preload resolves; downloads wait for it.
     gate: Arc<PlaybackGate>,
+    /// A private session runs (D36): no history, no Last.fm, no presence.
+    private: Arc<AtomicBool>,
+    /// What may join the queue (D36, D27); lane A asks it.
+    admission: Mutex<Option<Arc<dyn Admission>>>,
 }
 
 fn s(n: u64) -> String {
@@ -159,6 +165,8 @@ impl Player {
             online: Arc::new(AtomicBool::new(true)),
             link: Arc::new(AtomicU64::new(0)),
             gate: Arc::new(PlaybackGate::default()),
+            private: Arc::new(AtomicBool::new(false)),
+            admission: Mutex::new(None),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -199,7 +207,39 @@ impl Player {
     /// and Encore is online).
     pub fn report_history(&self, reporter: Arc<dyn PlayReporter>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let _guard = self.rt.enter();
-        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.link.clone(), on_registered);
+        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.link.clone(), self.private.clone(), on_registered);
+    }
+
+    /// Record every play in the local log through `sink` (D30), whatever
+    /// the history setting and the connection. Returns the observer, whose
+    /// events (play started, counted, ended) others follow.
+    pub fn observe_plays(self: &Arc<Self>, sink: Arc<dyn PlaySink>) -> Arc<plays::PlayObserver> {
+        let _guard = self.rt.enter();
+        let svc = self.service.clone();
+        plays::PlayObserver::spawn(self.subscribe(), sink, Arc::new(move || svc.context().account), self.online.clone(), self.private.clone())
+    }
+
+    /// Start or end a private session (D36). The flag is shared with the
+    /// history reporter and the play observer; the snapshot shows it.
+    pub fn set_private(&self, on: bool) {
+        if self.private.swap(on, Ordering::SeqCst) != on {
+            self.publish(false);
+        }
+    }
+
+    pub fn private(&self) -> bool {
+        self.private.load(Ordering::SeqCst)
+    }
+
+    /// What may join the queue from now on (D36, D27).
+    pub fn set_admission(&self, a: Arc<dyn Admission>) {
+        *self.admission.lock() = Some(a);
+    }
+
+    /// Whether `t` may join the queue; everything does until an
+    /// `Admission` is set.
+    pub fn admits(&self, t: &Track) -> bool {
+        self.admission.lock().as_ref().is_none_or(|a| a.admits(t))
     }
 
     /// Play downloaded songs from disk (D23).
@@ -396,6 +436,9 @@ impl Player {
             skipped_in_a_row: st.skips,
             no_output: es.device == encore_audio::engine::NO_OUTPUT,
             queue_loading: st.queue_loading,
+            ab_loop: None,
+            sleep: None,
+            private: self.private().then_some(PrivateSession { remaining: None }),
         }
     }
 
@@ -1005,15 +1048,18 @@ impl Player {
         Ok(())
     }
 
-    /// Play a collection: first page now, the rest loaded in order in the
-    /// background. With shuffle, the whole collection (bounded) is enumerated
-    /// first so shuffle covers every song (D6).
-    pub async fn play_collection(self: &Arc<Self>, id: &ItemId, start: usize, shuffle: bool) -> Result<()> {
+    /// Play a collection: first page now, the rest read in order through
+    /// the paced background lane (`encore_core::paging`) and appended. With
+    /// shuffle, the whole collection (bounded) is read first, at the
+    /// interactive pace, so shuffle covers every song (D6); a list that
+    /// didn't really end isn't shuffled as if it had. `params` comes with
+    /// links that carry them (an artist's "All songs").
+    pub async fn play_collection(self: &Arc<Self>, id: &ItemId, params: Option<&str>, start: usize, shuffle: bool) -> Result<()> {
         if !self.online() {
             return self.play_kept(id, start, shuffle);
         }
         let ctx = self.service.context();
-        let c = match self.service.collection(&ctx, id).await {
+        let c = match self.service.collection_at(&ctx, id, params).await {
             Ok(c) => c,
             // The connection went: a kept copy still plays.
             Err(e) if e.code == ErrorCode::Network => return self.play_kept(id, start, shuffle).map_err(|_| e),
@@ -1022,15 +1068,21 @@ impl Player {
         let mut entries = c.entries.clone();
         let mut cursor = c.cursor.clone();
         let src = QueueSource { label: c.title.clone(), collection_id: Some(id.as_str().to_string()), radio_playlist: c.playlist_id.clone().map(|p| if p.starts_with("RD") { p } else { format!("RDAMPL{p}") }) };
+        // Same account, still online: otherwise the answers are dropped.
+        let same = {
+            let (svc, ctx, online) = (self.service.clone(), ctx.clone(), self.online.clone());
+            move || online.load(Ordering::SeqCst) && svc.context() == ctx
+        };
         if shuffle {
-            let t0 = Instant::now();
-            while let Some(cid) = cursor.take() {
-                if entries.len() >= SHUFFLE_ENUM_LIMIT || t0.elapsed() > Duration::from_secs(60) {
-                    return Err(AppError::invalid("This playlist is too long to shuffle completely."));
+            if let Some(cid) = cursor.take() {
+                let mut rest = Vec::new();
+                match paging::read_rest(&*self.service, &ctx, cid, &self.gate, Pace::Interactive, Limits::SHUFFLE, &same, &mut |page| rest.extend(page)).await {
+                    Ok(()) => entries.extend(rest),
+                    Err(Stop::Limit) => return Err(AppError::invalid("This playlist is too long to shuffle completely.")),
+                    Err(Stop::Stalled) => return Err(AppError::network("YouTube Music stopped listing this playlist partway, so it can't be shuffled completely. Try again in a moment.")),
+                    Err(Stop::Failed(e)) => return Err(e),
+                    Err(Stop::Cancelled) => return Err(AppError::stale()),
                 }
-                let (more, next) = self.service.collection_more(&ctx, &cid).await?;
-                entries.extend(more);
-                cursor = next;
             }
         }
         let tracks: Vec<Track> = entries.into_iter().map(|e| e.track).filter(|t| t.playable).collect();
@@ -1043,24 +1095,24 @@ impl Player {
             let me = self.clone();
             let rev = self.st.lock().queue.source.clone();
             self.st.lock().queue_loading = true;
+            let id = id.clone();
             tokio::spawn(async move {
-                let mut cur = Some(cid);
-                let mut pages = 0;
-                while let Some(c) = cur.take() {
-                    pages += 1;
-                    let Ok((more, next)) = me.service.collection_more(&ctx, &c).await else { break };
+                let (me2, rev2) = (me.clone(), rev.clone());
+                // The queue replaced meanwhile: the rest isn't wanted.
+                let still = move || same() && me2.st.lock().queue.source == rev2;
+                let r = paging::read_rest(&*me.service, &ctx, cid, &me.gate, Pace::Background, Limits::QUEUE, &still, &mut |page| {
                     let mut st = me.st.lock();
                     if st.queue.source != rev {
-                        break; // queue replaced meanwhile
+                        return;
                     }
-                    st.queue.append(more.into_iter().map(|e| e.track).filter(|t| t.playable).collect(), Origin::Collection);
+                    st.queue.append(page.into_iter().map(|e| e.track).filter(|t| t.playable).collect(), Origin::Collection);
                     drop(st);
                     me.check_preload();
                     me.publish(false);
-                    cur = next;
-                    if pages > 200 {
-                        break;
-                    }
+                })
+                .await;
+                if let Err(stop) = r {
+                    tracing::info!(collection = %id, ?stop, "the rest of a collection wasn't read to its end");
                 }
                 me.st.lock().queue_loading = false;
                 me.publish(false);

@@ -53,6 +53,45 @@ pub struct PlayerSnapshot {
     pub queue_loading: bool,
     /// No audio output could be opened: playback runs silent until one works.
     pub no_output: bool,
+    /// The A–B loop on the current song (D26). Reserved: lane A sets it.
+    #[serde(rename = "loop")]
+    pub ab_loop: Option<LoopRange>,
+    /// The sleep timer, while one runs (D26). Reserved: lane A sets it.
+    pub sleep: Option<SleepTimer>,
+    /// A private session, while one runs (D36).
+    pub private: Option<PrivateSession>,
+}
+
+/// An A–B loop, in seconds of the current song.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRange {
+    pub a: f64,
+    pub b: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SleepMode {
+    /// After a set time.
+    Timer,
+    EndOfSong,
+    EndOfQueue,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SleepTimer {
+    pub mode: SleepMode,
+    /// `Timer`: seconds left when this snapshot was taken.
+    pub remaining: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateSession {
+    /// Seconds left when this snapshot was taken; `None`: until Encore quits.
+    pub remaining: Option<f64>,
 }
 
 /// A queue change as a splice of the previous revision (D13). `base` is the

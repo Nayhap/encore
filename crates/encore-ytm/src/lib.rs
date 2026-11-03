@@ -385,6 +385,10 @@ impl MusicService for YtMusic {
     }
 
     async fn collection(&self, ctx: &RequestContext, id: &ItemId) -> Result<Collection> {
+        self.collection_at(ctx, id, None).await
+    }
+
+    async fn collection_at(&self, ctx: &RequestContext, id: &ItemId, params: Option<&str>) -> Result<Collection> {
         self.check(ctx)?;
         let mut bid = id.remote().to_string();
         if !(bid.starts_with("MPRE") || bid.starts_with("VL") || bid.starts_with("FE")) {
@@ -393,7 +397,7 @@ impl MusicService for YtMusic {
         if bid == "VLLM" {
             self.require_auth()?;
         }
-        let v = self.browse(&bid, None).await?;
+        let v = self.browse(&bid, params).await?;
         let p = pages::collection(&v, &ItemId::ytm(&bid)).map_err(parse_err)?;
         let n = p.value.entries.len();
         let mut c = p.value;
