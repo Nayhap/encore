@@ -8,8 +8,9 @@ On every system:
 - [Bun](https://bun.sh)
 - `cmake`, used to build the bundled Opus decoder
 
-Playback needs no Python or Node.js on the system: Encore downloads its own
-(see [Player components](#player-components)).
+Playback needs no Python, Node.js or Deno, on the system or downloaded: the
+stream resolver and its JavaScript challenge solver are compiled into Encore
+(see [The stream resolver](#the-stream-resolver)).
 
 ### macOS
 
@@ -60,10 +61,8 @@ URL to start with a signed-in mock library, `?empty` to start with nothing
 queued (a fresh install), and `?os=windows` or `?os=linux` to
 see the window buttons and key labels of the other systems.
 
-The mock starts without the player components, so the setup sheet shows
-and plays a simulated install. Add `?ready` to start with them installed,
-`?setupfail` to see the first install fail, or `?updating` to see a quiet
-update.
+Add `?needsupdate` to see the notice Settings → Playback shows when YouTube
+changed something only a newer Encore can follow (D37).
 
 For updates (D24), an automatic check runs 3 seconds in: `?update` finds
 Encore 0.5.0 and downloads it, `?update-manual` has automatic updates off,
@@ -115,6 +114,12 @@ bun run check                        # svelte-check
 bun test src/lib                     # the UI's pure logic (palette queries, find, sort, duplicates)
 ```
 
+The resolver's solver corpus (`crates/encore-resolver/tests/ejs_players.rs`)
+solves every player of yt-dlp-ejs's and yt-dlp's own tests, cold and from
+the preprocessed player. The players are YouTube's code, so they are not in
+the repository: the first run fetches them (about 160 MB) into
+`$ENCORE_EJS_PLAYERS`, or Cargo's test tmp folder, and later runs are offline.
+
 Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
 Personal fields are scrubbed when they are recorded; never commit a recording
 made with your own session without running it through `encore-cli record`.
@@ -135,8 +140,9 @@ never point the tests at the original.
 
 `encore --self-test [VIDEO_ID]` checks, without opening a window, what
 depends on the machine: the data folder and database, the audio output,
-the player components (installed first if missing, as the setup screen
-does) and, given a video id, resolving and decoding a real stream. It prints a JSON report and exits
+the built-in challenge solver (offline, on a player written for the test;
+always required) and, given a video id, resolving and decoding a real
+stream. It prints a JSON report and exits
 non-zero if playback can't work. YouTube's bot checks don't count as a
 failure unless you add `--strict`; on Windows add `--out report.json`, since
 release builds have no console.
@@ -158,8 +164,9 @@ C=target/debug/encore-cli
 $C search "daft punk" --filter songs
 $C album MPREb_7ltM34kr0mH
 $C playlist VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3 --all
-$C runtimes                          # player components: status, install, remove
-$C resolve 4D7u5KF7SP8               # installs the components first if missing
+$C resolve 4D7u5KF7SP8 --diagnostics # every client asked, its answer, solve times
+$C resolve 4D7u5KF7SP8 --client visionos   # one client only, no fallbacks
+$C --auth session resolve 4D7u5KF7SP8      # as the signed-in channel (reads the Keychain)
 $C play 4D7u5KF7SP8 --seek 60 --secs 20
 $C lyrics 4D7u5KF7SP8
 
@@ -186,7 +193,17 @@ $C downloads sync                    # check kept collections for changes
 $C downloads remove 4D7u5KF7SP8
 $C downloads pause                   # the running app follows
 $C downloads resume                  # and tries failed songs again
-$C play 4D7u5KF7SP8 --offline        # from the downloads only: no components, no YouTube
+$C play 4D7u5KF7SP8 --offline        # from the downloads only, no YouTube
+```
+
+`resolve` runs signed out unless given `--auth session`; `play` and
+`downloads` use the stored session unless given `--auth anonymous`, which
+never reads the Keychain. `ENCORE_DATA_DIR` and `ENCORE_CACHE_DIR` point the
+CLI's database, downloads and audio cache somewhere else, so a test leaves
+the app's own alone (and a running Encore's cache untouched):
+
+```sh
+ENCORE_DATA_DIR=/tmp/e ENCORE_CACHE_DIR=/tmp/e $C --auth anonymous downloads add 52fNscjkST4
 ```
 
 Signed-in commands print outcomes, ping kinds and HTTP statuses only: never
@@ -198,25 +215,26 @@ cookies, tokens or tracking URLs.
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
 | Last.fm key, secret and session (if connected) | Keychain item `app.encore.desktop` / `lastfm-session` | Credential Manager entry `lastfm-session.app.encore.desktop` | Secret Service item, service `app.encore.desktop`, account `lastfm-session` |
-| Library cache, settings, queue, lyrics cache, your bookmarks, folders and play log, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
+| Library cache, settings, queue, lyrics cache, your bookmarks, folders and play log | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
 | Backups of the database (the newest three, daily and before an update changes it) | `~/Library/Application Support/app.encore.desktop/backups/` | `%LOCALAPPDATA%\app.encore.desktop\backups\` | `~/.local/share/app.encore.desktop/backups/` |
 | Folder covers you picked | `~/Library/Application Support/app.encore.desktop/covers/` | `%LOCALAPPDATA%\app.encore.desktop\covers\` | `~/.local/share/app.encore.desktop/covers/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
-| Audio (1 GB) and artwork (256 MB) caches, a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `updates\`) | `~/.cache/app.encore.desktop/` |
+| Audio (1 GB) and artwork (256 MB) caches, the player scripts the resolver solves against (`player/`, three at most), a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `player\`, `updates\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
 URLs must never reach it; `cargo test` includes a check for this.
 
-## Player components
+## The stream resolver
 
-Playback runs yt-dlp on a Python and a Deno that Encore downloads itself
-(D22 in [decisions.md](decisions.md)). The versions, URLs, sizes and SHA-256
-checksums are pinned in `crates/encore-resolver/src/runtimes/manifest.rs`.
-To move to newer ones, change all four together, taking each checksum from
-the project's own release (python-build-standalone's `SHA256SUMS`, Deno's
-`.sha256sum` files, PyPI's `sha256` digests), and run `cargo test`. Users who
-already set up playback get the new versions on their next launch.
+Encore finds a song's audio itself (D37 in [decisions.md](decisions.md)):
+yt-dlp's YouTube extractor ported to Rust in `crates/encore-resolver`, and
+yt-dlp-ejs, vendored unchanged, solving YouTube's JavaScript challenges on
+QuickJS-ng compiled into the app. What it was ported from is pinned in
+`crates/encore-resolver/upstream.toml`; [upstream.md](upstream.md) is how to
+follow yt-dlp when YouTube changes something (`scripts/sync-upstream.sh`).
+Encore 0.5's downloaded Python, Deno and yt-dlp are removed once, at the
+first launch of 0.6.
 
 ## Updates
 
