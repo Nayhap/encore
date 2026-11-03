@@ -12,6 +12,7 @@
 //! * `StreamResolver` keeps a native resolver as a later, swappable
 //!   implementation.
 
+pub mod jsc;
 pub mod runtimes;
 
 use std::collections::HashMap;
@@ -192,7 +193,7 @@ enum Probe {
     Failed(PlayFailure),
 }
 
-fn fxhash(s: &str) -> u64 {
+pub(crate) fn fxhash(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 

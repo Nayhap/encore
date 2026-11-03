@@ -1,0 +1,34 @@
+# What Encore's native resolver (D37) ports and vendors, pinned.
+# docs/upstream.md explains how to move these; scripts/sync-upstream.sh
+# fetches both commits, prints what changed and refreshes the bundles.
+# Tests read this file: change it only with the code that follows it.
+
+[yt_dlp]
+repository = "https://github.com/yt-dlp/yt-dlp"
+# The commit the ported modules were read at (git log -1 on master).
+commit = "b77c9304e1c4220cca450c583491904daf8455af"
+# yt_dlp/version.py at that commit; its RELEASE_GIT_HEAD is c91f8de.
+version = "2026.10.26"
+
+[ejs]
+repository = "https://github.com/yt-dlp/ejs"
+# The release yt-dlp pins in yt_dlp/extractor/youtube/jsc/_builtin/vendor/_info.py.
+version = "0.8.0"
+# The source commit the fixtures (src/yt/solver/test/tests.ts) were read at.
+commit = "d48c6303a5a6455a42ef9e0b445149cadea51279"
+# SHA3-512 of the release assets, copied from _info.py HASHES.
+lib_sha3_512 = "8420c259ad16e99ce004e4651ac1bcabb53b4457bf5668a97a9359be9a998a789fee8ab124ee17f91a2ea8fd84e0f2b2fc8eabcaf0b16a186ba734cf422ad053"
+core_sha3_512 = "ee5b307d07f55e91e4723edf5ac205cc877a474187849d757dc1322e38427b157a9d706d510c1723d3670f98e5a3f8cbcde77874a80406bd7204bc9fea30f283"
+
+[engine]
+# Cargo.toml pins rquickjs exactly; rquickjs-sys 0.14.0 bundles this QuickJS-ng
+# (quickjs/quickjs.h QJS_VERSION_*). yt-dlp recommends quickjs-ng >= 0.12.0
+# (jsc/_builtin/quickjs.py _QJS_MIN_RECOMMENDED).
+rquickjs = "0.14.0"
+quickjs_ng = "0.16.2"
+
+[fixtures]
+# Player ids of the solver corpus: ejs tests.ts, plus 5e55da5a (tv) from
+# yt-dlp test/test_jsc/test_ejs_integration.py. Fetched and cached by
+# tests/ejs_players.rs, never committed (they are YouTube's code).
+players = ["74edf1a3", "901741ab", "e7573094", "9fcf08e8", "21cd2156", "76ad2fe8", "631d3938", "5e55da5a"]
