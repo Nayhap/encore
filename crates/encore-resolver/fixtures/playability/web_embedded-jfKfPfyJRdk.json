@@ -1,0 +1,35 @@
+{
+  "playabilityStatus": {
+    "errorScreen": {
+      "playerInterstitialRenderer": {
+        "content": {
+          "interstitialViewModel": {
+            "description": {
+              "content": "This live stream recording is not available."
+            },
+            "logo": {
+              "sources": [
+                {
+                  "height": 40,
+                  "url": "<url>",
+                  "width": 176
+                }
+              ]
+            },
+            "title": {
+              "content": "Video unavailable"
+            }
+          }
+        }
+      }
+    },
+    "playableInEmbed": true,
+    "reason": "This live stream recording is not available.",
+    "status": "UNPLAYABLE"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "jfKfPfyJRdk"
+  }
+}

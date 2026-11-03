@@ -1,0 +1,96 @@
+{
+  "playabilityStatus": {
+    "errorScreen": {
+      "playerErrorCommandRenderer": {
+        "command": {
+          "showEngagementPanelEndpoint": {
+            "engagementPanel": {
+              "engagementPanelSectionListRenderer": {
+                "content": {
+                  "sectionListRenderer": {
+                    "contents": [
+                      {
+                        "itemSectionRenderer": {
+                          "contents": [
+                            {
+                              "compactLinkRenderer": {
+                                "serviceEndpoint": {
+                                  "commandExecutorCommand": {
+                                    "commands": [
+                                      {
+                                        "signalAction": {
+                                          "signal": "HISTORY_BACK"
+                                        }
+                                      },
+                                      {
+                                        "signalAction": {
+                                          "signal": "CLOSE_POPUP"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                },
+                                "title": {
+                                  "runs": [
+                                    {
+                                      "text": "Back"
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                "header": {
+                  "overlayPanelHeaderRenderer": {
+                    "subtitle": {
+                      "simpleText": "This video has been removed for violating YouTube's policy on hate speech. Learn more about combating hate speech in your country."
+                    },
+                    "title": {
+                      "runs": [
+                        {
+                          "text": "Something went wrong"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "onUserCloseOverrideCommand": {
+                  "commandExecutorCommand": {
+                    "commands": [
+                      {
+                        "signalAction": {
+                          "signal": "HISTORY_BACK"
+                        }
+                      },
+                      {
+                        "signalAction": {
+                          "signal": "CLOSE_POPUP"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "identifier": {
+              "surface": "ENGAGEMENT_PANEL_SURFACE_WATCH",
+              "tag": "default-player-error"
+            }
+          }
+        }
+      }
+    },
+    "reason": "This video has been removed for violating YouTube's policy on hate speech. Learn more about combating hate speech in your country.",
+    "status": "ERROR"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": null
+  }
+}

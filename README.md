@@ -102,13 +102,10 @@ Download the latest build from
   libasound2` on Debian and Ubuntu, `libglvnd-gles alsa-lib` on Fedora). To
   stay signed in you need GNOME Keyring or KWallet.
 
-On first launch Encore offers to set up playback. With your OK it downloads
-the free components it plays music with, [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-and the Python and [Deno](https://deno.com) it runs on, into its own folder:
-65 to 80 MB to download and 120 to 160 MB on disk, depending on the system. You can keep browsing while they
-install, and nothing else on your computer changes. Encore keeps them up to
-date when it updates. **Settings → Playback** shows them and can remove them
-to free the space.
+There is nothing else to install: Encore finds a song's audio itself, with
+an extractor that follows [yt-dlp](https://github.com/yt-dlp/yt-dlp)'s and
+yt-dlp's challenge solver built in. Updating from 0.5 removes the Python,
+Deno and yt-dlp it downloaded then, which frees 120 to 160 MB.
 
 ### Keeping up to date
 
@@ -122,8 +119,8 @@ asks once again for access to your saved session in the Keychain; choose
 **Always Allow**. Installs from the `.deb` don't update themselves: Encore
 says when a new version is out and links to it.
 
-Uninstalling keeps Encore's caches, settings and player components (a few
-hundred MB at most), and your downloads, unless you tick **Delete the
+Uninstalling keeps Encore's caches and settings (a few hundred MB at
+most), and your downloads, unless you tick **Delete the
 application data** in the Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)
 lists the folders to delete by hand on macOS and Linux, and the saved session
 in the system's credential store.
@@ -181,9 +178,11 @@ Bug reports and pull requests are welcome. See
 
 Encore learned a lot from [Meiro](https://github.com/elianiva/meiro),
 [Kopuz](https://github.com/Kopuz-org/kopuz) and
-[Better Lyrics](https://github.com/better-lyrics/better-lyrics). Streams come
-through [yt-dlp](https://github.com/yt-dlp/yt-dlp), and synced lyrics through
-[LRCLIB](https://lrclib.net).
+[Better Lyrics](https://github.com/better-lyrics/better-lyrics). Streams are
+found the way [yt-dlp](https://github.com/yt-dlp/yt-dlp) finds them, with
+[yt-dlp-ejs](https://github.com/yt-dlp/ejs) on
+[QuickJS-ng](https://github.com/quickjs-ng/quickjs) for YouTube's challenges,
+and synced lyrics come through [LRCLIB](https://lrclib.net).
 
 ## License
 

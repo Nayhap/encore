@@ -1,0 +1,81 @@
+{
+  "playabilityStatus": {
+    "desktopLegacyAgeGateReason": 1,
+    "errorScreen": {
+      "playerInterstitialRenderer": {
+        "content": {
+          "interstitialViewModel": {
+            "description": {
+              "content": "This video is age-restricted and only available on YouTube"
+            },
+            "logo": {
+              "sources": [
+                {
+                  "height": 40,
+                  "url": "<url>",
+                  "width": 176
+                }
+              ]
+            },
+            "primaryButton": {
+              "buttonViewModel": {
+                "buttonSize": "BUTTON_VIEW_MODEL_SIZE_DEFAULT",
+                "onTap": {
+                  "innertubeCommand": {
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "rootVe": 83769,
+                        "url": "<url>",
+                        "webPageType": "WEB_PAGE_TYPE_UNKNOWN"
+                      }
+                    },
+                    "urlEndpoint": {
+                      "target": "TARGET_NEW_WINDOW",
+                      "url": "<url>"
+                    }
+                  }
+                },
+                "style": "BUTTON_VIEW_MODEL_STYLE_OVERLAY",
+                "title": "Watch on YouTube",
+                "type": "BUTTON_VIEW_MODEL_TYPE_FILLED"
+              }
+            },
+            "secondaryButton": {
+              "buttonViewModel": {
+                "buttonSize": "BUTTON_VIEW_MODEL_SIZE_DEFAULT",
+                "onTap": {
+                  "innertubeCommand": {
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "rootVe": 83769,
+                        "url": "<url>",
+                        "webPageType": "WEB_PAGE_TYPE_UNKNOWN"
+                      }
+                    },
+                    "urlEndpoint": {
+                      "target": "TARGET_NEW_WINDOW",
+                      "url": "<url>"
+                    }
+                  }
+                },
+                "style": "BUTTON_VIEW_MODEL_STYLE_OVERLAY",
+                "title": "Learn more",
+                "type": "BUTTON_VIEW_MODEL_TYPE_TONAL"
+              }
+            },
+            "title": {
+              "content": "Sorry, this content is age-restricted"
+            }
+          }
+        }
+      }
+    },
+    "reason": "Sorry, this content is age-restricted",
+    "status": "UNPLAYABLE"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": "SZJvDhaSDnc"
+  }
+}

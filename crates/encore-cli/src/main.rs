@@ -25,8 +25,20 @@ struct Cli {
     /// Max rows to print per list.
     #[arg(long, global = true, default_value_t = 8)]
     max: usize,
+    /// Who `resolve`, `play` and `downloads` run as: `anonymous` never
+    /// reads the stored session (so the Keychain isn't asked), `session`
+    /// uses it. `resolve` is anonymous unless told; the others use the
+    /// session when there is one.
+    #[arg(long, global = true, value_enum)]
+    auth: Option<AuthMode>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AuthMode {
+    Anonymous,
+    Session,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -92,11 +104,23 @@ enum Cmd {
         #[arg(long)]
         more: bool,
     },
-    /// Resolve a stream URL for a video (prints format details, never the URL query).
-    /// Installs the player components first if they are missing.
-    Resolve { video_id: String },
-    /// The player components (Python, Deno, yt-dlp): `status`, `install`, `remove`.
-    Runtimes { action: Option<String> },
+    /// Resolve a stream URL for a video with the native resolver (D37):
+    /// prints format details, never the URL or its query.
+    Resolve {
+        video_id: String,
+        /// Ask only this InnerTube client (`tv_samsung`, `visionos`,
+        /// `web_embedded`, `tv`, ...), with no fallbacks.
+        #[arg(long)]
+        client: Option<String>,
+        /// Print every client asked, its answer, the player and the solve
+        /// times.
+        #[arg(long)]
+        diagnostics: bool,
+        /// Write each client's playability answer, scrubbed, into this
+        /// folder as `<client>-<video>.json` (resolver fixtures).
+        #[arg(long)]
+        record: Option<PathBuf>,
+    },
     /// Stream a video through the engine (resolver + range cache + preload).
     Play {
         video_id: String,
@@ -114,8 +138,7 @@ enum Cmd {
         #[arg(long)]
         report: bool,
         /// Play downloaded songs only, as Encore does offline: everything
-        /// comes from the downloads index, with no player components and no
-        /// request to YouTube.
+        /// comes from the downloads index, with no request to YouTube.
         #[arg(long)]
         offline: bool,
     },
@@ -248,8 +271,7 @@ enum PlaylistCmd {
 enum DownloadsCmd {
     /// Downloaded songs, kept collections and what is waiting.
     List,
-    /// Download songs and wait until they are done (installs the player
-    /// components first if missing).
+    /// Download songs and wait until they are done.
     Add { videos: Vec<String> },
     /// Keep a playlist, album or liked songs (LM) downloaded, and wait.
     Keep { id: String },
@@ -421,18 +443,22 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Record { dir } => record(&svc, dir).await?,
         Cmd::Play { video_id, seek, next, secs, report, offline } => {
-            let _ = accounts(&svc).restore();
+            if cli.auth != Some(AuthMode::Anonymous) {
+                let _ = accounts(&svc).restore();
+            }
             play(svc.clone(), &video_id, seek, next.as_deref(), secs, report, offline).await?
         }
         Cmd::Downloads { cmd } => {
-            let _ = accounts(&svc).restore();
+            if cli.auth != Some(AuthMode::Anonymous) {
+                let _ = accounts(&svc).restore();
+            }
             downloads(svc.clone(), cmd, j).await?
         }
         Cmd::Auth { cmd } => auth(&svc, cmd).await?,
         Cmd::Lyrics { video_id, fresh } => {
             let id = ItemId::parse(&video_id);
             let track = svc.track(&ctx, &id).await.map_err(e)?;
-            let db = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/encore.sqlite");
+            let db = data_dir()?.join("encore.sqlite");
             let store = Arc::new(encore_core::store::Store::open(&db).map_err(e)?);
             let ls = encore_lyrics::LyricsService::new(svc.clone(), Some(store.clone()));
             if fresh {
@@ -545,49 +571,15 @@ async fn run(cli: Cli) -> Result<()> {
             let ctx = svc.context();
             library(&svc, &ctx, LibrarySection::Playlists, true, m, j).await?;
         }
-        Cmd::Runtimes { action } => {
-            let r = cli_resolver(false).await?;
-            match action.as_deref().unwrap_or("status") {
-                "status" => {}
-                "install" => install_runtimes(r.runtimes()).await?,
-                "remove" => r.runtimes().remove(false).await.map_err(|e| anyhow!("{}", e.message))?,
-                other => bail!("unknown action {other}; use status, install or remove"),
-            }
-            let st = r.runtimes().status_measured();
-            println!("location: {}", st.location);
-            println!("ready={} usable={} approved={} download={:.1} MB disk≈{:.0} MB used={:.1} MB", st.ready, st.usable, st.approved, st.download_bytes / 1e6, st.disk_bytes / 1e6, st.used_bytes / 1e6);
-            for c in &st.components {
-                println!("  {} {} (installed: {}){}", c.name, c.version, c.installed.as_deref().unwrap_or("none"), if c.ready { "" } else { " needs install" });
-            }
-            if let Some(m) = st.message {
-                println!("{m}");
-            }
-        }
-        Cmd::Resolve { video_id } => {
-            use encore_core::service::StreamResolver;
-            let t0 = Instant::now();
-            let r = cli_resolver(true).await?;
-            let st = r.runtimes().status();
-            println!("components: {} (setup {:.1}s)", st.components.iter().map(|c| format!("{} {}", c.name, c.installed.as_deref().unwrap_or("?"))).collect::<Vec<_>>().join(", "), t0.elapsed().as_secs_f64());
-            let t1 = Instant::now();
-            let s = r.resolve(&ItemId::parse(&video_id).remote().to_string(), None).await.map_err(|e| anyhow!("{} ({:?})", e.message, e.kind))?;
-            let host = url::Url::parse(s.url.expose()).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_default();
-            println!(
-                "resolved {} in {:.2}s: itag={} codec={} mime={} kbps={} bytes={} duration={} range_safe={} authenticated={} expires_in={}s host={} url=<redacted>",
-                s.video_id,
-                t1.elapsed().as_secs_f64(),
-                s.itag,
-                s.codec,
-                s.mime,
-                s.bitrate_kbps.map(|b| b.to_string()).unwrap_or("?".into()),
-                s.content_length.map(|b| b.to_string()).unwrap_or("?".into()),
-                show::dur(s.duration),
-                s.range_safe,
-                s.authenticated,
-                s.expires_at.map(|e| e - encore_core::store::now()).unwrap_or(0),
-                host
-            );
-            println!("probe: head range ok, tail range {}", if s.range_safe { "ok" } else { "failed (sequential mode)" });
+        Cmd::Resolve { video_id, client, diagnostics, record } => {
+            let auth = match cli.auth.unwrap_or(AuthMode::Anonymous) {
+                AuthMode::Anonymous => None,
+                AuthMode::Session => {
+                    accounts(&svc).restore().map_err(e)?;
+                    Some(svc.it.resolve_auth().ok_or_else(|| anyhow!("--auth session needs a signed-in session with a channel (encore-cli whoami)"))?)
+                }
+            };
+            resolve(&svc, ItemId::parse(&video_id).remote(), auth.as_ref(), client, diagnostics, j, record).await?;
         }
     }
     Ok(())
@@ -859,9 +851,9 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
     if offline && report {
         bail!("--report needs a connection; leave out --offline");
     }
-    // Offline nothing is installed: downloaded songs need no components.
-    let resolver = cli_resolver(!offline).await?;
-    let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
+    let resolver = cli_resolver(&svc);
+    // `$ENCORE_CACHE_DIR` keeps a test away from the running app's cache.
+    let cache_dir = std::env::var_os("ENCORE_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop")).join("audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
     let auth: encore_player::AuthProvider = Arc::new(move || encore_cli_auth(&it));
@@ -969,9 +961,9 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
 
 /// The app's downloads (its folder and index), with nothing started: the
 /// caller starts the worker when it means to download.
-async fn cli_downloads(svc: Arc<YtMusic>, resolver: Arc<encore_resolver::YtDlpResolver>, cache: Option<encore_audio::AudioCache>) -> Result<(Arc<encore_downloads::DownloadManager>, Arc<encore_core::store::Store>)> {
+async fn cli_downloads(svc: Arc<YtMusic>, resolver: Arc<encore_resolver::NativeResolver>, cache: Option<encore_audio::AudioCache>) -> Result<(Arc<encore_downloads::DownloadManager>, Arc<encore_core::store::Store>)> {
     // Never a temporary folder: downloads are kept for good.
-    let data = dirs::data_local_dir().ok_or_else(|| anyhow!("this system has no data folder for Encore's downloads"))?.join("app.encore.desktop");
+    let data = data_dir()?;
     let store = Arc::new(encore_core::store::Store::open(&data.join("encore.sqlite")).map_err(|e| anyhow!("{}", e.message))?);
     let it = svc.it.clone();
     let deps = encore_downloads::Deps {
@@ -997,8 +989,7 @@ fn size(b: f64) -> String {
 
 async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<()> {
     use encore_downloads::{DownloadState, DownloadsUpdate};
-    let fetching = matches!(cmd, DownloadsCmd::Add { .. } | DownloadsCmd::Keep { .. } | DownloadsCmd::Sync { .. } | DownloadsCmd::Resume);
-    let resolver = cli_resolver(fetching).await?;
+    let resolver = cli_resolver(&svc);
     // No playback cache here: opening it clears its partial files, which may
     // be the running app's. Songs are fetched instead of copied from it.
     let (dl, _) = cli_downloads(svc.clone(), resolver, None).await?;
@@ -1100,40 +1091,115 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
     Ok(())
 }
 
-/// Cookies for the resolver from the signed-in session, if any.
-/// The resolver on the app's own component folder. With `install`, missing
-/// components are downloaded first (running the CLI is the approval).
-async fn cli_resolver(install: bool) -> Result<Arc<encore_resolver::YtDlpResolver>> {
-    let cfg = encore_resolver::ResolverConfig::default_paths();
-    let rt = encore_resolver::Runtimes::new(cfg.runtimes());
-    let r = encore_resolver::YtDlpResolver::new(cfg, rt.clone());
-    if install && !rt.ready() {
-        install_runtimes(&rt).await?;
-    }
-    Ok(r)
+/// The native resolver on the app's cache folder (player scripts only),
+/// with encore-ytm's visitor for signed-out resolves, as in the app.
+fn cli_resolver(svc: &Arc<YtMusic>) -> Arc<encore_resolver::NativeResolver> {
+    let r = encore_resolver::NativeResolver::new(encore_resolver::ResolverConfig::default_paths());
+    let it = svc.it.clone();
+    r.set_visitor_source(Arc::new(move || it.visitor_data()));
+    r
 }
 
-async fn install_runtimes(rt: &Arc<encore_resolver::Runtimes>) -> Result<()> {
-    let st = rt.status();
-    eprintln!("installing player components into {} ({:.1} MB to download)", st.location, st.download_bytes / 1e6);
-    let last = Arc::new(parking_lot::Mutex::new((None, -1i64)));
-    rt.on_change(move |s| {
-        let Some(p) = &s.progress else { return };
-        let pct = (p.fraction * 100.0) as i64;
-        let mut l = last.lock();
-        if l.0 != Some(p.phase) || pct >= l.1 + 10 {
-            *l = (Some(p.phase), pct);
-            eprintln!("  {:?} {}% {}", p.phase, pct, p.component.as_deref().unwrap_or(""));
-        }
-    });
-    rt.approve().map_err(|e| anyhow!("{}", e.message))?;
-    rt.install().await.map_err(|e| anyhow!("{} ({:?})", e.message, e.kind))
+/// The app's data folder, or `$ENCORE_DATA_DIR` (tests that must not
+/// touch the user's downloads and index).
+fn data_dir() -> Result<PathBuf> {
+    if let Some(d) = std::env::var_os("ENCORE_DATA_DIR") {
+        return Ok(PathBuf::from(d));
+    }
+    Ok(dirs::data_local_dir().ok_or_else(|| anyhow!("this system has no data folder for Encore"))?.join("app.encore.desktop"))
 }
 
 fn encore_cli_auth(it: &InnerTube) -> Option<encore_core::service::ResolveAuth> {
-    let s = it.session()?;
-    let ch = s.channel.as_ref()?;
-    Some(encore_core::service::ResolveAuth { cookies: s.jar.records().to_vec(), auth_user: ch.auth_user, page_id: ch.page_id.clone() })
+    it.resolve_auth()
+}
+
+async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::service::ResolveAuth>, client: Option<String>, diagnostics: bool, json: bool, record: Option<PathBuf>) -> Result<()> {
+    // The visitor music.youtube.com hands out, as the app shares it.
+    svc.it.bootstrap().await;
+    let r = cli_resolver(svc);
+    let t1 = Instant::now();
+    let (res, d) = r.resolve_with(video_id, auth, &encore_resolver::ResolveOptions { client }).await;
+    // The preroll, waited out and the URL probed after it (D37).
+    let res = match res {
+        Ok(s) => {
+            use encore_core::service::StreamResolver;
+            r.ready(s, auth).await
+        }
+        e => e,
+    };
+    let secs = t1.elapsed().as_secs_f64();
+    if let Some(dir) = &record {
+        std::fs::create_dir_all(dir)?;
+        for a in &d.attempts {
+            if let Some(v) = &a.recorded {
+                let f = dir.join(format!("{}-{video_id}.json", a.client));
+                std::fs::write(&f, encore_core::redact::redact(&serde_json::to_string_pretty(v)?) + "\n")?;
+                println!("recorded {}", f.display());
+            }
+        }
+    }
+    if json {
+        let v = serde_json::json!({
+            "ok": res.is_ok(),
+            "error": res.as_ref().err().map(|e| serde_json::json!({ "kind": e.kind, "message": e.message })),
+            "itag": res.as_ref().ok().map(|s| s.itag),
+            "codec": res.as_ref().ok().map(|s| s.codec.clone()),
+            "seconds": secs,
+            "diagnostics": d,
+        });
+        println!("{}", encore_core::redact::redact(&serde_json::to_string_pretty(&v).unwrap_or_default()));
+    } else if diagnostics {
+        let st = r.engine_status();
+        println!("engine: {} on {}, extractor {}; signed in: {}", st.solver, st.engine, st.extractor, d.signed_in);
+        for a in &d.attempts {
+            println!(
+                "  {:<13} {:>5} ms  status={} formats={}{} -> {}",
+                a.client,
+                a.ms,
+                a.status.as_deref().unwrap_or("-"),
+                a.formats,
+                if a.skipped == Default::default() { String::new() } else { format!(" skipped(sabr={} drm={} pot={} live={})", a.skipped.sabr, a.skipped.drm, a.skipped.po_token, a.skipped.live) },
+                a.outcome
+            );
+            if let Some(r) = &a.reason {
+                println!("                 reason: {r}");
+            }
+        }
+        if let Some(x) = &d.session {
+            println!("  session: {x}");
+        }
+        println!("  player: {}", d.player.as_deref().unwrap_or("-"));
+        for s in &d.solves {
+            println!("  solve: {} ms ({}{}{})", s.ms, if s.preprocessed { "preprocessed" } else { "cold" }, if s.n { ", n" } else { "" }, if s.sig { ", signature" } else { "" });
+        }
+        if d.waited_secs > 0 {
+            println!("  waited {} s for a preroll", d.waited_secs);
+        }
+        println!("  chosen: {}; probes: {}", d.chosen.as_deref().unwrap_or("-"), d.probes);
+    }
+    let s = res.map_err(|e| anyhow!("{} ({:?})", e.message, e.kind))?;
+    if json {
+        return Ok(());
+    }
+    let host = url::Url::parse(s.url.expose()).ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_default();
+    println!(
+        "resolved {} in {:.2}s: itag={} codec={} mime={} kbps={} bytes={} duration={} loudness={} range_safe={} authenticated={} expires_in={}s host={} url=<redacted>",
+        s.video_id,
+        secs,
+        s.itag,
+        s.codec,
+        s.mime,
+        s.bitrate_kbps.map(|b| b.to_string()).unwrap_or("?".into()),
+        s.content_length.map(|b| b.to_string()).unwrap_or("?".into()),
+        show::dur(s.duration),
+        s.loudness_db.map(|l| format!("{l:.1}dB")).unwrap_or("?".into()),
+        s.range_safe,
+        s.authenticated,
+        s.expires_at.map(|e| e - encore_core::store::now()).unwrap_or(0),
+        host
+    );
+    println!("probe: head range ok, tail range {}", if s.range_safe { "ok" } else { "failed (sequential mode)" });
+    Ok(())
 }
 
 fn play_file(path: PathBuf, seek: f64, max: Option<f64>) -> Result<()> {

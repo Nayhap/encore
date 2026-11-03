@@ -1,0 +1,56 @@
+{
+  "playabilityStatus": {
+    "errorScreen": {
+      "playerInterstitialRenderer": {
+        "content": {
+          "interstitialViewModel": {
+            "description": {
+              "content": "This video has been removed for violating YouTube's Terms of Service"
+            },
+            "logo": {
+              "sources": [
+                {
+                  "height": 40,
+                  "url": "<url>",
+                  "width": 176
+                }
+              ]
+            },
+            "primaryButton": {
+              "buttonViewModel": {
+                "onTap": {
+                  "innertubeCommand": {
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "rootVe": 83769,
+                        "url": "/t/terms",
+                        "webPageType": "WEB_PAGE_TYPE_UNKNOWN"
+                      }
+                    },
+                    "urlEndpoint": {
+                      "url": "/t/terms"
+                    }
+                  }
+                },
+                "style": "BUTTON_VIEW_MODEL_STYLE_OVERLAY",
+                "title": "Learn more",
+                "type": "BUTTON_VIEW_MODEL_TYPE_FILLED"
+              }
+            },
+            "title": {
+              "content": "Video unavailable"
+            }
+          }
+        },
+        "stateEntityStoreKey": ""
+      }
+    },
+    "reason": "This video has been removed for violating YouTube's Terms of Service",
+    "status": "ERROR"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": null
+  }
+}

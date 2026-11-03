@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { call, type CacheInfo, type DownloadsStorage, type StatsOverview } from "$lib/backend";
   import { sizeText } from "$lib/data";
-  import { downloads, listening, nav, setup, ui } from "$lib/state.svelte";
+  import { downloads, listening, nav, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { mb, settings } from "./shared.svelte";
 
@@ -10,14 +10,10 @@
   let stored = $state<DownloadsStorage | null>(null);
   const busy = $derived(settings.busy);
   // Maintenance stays folded away until asked for.
-  let showParts = $state(false);
   let showCaches = $state(false);
 
   onMount(async () => {
     cache = await call((a) => a.cacheInfo()).catch(() => null);
-    // Measured once here: the size of the components folder.
-    const rt = await call((a) => a.runtimesStatus()).catch(() => null);
-    if (rt) setup.apply(rt);
   });
   // Measured on disk, and again after downloads come or go.
   $effect(() => {
@@ -26,18 +22,6 @@
       .then((x) => (stored = x))
       .catch(() => {});
   });
-
-  // The player components (D22).
-  const rt = $derived(setup.status);
-  function removeComponents() {
-    ui.confirm = {
-      title: "Remove player components?",
-      text: `This frees about ${mb(rt?.usedBytes || rt?.diskBytes || 0)}. Streaming and new downloads need them, so they wait until you set up playback again. Downloaded songs still play.`,
-      confirm: "Remove",
-      danger: true,
-      run: () => void settings.run("runtimes", () => setup.remove()),
-    };
-  }
 
   // The local play log (D30): how much, and since when.
   let stats = $state<StatsOverview | null>(null);
@@ -92,36 +76,6 @@
   </div>
   <div class="row">
     <div>
-      <b>Player components</b>
-      <p>
-        {#if !rt}Checking…
-        {:else if !rt.supported}{rt.message}
-        {:else if rt.installing}{rt.usable ? "Updating" : "Setting up"} · {Math.floor((rt.progress?.fraction ?? 0) * 100)}%
-        {:else if rt.usable}Installed{rt.usedBytes ? ` · ${mb(rt.usedBytes)}` : ""}{rt.ready ? "" : " · an update is waiting"}
-        {:else}Not installed. Playback needs them, about {mb(rt.downloadBytes ?? 0)} to download.{/if}
-      </p>
-    </div>
-    <div class="btns">
-      {#if rt?.installing}
-        <button class="pill" onclick={() => setup.show()}>Show progress</button>
-      {:else if rt?.usable}
-        <button class="pill more" aria-expanded={showParts} onclick={() => (showParts = !showParts)}>Details<Icon name={showParts ? "up" : "down"} size={14} /></button>
-      {:else if rt?.supported}
-        <button class="pill primary" onclick={() => setup.show()}>Set up playback</button>
-      {/if}
-    </div>
-  </div>
-  {#if showParts && rt?.usable && !rt.installing}
-    <ul class="sub" aria-label="Player components">
-      <li class="acts">
-        <small>{rt.components.map((c) => `${c.name} ${c.installed ?? c.version}`).join(" · ")}</small>
-        <button class="pill" disabled={!!busy} onclick={() => setup.install(true).then(() => setup.show())}>Reinstall</button>
-        <button class="pill" disabled={!!busy} onclick={removeComponents}>Remove…</button>
-      </li>
-    </ul>
-  {/if}
-  <div class="row">
-    <div>
       <b>Listening stats</b>
       <p>{stats?.plays ? `${stats.plays.toLocaleString()} ${stats.plays === 1 ? "play" : "plays"} since ${since}, kept only on this computer` : "Nothing counted yet"}</p>
     </div>
@@ -167,7 +121,7 @@
     border-radius: 10px;
     font-size: 13.5px;
   }
-  .sub li:not(.acts):hover {
+  .sub li:hover {
     background: var(--hover);
   }
   .sub span {
@@ -178,9 +132,6 @@
     flex: 1;
     font-size: 13px;
     color: var(--mute);
-  }
-  .sub .acts {
-    gap: 8px;
   }
   .sub .pill {
     flex: none;

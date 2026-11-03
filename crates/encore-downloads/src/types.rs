@@ -23,7 +23,6 @@ pub enum DownloadWait {
     BotCheck,
     Stopped,
     DiskFull,
-    SetupNeeded,
     Elsewhere,
     Locked,
 }

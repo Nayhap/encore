@@ -4,7 +4,6 @@
 use encore_core::model::{AuthState, Lyrics};
 use encore_downloads::{DownloadItem, DownloadsSummary};
 use encore_player::{PlayerSnapshot, PositionAnchor, QueueSplice};
-use encore_resolver::RuntimeStatus;
 
 use crate::updates::UpdateStatus;
 use serde::{Deserialize, Serialize};
@@ -72,19 +71,6 @@ pub struct PlaylistsEvent {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEvent {
     pub track_id: String,
-}
-
-/// The player components changed: install progress, done, failed, removed
-/// (D22).
-#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
-pub struct RuntimesEvent(pub RuntimeStatus);
-
-/// A song couldn't start because the player components aren't installed:
-/// the UI shows the setup.
-#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
-#[serde(rename_all = "camelCase")]
-pub struct SetupNeededEvent {
-    pub track_id: Option<String>,
 }
 
 /// Downloads: counts, progress and waits (at most four a second). A newer

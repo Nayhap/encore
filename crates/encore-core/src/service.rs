@@ -308,12 +308,19 @@ impl std::fmt::Debug for CookieRecord {
     }
 }
 
-/// Identity a resolve runs under.
+/// Identity a resolve runs under, taken once when it starts (D2, D37).
 #[derive(Clone, Debug, Default)]
 pub struct ResolveAuth {
     pub cookies: Vec<CookieRecord>,
     pub auth_user: u32,
     pub page_id: Option<String>,
+    /// The manager's user session id, for a brand channel's `_u` hash.
+    pub user_session_id: Option<String>,
+    /// The session's visitor, shared with the D18 `/player` call.
+    pub visitor_data: Option<String>,
+    /// Account, channel and session generation: resolved URLs are cached
+    /// under it, and a result for another key is stale.
+    pub key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +341,18 @@ pub struct ResolvedStream {
     /// false = deep ranges failed the probe: play sequentially (D4).
     pub range_safe: bool,
     pub authenticated: bool,
+    /// The URL answers only from this moment (a preroll ad on TV clients,
+    /// D37), and isn't probed yet: callers wait for it without holding the
+    /// `PlaybackGate`, then call `StreamResolver::ready`.
+    pub available_at: Option<std::time::Instant>,
+}
+
+impl ResolvedStream {
+    /// Whole seconds until the URL answers, if it doesn't yet.
+    pub fn wait_secs(&self) -> Option<u64> {
+        let left = self.available_at?.saturating_duration_since(std::time::Instant::now());
+        (!left.is_zero()).then(|| left.as_secs_f64().ceil() as u64)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -344,9 +363,6 @@ pub enum PlayFailureKind {
     SessionExpired,
     Network,
     Unknown,
-    /// The player components aren't installed yet (D22): not the song's
-    /// fault, so it isn't skipped; the app offers the setup instead.
-    SetupNeeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type, thiserror::Error)]
@@ -396,6 +412,12 @@ pub trait StreamResolver: Send + Sync {
     async fn resolve(&self, video_id: &str, auth: Option<&ResolveAuth>) -> std::result::Result<ResolvedStream, PlayFailure>;
     /// Drop any cached URL for this video (expired / refused).
     fn forget(&self, _video_id: &str) {}
+    /// Wait for `s.available_at`, if set, and check the URL then (D4),
+    /// resolving once more if it is refused. A no-op for a stream that is
+    /// ready already.
+    async fn ready(&self, s: ResolvedStream, _auth: Option<&ResolveAuth>) -> std::result::Result<ResolvedStream, PlayFailure> {
+        Ok(s)
+    }
 }
 
 #[cfg(test)]

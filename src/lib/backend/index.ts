@@ -33,10 +33,6 @@ export interface Handlers {
   playlists(e: T.PlaylistsEvent): void;
   /** A play was reported to the history. */
   history(e: T.HistoryEvent): void;
-  /** The player components changed (install progress, done, removed). */
-  runtimes(s: T.RuntimeStatus): void;
-  /** A song couldn't start because the player components aren't installed. */
-  setupNeeded(e: T.SetupNeededEvent): void;
   /** Download counts, progress and waits (D23). */
   downloads(s: T.DownloadsSummary): void;
   /** One download changed state. */
@@ -51,13 +47,10 @@ export interface Api {
   /** Subscribe first, then bootstrap (D13). */
   subscribe(h: Handlers): Promise<() => void>;
   bootstrap(): Promise<T.Bootstrap>;
-  /** The player components, with the space they use measured (D22). */
-  runtimesStatus(): Promise<T.RuntimeStatus>;
-  /** Approve and install in the background; `reinstall` deletes them first. */
-  runtimesInstall(reinstall: boolean): Promise<T.RuntimeStatus>;
-  runtimesCancel(): Promise<void>;
-  /** Delete the downloaded components to free the space. */
-  runtimesRemove(): Promise<T.RuntimeStatus>;
+  /** The built-in player engine (D37). */
+  playerEngine(): Promise<T.EngineStatus>;
+  /** Forget the player scripts and what was solved from them. */
+  playerEngineReset(): Promise<T.EngineStatus>;
   cacheInfo(): Promise<T.CacheInfo>;
   cacheClear(what: "audio" | "art" | "lyrics"): Promise<void>;
   home(): Promise<T.Page>;

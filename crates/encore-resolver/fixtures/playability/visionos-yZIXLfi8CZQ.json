@@ -1,0 +1,14 @@
+{
+  "playabilityStatus": {
+    "messages": [
+      "This is a private video. Please sign in to verify that you may see it."
+    ],
+    "reason": "Please sign in",
+    "status": "LOGIN_REQUIRED"
+  },
+  "videoDetails": {
+    "isLive": null,
+    "isUpcoming": null,
+    "videoId": null
+  }
+}

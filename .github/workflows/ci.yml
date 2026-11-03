@@ -47,15 +47,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libdbus-1-dev cmake patchelf
-          # For the self-test: yt-dlp needs Python 3.11, Ubuntu 22.04 has 3.10.
-          sudo apt-get install -y python3.11 python3.11-venv
       - name: System packages (macOS)
         if: runner.os == 'macOS'
         run: brew list cmake >/dev/null 2>&1 || brew install cmake
       - run: bun install --frozen-lockfile
       # The app crate embeds the built UI, so build it before compiling tests.
       - run: bun run build
+      # The solver corpus (D37): YouTube's player scripts named in
+      # crates/encore-resolver/tests/ejs_players.rs, fetched once and kept
+      # between runs, never committed. Restored and saved as two steps so a
+      # failed job still keeps what it fetched (actions/cache saves only on
+      # success, which is why the first runs never had a cache). Players a
+      # runner can't fetch are skipped with a message; a wrong answer fails.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ejs-players
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}
       - run: cargo test --workspace
+        env:
+          ENCORE_EJS_PLAYERS: ${{ runner.temp }}/ejs-players
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/ejs-players
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}
       - run: git diff --exit-code src/lib/backend/bindings.ts
       - run: bun run check
       # The release job's update manifest (D24). Bundles here have no
@@ -89,9 +104,10 @@ jobs:
             [ -s "$f" ] && [ -s "$f.sig" ] || { echo "missing $f or its .sig, which release.yml uploads"; exit 1; }
             echo "ok: $f.sig"
           done
-      # Run the built artifact the way users get it: set up yt-dlp with the
-      # system's Python, resolve a song and decode it. This is the path the
-      # AppImage playback and no-audio-device bugs hid in.
+      # Run the built artifact the way users get it: solve the embedded
+      # challenge fixture offline (always required, D37), then resolve a song
+      # and decode it. This is the path the AppImage playback and
+      # no-audio-device bugs hid in.
       - name: Self-test the AppImage
         if: runner.os == 'Linux'
         run: scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage

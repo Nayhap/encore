@@ -11,7 +11,7 @@ use encore_core::queue::{QueueSource, Repeat};
 use encore_core::service::{LocalAudio, More};
 use encore_downloads::{DownloadManager, DownloadRemoved, DownloadsSnapshot, DownloadsStorage};
 use encore_player::{PlayerSnapshot, QueueSnapshot};
-use encore_resolver::RuntimeStatus;
+use encore_resolver::EngineStatus;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_specta::Event;
@@ -30,8 +30,8 @@ pub struct Bootstrap {
     pub auth: AuthState,
     pub player: PlayerSnapshot,
     pub queue: QueueSnapshot,
-    /// The player components (D22).
-    pub runtimes: RuntimeStatus,
+    /// The built-in player engine (D37).
+    pub engine: EngineStatus,
     /// Settings → Playback → "Send plays to YouTube history".
     pub report_history: bool,
     /// Something from startup the user should know (shown once).
@@ -81,7 +81,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
         auth: core.accounts.state(),
         player: core.player.snapshot(),
         queue: core.player.queue_snapshot(),
-        runtimes: core.resolver.runtimes().status(),
+        engine: core.resolver.engine_status(),
         report_history: core.player.reporting(),
         notice: core.take_startup_notice(),
         online: core.connectivity.online(),
@@ -97,50 +97,20 @@ pub async fn set_report_history(core: S<'_>, on: bool) -> Result<()> {
     Ok(())
 }
 
-fn setup_error(e: encore_resolver::SetupError) -> AppError {
-    AppError::new(encore_core::ErrorCode::Unsupported, e.message)
-}
-
-/// The player components, with the space they use measured.
+/// The built-in player engine (D37), for Settings → Playback.
 #[tauri::command]
 #[specta::specta]
-pub async fn runtimes_status(core: S<'_>) -> Result<RuntimeStatus> {
-    let rt = core.resolver.runtimes().clone();
-    Ok(tokio::task::spawn_blocking(move || rt.status_measured()).await.map_err(|_| AppError::internal("status"))?)
+pub async fn player_engine(core: S<'_>) -> Result<EngineStatus> {
+    Ok(core.resolver.engine_status())
 }
 
-/// The user approved the download: install (or, with `reinstall`, delete
-/// and install again) in the background. Progress arrives as
-/// `RuntimesEvent`s.
+/// Settings → Playback → Reset player cache: the player scripts and what
+/// was solved from them, and the resolved URLs. Fetched again when needed.
 #[tauri::command]
 #[specta::specta]
-pub async fn runtimes_install(core: S<'_>, reinstall: bool) -> Result<RuntimeStatus> {
-    let rt = core.resolver.runtimes().clone();
-    rt.approve().map_err(setup_error)?;
-    if reinstall {
-        core.resolver.stop_helpers().await;
-        rt.remove(true).await.map_err(setup_error)?;
-    }
-    rt.start();
-    Ok(rt.status())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn runtimes_cancel(core: S<'_>) -> Result<()> {
-    core.resolver.runtimes().cancel();
-    Ok(())
-}
-
-/// Delete the downloaded components to free the space. Playback asks for
-/// the setup again afterwards.
-#[tauri::command]
-#[specta::specta]
-pub async fn runtimes_remove(core: S<'_>) -> Result<RuntimeStatus> {
-    core.resolver.stop_helpers().await;
-    let rt = core.resolver.runtimes().clone();
-    rt.remove(false).await.map_err(setup_error)?;
-    Ok(rt.status_measured())
+pub async fn player_engine_reset(core: S<'_>) -> Result<EngineStatus> {
+    core.resolver.reset_player_cache();
+    Ok(core.resolver.engine_status())
 }
 
 #[tauri::command]

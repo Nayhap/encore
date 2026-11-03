@@ -252,8 +252,6 @@ function go(i: number, at = 0) {
   P.index = i;
   P.position = at;
   noteCycle();
-  // Downloaded songs need no player components (D22, D23).
-  if (!isLocal(P.entries[i]?.track.id) && !needsSetupBeforePlay()) return;
   P.playing = true;
   P.phase = "playing";
   tgen++;
@@ -453,98 +451,14 @@ if (!new URLSearchParams(location.search).has("empty")) {
   if (q.has("autoplayoff")) P.autoplay = false;
 }
 
-// ---------- player components (D22) ----------
-// Starts not installed so the setup screen can be reviewed: `?ready` starts
-// installed, `?setupfail` fails the first install at 40% (offline),
-// `?updating` starts with an update running in the background.
+// ---------- player engine (D37) ----------
+// Built in: nothing to set up. `?needsupdate` shows the notice Settings
+// gives when YouTube changed something only an update fixes.
 const q = new URLSearchParams(location.search);
-const MB = 1_000_000;
-const pins = [
-  { name: "Python", version: "3.13.18", dl: 25.3 * MB },
-  { name: "Deno", version: "2.9.8", dl: 38.8 * MB },
-  { name: "yt-dlp", version: "2026.10.26", dl: 3.4 * MB },
-];
-const DL = pins.reduce((a, p) => a + p.dl, 0);
-const rt = { approved: q.has("ready") || q.has("updating"), usable: q.has("ready") || q.has("updating"), ready: q.has("ready"), installing: false, failOnce: q.has("setupfail"), progress: null as T.SetupProgress | null, timer: 0, waiting: false };
-function rtStatus(measured = false): T.RuntimeStatus {
-  return {
-    supported: true,
-    approved: rt.approved,
-    ready: rt.ready,
-    usable: rt.usable,
-    installing: rt.installing,
-    progress: rt.progress,
-    components: pins.map((p) => ({ name: p.name, version: p.version, installed: rt.ready ? p.version : rt.usable ? (p.name === "yt-dlp" ? "2026.09.30" : p.version) : null, ready: rt.ready })),
-    downloadBytes: rt.ready ? 0 : rt.usable ? 3.4 * MB : DL,
-    diskBytes: 125 * MB,
-    usedBytes: measured && rt.usable ? 124.6 * MB : 0,
-    location: "~/Library/Application Support/app.encore.desktop/runtimes",
-    message: null,
-  };
+const engine = { player: "4efb8b2c/main" as string | null, notice: q.has("needsupdate") ? "YouTube changed how its songs play, and this version of Encore can't follow yet. Check for a newer one under Updates, below." : null };
+function engineStatus(): T.EngineStatus {
+  return { solver: "yt-dlp-ejs 0.8.0", engine: "quickjs-ng 0.16.2", extractor: "yt-dlp 2026.10.26 (b77c930)", player: engine.player, notice: engine.notice };
 }
-const rtEmit = () => h?.runtimes(rtStatus());
-function rtInstall() {
-  if (rt.installing) return;
-  rt.approved = true;
-  rt.installing = true;
-  const update = rt.usable;
-  const total = update ? 3.4 * MB : DL;
-  const p: T.SetupProgress = { phase: "downloading", update, component: null, downloaded: 0, downloadTotal: total, unpacked: 0, unpackTotal: 125 * MB, fraction: 0, error: null };
-  rt.progress = p;
-  let t = 0;
-  clearInterval(rt.timer);
-  rt.timer = window.setInterval(() => {
-    t += 0.1;
-    const dlSecs = update ? 1.5 : 7;
-    if (t < dlSecs) {
-      p.phase = "downloading";
-      p.downloaded = Math.min(total, (total * t) / dlSecs);
-      let acc = 0;
-      const cur = update ? pins[2] : (pins.find((x) => (acc += x.dl) >= (p.downloaded ?? 0)) ?? pins[2]);
-      p.component = `${cur.name} ${cur.version}`;
-      p.fraction = 0.7 * ((p.downloaded ?? 0) / total);
-      if (rt.failOnce && p.fraction > 0.28) {
-        rt.failOnce = false;
-        return rtFinish({ kind: "offline", message: "Encore couldn't connect to the internet. Check your connection and try again." });
-      }
-    } else if (t < dlSecs + 0.8) {
-      Object.assign(p, { phase: "verifying", component: null, downloaded: total, fraction: 0.72 });
-    } else if (t < dlSecs + 2.6) {
-      const f = (t - dlSecs - 0.8) / 1.8;
-      Object.assign(p, { phase: "unpacking", component: f < 0.35 ? "Python 3.13.18" : f < 0.85 ? "Deno 2.9.8" : "yt-dlp 2026.10.26", unpacked: (p.unpackTotal ?? 0) * f, fraction: 0.75 + 0.2 * f });
-    } else if (t < dlSecs + 3.6) {
-      Object.assign(p, { phase: "settingUp", component: null, fraction: 0.97 });
-    } else return rtFinish(null);
-    rt.progress = { ...p };
-    rtEmit();
-  }, 100);
-  rtEmit();
-}
-function rtFinish(err: T.SetupError | null) {
-  clearInterval(rt.timer);
-  rt.installing = false;
-  if (rt.progress) rt.progress = { ...rt.progress, phase: err ? (err.kind === "cancelled" ? "cancelled" : "failed") : "done", error: err, fraction: err ? rt.progress.fraction : 1 };
-  if (!err) {
-    rt.usable = rt.ready = true;
-  }
-  rtEmit();
-  if (!err && rt.waiting) {
-    rt.waiting = false;
-    if (P.index != null) go(P.index, P.position);
-  }
-}
-/** Like the Rust player: without the components, ask for the setup. */
-function needsSetupBeforePlay() {
-  if (rt.usable) return true;
-  P.playing = false;
-  P.phase = "paused";
-  rt.waiting = true;
-  publish(true);
-  anchor();
-  setTimeout(() => h?.setupNeeded({ trackId: P.entries[P.index ?? -1]?.track.id ?? null }), 50);
-  return false;
-}
-if (q.has("updating")) setTimeout(rtInstall, 1500);
 
 // ---------- updates (D24) ----------
 // An automatic check runs 3 s after start. `?update` finds Encore 0.5.0 and
@@ -809,25 +723,16 @@ export const mockApi: Api = {
       auth,
       player: snap(),
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
-      runtimes: rtStatus(),
+      engine: engineStatus(),
       online: dl.online,
       update: upStatus(),
     }, 10);
   },
-  runtimesStatus: async () => rtStatus(true),
-  async runtimesInstall(reinstall) {
-    if (reinstall) rt.usable = rt.ready = false;
-    rtInstall();
-    return rtStatus();
-  },
-  async runtimesCancel() {
-    if (rt.installing) rtFinish({ kind: "cancelled", message: "Setup was cancelled." });
-  },
-  async runtimesRemove() {
-    clearInterval(rt.timer);
-    Object.assign(rt, { approved: false, usable: false, ready: false, installing: false, progress: null });
-    rtEmit();
-    return rtStatus(true);
+  playerEngine: async () => engineStatus(),
+  async playerEngineReset() {
+    engine.player = null;
+    engine.notice = null;
+    return delay(engineStatus(), 200);
   },
   cacheInfo: async () => ({ audioBytes: 0, artBytes: 0, lyricsEntries: 0 }),
   cacheClear: async () => {},
@@ -973,7 +878,6 @@ export const mockApi: Api = {
     const cur = P.index != null ? P.entries[P.index] : null;
     if (!cur) return;
     if (!P.playing && P.position >= (cur.track.duration ?? 0)) P.position = 0;
-    if (!P.playing && !isLocal(cur.track.id) && !needsSetupBeforePlay()) return;
     if (!P.playing && P.phase === "error") return go(P.index!);
     P.playing = !P.playing;
     P.phase = P.playing ? "playing" : "paused";

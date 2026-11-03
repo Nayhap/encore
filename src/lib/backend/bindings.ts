@@ -8,20 +8,13 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	bootstrap: () => typedError<Bootstrap_Serialize, AppError_Serialize>(__TAURI_INVOKE("bootstrap")),
-	/**  The player components, with the space they use measured. */
-	runtimesStatus: () => typedError<RuntimeStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("runtimes_status")),
+	/**  The built-in player engine (D37), for Settings → Playback. */
+	playerEngine: () => typedError<EngineStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("player_engine")),
 	/**
-	 *  The user approved the download: install (or, with `reinstall`, delete
-	 *  and install again) in the background. Progress arrives as
-	 *  `RuntimesEvent`s.
+	 *  Settings → Playback → Reset player cache: the player scripts and what
+	 *  was solved from them, and the resolved URLs. Fetched again when needed.
 	 */
-	runtimesInstall: (reinstall: boolean) => typedError<RuntimeStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("runtimes_install", { reinstall })),
-	runtimesCancel: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("runtimes_cancel")),
-	/**
-	 *  Delete the downloaded components to free the space. Playback asks for
-	 *  the setup again afterwards.
-	 */
-	runtimesRemove: () => typedError<RuntimeStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("runtimes_remove")),
+	playerEngineReset: () => typedError<EngineStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("player_engine_reset")),
 	cacheInfo: () => typedError<CacheInfo, AppError_Serialize>(__TAURI_INVOKE("cache_info")),
 	cacheClear: (what: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("cache_clear", { what })),
 	home: () => typedError<Page_Serialize, AppError_Serialize>(__TAURI_INVOKE("home")),
@@ -320,8 +313,6 @@ export const events = {
 	playlistsEvent: makeEvent<PlaylistsEvent_Serialize, PlaylistsEvent_Deserialize>("playlists-event"),
 	presenceEvent: makeEvent<PresenceEvent, PresenceEvent>("presence-event"),
 	queueEvent: makeEvent<QueueEvent_Serialize, QueueEvent_Deserialize>("queue-event"),
-	runtimesEvent: makeEvent<RuntimesEvent_Serialize, RuntimesEvent_Deserialize>("runtimes-event"),
-	setupNeededEvent: makeEvent<SetupNeededEvent_Serialize, SetupNeededEvent_Deserialize>("setup-needed-event"),
 	signinEvent: makeEvent<SigninEvent_Serialize, SigninEvent_Deserialize>("signin-event"),
 	statsEvent: makeEvent<StatsEvent, StatsEvent>("stats-event"),
 	tasteEvent: makeEvent<TasteEvent_Serialize, TasteEvent_Deserialize>("taste-event"),
@@ -588,8 +579,8 @@ export type Bootstrap_Deserialize = {
 	auth: AuthState_Deserialize,
 	player: PlayerSnapshot_Deserialize,
 	queue: QueueSnapshot_Deserialize,
-	/**  The player components (D22). */
-	runtimes: RuntimeStatus_Deserialize,
+	/**  The built-in player engine (D37). */
+	engine: EngineStatus_Deserialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
 	/**  Something from startup the user should know (shown once). */
@@ -605,8 +596,8 @@ export type Bootstrap_Serialize = {
 	auth: AuthState_Serialize,
 	player: PlayerSnapshot_Serialize,
 	queue: QueueSnapshot_Serialize,
-	/**  The player components (D22). */
-	runtimes: RuntimeStatus_Serialize,
+	/**  The built-in player engine (D37). */
+	engine: EngineStatus_Serialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
 	/**  Something from startup the user should know (shown once). */
@@ -731,26 +722,6 @@ export type Collection_Serialize = {
 	privacy: Privacy | null,
 	/**  Extra shelves shown under an album ("Other versions", "More by"). */
 	related: Shelf_Serialize[],
-};
-
-export type ComponentInfo = ComponentInfo_Serialize | ComponentInfo_Deserialize;
-
-export type ComponentInfo_Deserialize = {
-	name: string,
-	/**  The version this Encore uses. */
-	version: string,
-	/**  The version installed and in use, if any. */
-	installed?: string | null,
-	ready: boolean,
-};
-
-export type ComponentInfo_Serialize = {
-	name: string,
-	/**  The version this Encore uses. */
-	version: string,
-	/**  The version installed and in use, if any. */
-	installed: string | null,
-	ready: boolean,
 };
 
 /**  The connection was lost, or came back. */
@@ -915,7 +886,7 @@ export type DownloadRemoved_Serialize = {
 export type DownloadState = "queued" | "downloading" | "ready" | "failed" | "removed";
 
 /**  Why downloads are waiting, when it isn't the user's pause. */
-export type DownloadWait = "offline" | "botCheck" | "stopped" | "diskFull" | "setupNeeded" | "elsewhere" | "locked";
+export type DownloadWait = "offline" | "botCheck" | "stopped" | "diskFull" | "elsewhere" | "locked";
 
 /**
  *  Downloads: counts, progress and waits (at most four a second). A newer
@@ -1015,6 +986,37 @@ export type DownloadsSummary_Serialize = {
 	online: boolean,
 	/**  Kept collections being checked for changes. */
 	syncing: ItemId[],
+};
+
+/**  The built-in engine, for Settings → Playback (D37). */
+export type EngineStatus = EngineStatus_Serialize | EngineStatus_Deserialize;
+
+/**  The built-in engine, for Settings → Playback (D37). */
+export type EngineStatus_Deserialize = {
+	/**  "yt-dlp-ejs 0.8.0" */
+	solver: string,
+	/**  "quickjs-ng 0.16.2" */
+	engine: string,
+	/**  "yt-dlp 2026.10.26 (b77c930)" */
+	extractor: string,
+	/**  The player script in use (`9fcf08e8/main`), once one was fetched. */
+	player?: string | null,
+	/**  Set while the last resolve failed for a reason only an update fixes. */
+	notice?: string | null,
+};
+
+/**  The built-in engine, for Settings → Playback (D37). */
+export type EngineStatus_Serialize = {
+	/**  "yt-dlp-ejs 0.8.0" */
+	solver: string,
+	/**  "quickjs-ng 0.16.2" */
+	engine: string,
+	/**  "yt-dlp 2026.10.26 (b77c930)" */
+	extractor: string,
+	/**  The player script in use (`9fcf08e8/main`), once one was fetched. */
+	player: string | null,
+	/**  Set while the last resolve failed for a reason only an update fixes. */
+	notice: string | null,
 };
 
 export type EntriesPage = EntriesPage_Serialize | EntriesPage_Deserialize;
@@ -1595,12 +1597,7 @@ export type PlayFailure = {
 	message: string,
 };
 
-export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown" | 
-/**
- *  The player components aren't installed yet (D22): not the song's
- *  fault, so it isn't skipped; the app offers the setup instead.
- */
-"setupNeeded";
+export type PlayFailureKind = "challenged" | "unavailable" | "sessionExpired" | "network" | "unknown";
 
 /**  `player:position`, a 2 Hz anchor (also right after seek/pause). */
 export type PlayerPositionEvent = PlayerPositionEvent_Serialize | PlayerPositionEvent_Deserialize;
@@ -1888,72 +1885,6 @@ export type QueueSplice_Serialize = {
 
 export type Repeat = "off" | "all" | "one";
 
-export type RuntimeStatus = RuntimeStatus_Serialize | RuntimeStatus_Deserialize;
-
-export type RuntimeStatus_Deserialize = {
-	/**  Encore has components for this system. */
-	supported: boolean,
-	/**  The user agreed to the download (updates follow without asking). */
-	approved: boolean,
-	/**  This Encore's versions are installed and in use. */
-	ready: boolean,
-	/**  Some working set is installed, so songs can play. */
-	usable: boolean,
-	installing: boolean,
-	progress?: SetupProgress_Deserialize | null,
-	components: ComponentInfo_Deserialize[],
-	/**  Still to download for this Encore's versions. */
-	downloadBytes: number | null,
-	/**  Expected size on disk of this Encore's versions. */
-	diskBytes: number | null,
-	/**  Measured size of the components folder (0 when not measured). */
-	usedBytes: number | null,
-	location: string,
-	/**  Why components aren't available here, when they aren't. */
-	message?: string | null,
-};
-
-export type RuntimeStatus_Serialize = {
-	/**  Encore has components for this system. */
-	supported: boolean,
-	/**  The user agreed to the download (updates follow without asking). */
-	approved: boolean,
-	/**  This Encore's versions are installed and in use. */
-	ready: boolean,
-	/**  Some working set is installed, so songs can play. */
-	usable: boolean,
-	installing: boolean,
-	progress: SetupProgress_Serialize | null,
-	components: ComponentInfo_Serialize[],
-	/**  Still to download for this Encore's versions. */
-	downloadBytes: number | null,
-	/**  Expected size on disk of this Encore's versions. */
-	diskBytes: number | null,
-	/**  Measured size of the components folder (0 when not measured). */
-	usedBytes: number | null,
-	location: string,
-	/**  Why components aren't available here, when they aren't. */
-	message: string | null,
-};
-
-/**
- *  The player components changed: install progress, done, failed, removed
- *  (D22).
- */
-export type RuntimesEvent = RuntimesEvent_Serialize | RuntimesEvent_Deserialize;
-
-/**
- *  The player components changed: install progress, done, failed, removed
- *  (D22).
- */
-export type RuntimesEvent_Deserialize = RuntimeStatus_Deserialize;
-
-/**
- *  The player components changed: install progress, done, failed, removed
- *  (D22).
- */
-export type RuntimesEvent_Serialize = RuntimeStatus_Serialize;
-
 /**  A saved queue as listed (the queue itself stays in Rust until restored). */
 export type SavedQueueInfo = SavedQueueInfo_Serialize | SavedQueueInfo_Deserialize;
 
@@ -2007,72 +1938,6 @@ export type SearchResults_Serialize = {
 	playlists: CollectionCard_Serialize[],
 	didYouMean: string | null,
 	cursor: string | null,
-};
-
-export type SetupError = {
-	kind: SetupErrorKind,
-	/**  A plain sentence for the user. */
-	message: string,
-};
-
-export type SetupErrorKind = "offline" | "network" | "disk" | "permission" | "corrupt" | "setup" | "unsupported" | "busy" | "cancelled";
-
-/**
- *  A song couldn't start because the player components aren't installed:
- *  the UI shows the setup.
- */
-export type SetupNeededEvent = SetupNeededEvent_Serialize | SetupNeededEvent_Deserialize;
-
-/**
- *  A song couldn't start because the player components aren't installed:
- *  the UI shows the setup.
- */
-export type SetupNeededEvent_Deserialize = {
-	trackId?: string | null,
-};
-
-/**
- *  A song couldn't start because the player components aren't installed:
- *  the UI shows the setup.
- */
-export type SetupNeededEvent_Serialize = {
-	trackId: string | null,
-};
-
-export type SetupPhase = 
-/**  Another Encore is installing; this one waits for it. */
-"waiting" | "downloading" | "verifying" | "unpacking" | "settingUp" | "done" | "failed" | "cancelled";
-
-export type SetupProgress = SetupProgress_Serialize | SetupProgress_Deserialize;
-
-export type SetupProgress_Deserialize = {
-	phase: SetupPhase,
-	/**  Replacing components that already worked (a quiet update). */
-	update: boolean,
-	/**  The component being worked on ("Python 3.13.18"). */
-	component?: string | null,
-	downloaded: number | null,
-	downloadTotal: number | null,
-	unpacked: number | null,
-	unpackTotal: number | null,
-	/**  Overall, 0 to 1. */
-	fraction: number | null,
-	error?: SetupError | null,
-};
-
-export type SetupProgress_Serialize = {
-	phase: SetupPhase,
-	/**  Replacing components that already worked (a quiet update). */
-	update: boolean,
-	/**  The component being worked on ("Python 3.13.18"). */
-	component: string | null,
-	downloaded: number | null,
-	downloadTotal: number | null,
-	unpacked: number | null,
-	unpackTotal: number | null,
-	/**  Overall, 0 to 1. */
-	fraction: number | null,
-	error: SetupError | null,
 };
 
 /**  A stretch of the recording present in both versions, in seconds. */

@@ -1,8 +1,8 @@
 //! `encore --self-test [VIDEO_ID] [--out FILE] [--strict]`: checks, without a
 //! window, the parts of Encore that depend on the machine it runs on: the
-//! data folder and database, the downloads folder, the audio output, the player components
-//! (installing them if needed, as the setup screen does) and, given a video
-//! id, resolving and decoding a stream.
+//! data folder and database, the downloads folder, the audio output, the
+//! built-in challenge solver (offline, always) and, given a video id,
+//! resolving and decoding a stream.
 //!
 //! It runs the installed artifact the way users get it (inside the AppImage,
 //! from the .app, from the installed .exe), which is where the AppImage
@@ -10,9 +10,10 @@
 //!
 //! Prints one JSON object (and writes it to `--out` if given, since Windows
 //! release builds have no console). Exit code 0 when everything needed for
-//! playback works. YouTube's bot checks and network failures while resolving
-//! are reported but don't fail the test unless `--strict` is given: CI
-//! runners are often refused by YouTube.
+//! playback works. The solver check needs no network and always counts
+//! (D37). YouTube's bot checks and network failures while resolving are
+//! reported but don't fail the test unless `--strict` is given: CI runners
+//! are often refused by YouTube.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 use encore_audio::{Engine, EngineEvent, HttpSpec, SourceSpec};
 use encore_core::service::{PlayFailureKind, StreamResolver};
 use encore_core::store::Store;
-use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
+use encore_resolver::{NativeResolver, ResolverConfig};
 use serde_json::{Value, json};
 
 use crate::core::Paths;
@@ -105,28 +106,21 @@ async fn check(video: Option<String>, strict: bool) -> Value {
         }
     };
 
-    // The player components (Python, Deno, yt-dlp), installed into the data
-    // folder the way the setup screen does it (D22), then the helper.
-    let rcfg = ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() };
-    let runtimes = Runtimes::new(rcfg.runtimes());
-    let t0 = Instant::now();
-    let setup = if runtimes.ready() { Ok(()) } else { runtimes.install().await.map_err(|e| e.message) };
-    let st = runtimes.status();
-    let comps: Vec<String> = st.components.iter().map(|c| format!("{} {}", c.name, c.installed.as_deref().unwrap_or("none"))).collect();
-    r["resolver"] = json!({ "ok": setup.is_ok(), "components": comps, "error": setup.as_ref().err(), "ms": t0.elapsed().as_millis() as u64 });
-    let resolver = YtDlpResolver::new(rcfg, runtimes);
-    if setup.is_err() {
+    // The challenge solver (D37): yt-dlp-ejs on the embedded QuickJS-ng,
+    // solving a player written for the test. No network; always required.
+    let check = encore_resolver::solver_self_check().await;
+    r["resolver"] = json!({
+        "ok": check.is_ok(),
+        "solver": format!("yt-dlp-ejs {}", encore_resolver::EJS_VERSION),
+        "engine": encore_resolver::ENGINE,
+        "extractor": format!("yt-dlp {} ({})", encore_resolver::YT_DLP_VERSION, encore_resolver::YT_DLP_COMMIT),
+        "ms": check.as_ref().ok(),
+        "error": check.as_ref().err(),
+    });
+    if check.is_err() {
         ok = false;
-    } else {
-        match resolver.health().await {
-            Ok(v) => r["resolver"]["helper"] = json!(v),
-            Err(e) => {
-                ok = false;
-                r["resolver"]["ok"] = json!(false);
-                r["resolver"]["error"] = json!(e.message);
-            }
-        }
     }
+    let resolver = NativeResolver::new(ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() });
 
     // A real stream: resolve, probe, decode.
     if let (Some(id), true) = (video, ok) {
@@ -141,9 +135,13 @@ async fn check(video: Option<String>, strict: bool) -> Value {
     r
 }
 
-async fn stream(resolver: &Arc<YtDlpResolver>, engine: Option<&Engine>, id: &str) -> Value {
+async fn stream(resolver: &Arc<NativeResolver>, engine: Option<&Engine>, id: &str) -> Value {
     let t0 = Instant::now();
-    let s = match resolver.resolve(id, None).await {
+    let ready = match resolver.resolve(id, None).await {
+        Ok(s) => resolver.ready(s, None).await,
+        e => e,
+    };
+    let s = match ready {
         Ok(s) => s,
         Err(f) => {
             let kind = match f.kind {
@@ -151,7 +149,6 @@ async fn stream(resolver: &Arc<YtDlpResolver>, engine: Option<&Engine>, id: &str
                 PlayFailureKind::Network => "network",
                 PlayFailureKind::Unavailable => "unavailable",
                 PlayFailureKind::SessionExpired => "sessionExpired",
-                PlayFailureKind::SetupNeeded => "setup",
                 PlayFailureKind::Unknown => "unknown",
             };
             return json!({ "ok": false, "kind": kind, "error": f.message });

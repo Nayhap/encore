@@ -30,10 +30,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             bootstrap,
-            runtimes_status,
-            runtimes_install,
-            runtimes_cancel,
-            runtimes_remove,
+            player_engine,
+            player_engine_reset,
             cache_info,
             cache_clear,
             home,
@@ -190,8 +188,6 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             SigninEvent,
             PlaylistsEvent,
             HistoryEvent,
-            RuntimesEvent,
-            SetupNeededEvent,
             DownloadsEvent,
             DownloadItemEvent,
             ConnectivityEvent,
@@ -263,10 +259,6 @@ fn forward_player_events(app: tauri::AppHandle, core: Arc<Core>) {
                 }
                 PlayerEvent::Notice(text) => {
                     let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&app);
-                }
-                PlayerEvent::SetupNeeded => {
-                    let track_id = core.player.snapshot().current.map(|c| c.track.id.0);
-                    let _ = SetupNeededEvent { track_id }.emit(&app);
                 }
                 PlayerEvent::SessionExpired => {
                     core.accounts.mark_expired("YouTube refused the signed-in stream.");
@@ -445,7 +437,6 @@ pub fn run() {
                 let _ = ConnectivityEvent { online: on }.emit(&h5);
             });
             if let Some(d) = &core.downloads {
-                d.set_setup_ready(core.resolver.runtimes().status().usable);
                 d.start();
             }
             // A damaged database was replaced (D11), and downloaded songs
@@ -466,30 +457,10 @@ pub fn run() {
             let updates = updates::Updates::new(handle.clone(), core.clone());
             app.manage(updates.clone());
             updates.start();
-            // Player components (D22): progress goes to the UI; a finished
-            // install starts the song that was waiting for it. Components the
-            // user already approved are updated (or finished) on launch
-            // without asking again; otherwise the UI offers the setup.
-            let (c2, h2) = (core.clone(), handle.clone());
-            let was_installing = std::sync::atomic::AtomicBool::new(false);
-            core.resolver.runtimes().on_change(move |st| {
-                let _ = RuntimesEvent(st.clone()).emit(&h2);
-                let before = was_installing.swap(st.installing, std::sync::atomic::Ordering::SeqCst);
-                if before && !st.installing && st.usable {
-                    c2.player.resume_after_setup();
-                }
-                if let Some(d) = &c2.downloads {
-                    d.set_setup_ready(st.usable);
-                }
-            });
-            let rt = core.resolver.runtimes().clone();
-            tauri::async_runtime::spawn(async move {
-                let st = rt.status();
-                tracing::info!(ready = st.ready, usable = st.usable, approved = st.approved, "player components");
-                if st.supported && st.approved && !st.ready {
-                    rt.start();
-                }
-            });
+            // D22's player components are no longer used (D37): remove them
+            // once, in the background, without touching anything else.
+            let paths = (core.paths.data.clone(), core.paths.cache.clone());
+            tauri::async_runtime::spawn_blocking(move || encore_resolver::cleanup::run(&paths.0, &paths.1));
             // macOS: closing the window hides it and playback continues; the
             // Dock icon brings it back (D15). Windows and Linux have no such
             // way back without a tray icon, so closing quits there.

@@ -168,11 +168,37 @@ impl InnerTube {
         }
         if st.visitor.is_none() {
             if let Some(v) = scrape(&body, "\"VISITOR_DATA\":\"") {
-                if v.len() < 200 {
+                // Visitor tokens are several hundred characters long now.
+                if v.len() < 2048 {
                     st.visitor = Some(v);
                 }
             }
         }
+    }
+
+    /// The visitor of this identity (scraped from music.youtube.com signed
+    /// out, the session's signed in). Not a secret; shared with the
+    /// resolver so the stream `/player` presents the same visitor (D37).
+    pub fn visitor_data(&self) -> Option<String> {
+        self.state.read().visitor.clone()
+    }
+
+    /// Who stream resolves go out as (D37): the session's cookies and
+    /// channel, its visitor, and a key that changes with the epoch, so a
+    /// sign-in or channel switch never gets the old identity's URLs. `None`
+    /// signed out or before a channel is picked.
+    pub fn resolve_auth(&self) -> Option<encore_core::service::ResolveAuth> {
+        let st = self.state.read();
+        let s = st.session.as_ref()?;
+        let ch = s.channel.as_ref()?;
+        Some(encore_core::service::ResolveAuth {
+            cookies: s.jar.records().to_vec(),
+            auth_user: ch.auth_user,
+            page_id: ch.page_id.clone(),
+            user_session_id: ch.user_session_id.clone(),
+            visitor_data: st.visitor.clone(),
+            key: format!("session:{}:{}:{}", self.epoch(), ch.auth_user, ch.page_id.as_deref().unwrap_or("")),
+        })
     }
 
     /// The current identity, to pin a sequence of requests to.

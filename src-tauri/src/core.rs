@@ -7,13 +7,13 @@ use std::time::Duration;
 use encore_audio::AudioCache;
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::queue::Queue;
-use encore_core::service::{MusicService, ResolveAuth};
+use encore_core::service::MusicService;
 use encore_core::store::{self, Recovery, Store};
 use encore_downloads::DownloadManager;
 use encore_lyrics::LyricsService;
 use encore_player::Player;
 use encore_player::plays::PlayObserver;
-use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
+use encore_resolver::{NativeResolver, ResolverConfig};
 use encore_ytm::account::Accounts;
 use encore_ytm::{InnerTube, YtMusic};
 use serde::de::DeserializeOwned;
@@ -49,7 +49,7 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
-        // Local (not roaming) data on Windows: the player components live here.
+        // Local (not roaming) data on Windows: downloads and the database live here.
         let data = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let cache = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop");
         let logs = if cfg!(target_os = "macos") {
@@ -75,7 +75,7 @@ pub struct Core {
     pub accounts: Arc<Accounts>,
     pub player: Arc<Player>,
     pub lyrics: Arc<LyricsService>,
-    pub resolver: Arc<YtDlpResolver>,
+    pub resolver: Arc<NativeResolver>,
     pub store: Arc<Store>,
     pub audio_cache: AudioCache,
     pub art: Arc<crate::art::ArtCache>,
@@ -104,11 +104,8 @@ struct SavedQueue {
 }
 
 pub fn auth_provider(it: Arc<InnerTube>) -> encore_player::AuthProvider {
-    Arc::new(move || {
-        let s = it.session()?;
-        let ch = s.channel.as_ref()?;
-        Some(ResolveAuth { cookies: s.jar.records().to_vec(), auth_user: ch.auth_user, page_id: ch.page_id.clone() })
-    })
+    // One snapshot per resolve, keyed by account, channel and epoch (D2).
+    Arc::new(move || it.resolve_auth())
 }
 
 impl Core {
@@ -127,8 +124,10 @@ impl Core {
         let ytm = Arc::new(YtMusic::new(it.clone()));
         let accounts = Accounts::new(ytm.clone(), encore_auth::store::session_store());
         let rcfg = ResolverConfig { data_dir: paths.data.clone(), cache_dir: paths.cache.clone() };
-        let runtimes = Runtimes::new(rcfg.runtimes());
-        let resolver = YtDlpResolver::new(rcfg, runtimes);
+        let resolver = NativeResolver::new(rcfg);
+        // Signed out, the stream `/player` presents encore-ytm's visitor (D37).
+        let visitor = it.clone();
+        resolver.set_visitor_source(Arc::new(move || visitor.visitor_data()));
         let audio_cache = AudioCache::new(paths.cache.join("audio"), encore_audio::cache::DEFAULT_LIMIT).map_err(|e| AppError::internal(format!("audio cache: {}", e.kind())))?;
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;
         // On unless turned off (it only ever reports for a signed-in account).
@@ -302,7 +301,8 @@ impl Core {
     ///    play log closes its open play with the time heard (≤ 2 s, D30);
     /// 3. downloads stop after the current range and let go of their
     ///    folder, without touching the user's pause (≤ 5 s);
-    /// 4. the yt-dlp helpers are killed and waited for, and none starts again.
+    /// 4. the resolver stops: a running challenge solve is interrupted and no
+    ///    resolve starts again (D37).
     ///
     /// The Windows installer path ends in `process::exit`, so all of this
     /// has to be done before `Update::install` is called.
@@ -318,14 +318,13 @@ impl Core {
             Some(d) => tokio::time::timeout(Duration::from_secs(5), d.quiesce()).await.is_ok(),
             None => true,
         };
-        self.resolver.runtimes().cancel();
-        let helpers = tokio::time::timeout(Duration::from_secs(3), self.resolver.shut_down()).await.is_ok();
-        tracing::info!(history, plays, downloads, helpers, ms = t0.elapsed().as_millis() as u64, "ready to exit");
+        let resolver = tokio::time::timeout(Duration::from_secs(3), self.resolver.shut_down()).await.is_ok();
+        tracing::info!(history, plays, downloads, resolver, ms = t0.elapsed().as_millis() as u64, "ready to exit");
         *done = true;
     }
 
     /// The exit didn't happen after all (an update failed to install):
-    /// downloads and the helpers carry on. Playback stays paused.
+    /// downloads and the resolver carry on. Playback stays paused.
     pub async fn abort_exit(&self) {
         let mut done = self.exit_prepared.lock().await;
         if !std::mem::take(&mut *done) {
