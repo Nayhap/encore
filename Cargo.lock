@@ -1448,6 +1448,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-analysis"
+version = "0.4.0"
+dependencies = [
+ "rustfft",
+ "symphonia",
+ "symphonia-adapter-libopus",
+]
+
+[[package]]
 name = "encore-audio"
 version = "0.4.0"
 dependencies = [
