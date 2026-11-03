@@ -5,7 +5,7 @@
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
 
-  let { item, size = 176 }: { item: ShelfItem; size?: number } = $props();
+  let { item, size = 176, fluid = false }: { item: ShelfItem; size?: number; fluid?: boolean } = $props();
 
   const info = $derived.by(() => {
     if (item.type === "artist") return { art: item.art, title: item.name, sub: item.subtitle || "Artist", round: true };
@@ -41,10 +41,10 @@
   }
 </script>
 
-<div class="tile" style:width="{size}px" oncontextmenu={menu} role="group" aria-label={info.title}>
+<div class="tile" class:fluid style:width={fluid ? null : `${size}px`} oncontextmenu={menu} role="group" aria-label={info.title}>
   <div class="frame">
     <button class="art" class:round={info.round} onclick={open} aria-label="Open {info.title}">
-      <Cover art={info.art} round={info.round} radius={10} size={size > 200 ? 544 : 226} label={info.title} />
+      <Cover art={info.art} round={info.round} radius={10} size={size > 200 || fluid ? 544 : 226} label={info.title} />
     </button>
     <button class="play" class:on={isCurrent && player.playing} onclick={play} aria-label={isCurrent && player.playing ? "Pause" : `Play ${info.title}`}>
       <Icon name={isCurrent && player.playing ? "pause" : "play"} size={18} />
@@ -60,6 +60,10 @@
   .tile {
     flex: none;
     scroll-snap-align: start;
+  }
+  /* In a grid: as wide as its column. */
+  .tile.fluid {
+    min-width: 0;
   }
   .frame {
     position: relative;

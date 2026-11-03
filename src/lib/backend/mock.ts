@@ -760,12 +760,15 @@ export const mockApi: Api = {
           { type: "link", title: "Charts", browseId: "FEmusic_charts", params: null, hue: null },
           { type: "link", title: "Moods & genres", browseId: "FEmusic_moods_and_genres", params: null, hue: null },
         ], "grid"),
-        shelf("New albums & singles", M.collections.filter((c) => c.kind === "album").map(item.c)),
+        { ...shelf("New albums & singles", M.collections.filter((c) => c.kind === "album").map(item.c)), more: { title: "New albums & singles", browseId: "FEmusic_new_releases_albums", params: null, hue: null } },
         shelf("Moods & genres", M.moods.map((m) => ({ type: "link" as const, title: m.name, browseId: "FEmusic_moods_and_genres_category", params: m.name, hue: m.h }))),
       ],
     }),
   browsePage: (b, p) =>
-    b.startsWith("MPAD")
+    // "Show all" on Explore's new releases: one shelf, albums and singles mixed.
+    b === "FEmusic_new_releases_albums"
+      ? delay({ title: "New albums & singles", chips: [], cursor: null, shelves: [shelf("", [...M.collections.filter((c) => c.kind === "album").map(item.c), ...singles.map(item.c)])] })
+      : b.startsWith("MPAD")
       ? delay({ title: M.artists.find((a) => `MPAD${a.id}` === b)?.name ?? null, chips: [], cursor: null, shelves: [shelf("", (p === "singles" ? singles.filter((c) => `MPAD${c.artistId}` === b) : M.collections.filter((c) => c.kind === "album" && `MPAD${c.artistId}` === b)).map(item.c), "grid")] })
       : delay({
       title: p ?? (b === "FEmusic_charts" ? "Charts" : b === "FEmusic_new_releases" ? "New releases" : "Moods & genres"),
