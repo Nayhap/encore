@@ -9,12 +9,19 @@
   import KeepButton from "$lib/components/KeepButton.svelte";
   import Status from "$lib/components/Status.svelte";
   import Artists from "./library/Artists.svelte";
+  import Bookmarks from "./library/Bookmarks.svelte";
   import Collections from "./library/Collections.svelte";
   import Songs from "./library/Songs.svelte";
 
-  type Filter = "Playlists" | "Albums" | "Artists" | "Songs";
-  const sections: Record<Filter, LibrarySection> = { Playlists: "playlists", Albums: "albums", Artists: "artists", Songs: "liked" };
-  let filter = $state<Filter>("Playlists");
+  type Remote = "Playlists" | "Albums" | "Artists" | "Songs";
+  // Bookmarks are Encore's own (D25): local, there signed out and offline too.
+  type Filter = Remote | "Bookmarks";
+  const sections: Record<Remote, LibrarySection> = { Playlists: "playlists", Albums: "albums", Artists: "artists", Songs: "liked" };
+  const filters: Filter[] = ["Playlists", "Albums", "Artists", "Songs", "Bookmarks"];
+  // The chip stays as it was when coming back from a bookmark or a list.
+  const last = sessionStorage.getItem("libFilter") as Filter | null;
+  let filter = $state<Filter>(last && filters.includes(last) ? last : "Playlists");
+  $effect(() => sessionStorage.setItem("libFilter", filter));
   let sort = $state<"recent" | "az">("recent");
   let layout = $state<"grid" | "list">((localStorage.getItem("libLayout") as "grid" | "list") ?? "grid");
   $effect(() => localStorage.setItem("libLayout", layout));
@@ -22,7 +29,7 @@
   let items = $state<ShelfItem[]>([]);
   let cursor = $state<string | null>(null);
   const page = new Resource<LibraryPage>(async () => {
-    const p = await call((a) => a.library(sections[filter]));
+    const p = await call((a) => a.library(sections[filter as Remote]));
     catalog.addItems(p.items);
     items = p.items;
     cursor = p.cursor;
@@ -33,6 +40,11 @@
     account.state.state;
     // A playlist was created, renamed or deleted.
     if (filter === "Playlists") playlists.rev;
+    if (filter === "Bookmarks") {
+      items = [];
+      cursor = null;
+      return;
+    }
     void page.reload();
   });
   // Keep loading pages so "Songs" and long lists are complete.
@@ -41,12 +53,13 @@
     if (cursor && !loadingMore) void more();
   });
   async function more() {
-    if (!cursor || items.length > 5000) return;
+    if (!cursor || items.length > 5000 || filter === "Bookmarks") return;
     loadingMore = true;
     const sec = sections[filter];
     try {
       const p = await call((a) => a.libraryMore(sec, cursor!));
-      if (sec !== sections[filter]) return;
+      const now = filter as Filter;
+      if (now === "Bookmarks" || sec !== sections[now]) return;
       catalog.addItems(p.items);
       items = [...items, ...p.items];
       cursor = p.cursor;
@@ -67,11 +80,13 @@
 
   <div class="bar">
     <div class="chips" role="group" aria-label="Show">
-      {#each ["Playlists", "Albums", "Artists", "Songs"] as const as f}
+      {#each filters as f}
         <button class="chip" aria-pressed={filter === f} onclick={() => (filter = f)}>{f}</button>
       {/each}
     </div>
-    {#if filter !== "Songs"}
+    {#if filter === "Bookmarks"}
+      <!-- Nothing to sort or lay out: newest first, by kind. -->
+    {:else if filter !== "Songs"}
       <div class="tools">
         <label class="sort">
           <span class="sr">Sort by</span>
@@ -91,7 +106,9 @@
     {/if}
   </div>
 
-  {#if !account.signedIn}
+  {#if filter === "Bookmarks"}
+    <Bookmarks />
+  {:else if !account.signedIn}
     <Status error={page.error ?? null} empty={page.error ? null : "Sign in to see your playlists, albums, artists and liked songs."} />
     {#if !page.error}<button class="pill primary" onclick={() => nav.go({ name: "settings" })}>Sign in</button>{/if}
   {:else}

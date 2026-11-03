@@ -52,6 +52,9 @@ tauri-plugin-single-instance = "2"
 # features: library tools (lane B)
 
 # features: saved (lane C)
+# Open and save sheets for folder covers and folder files, used from Rust
+# only (no JavaScript permission).
+tauri-plugin-dialog = "2"
 
 # features: taste and stats (lane D)
 

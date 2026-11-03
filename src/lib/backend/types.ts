@@ -79,6 +79,13 @@ export type PrivateSession = B.PrivateSession_Serialize;
 // features: library tools (lane B)
 
 // features: saved (lane C)
+export type Bookmark = B.Bookmark_Serialize;
+export type BookmarkKind = B.BookmarkKind;
+export type BookmarkTarget = B.BookmarkTarget_Serialize;
+export type PageRef = B.PageRef_Serialize;
+export type SavedQueueInfo = B.SavedQueueInfo_Serialize;
+export type Folder = B.Folder_Serialize;
+export type FolderItem = B.FolderItem_Serialize;
 
 // features: taste and stats (lane D)
 export type BlockKind = B.BlockKind;
