@@ -25,7 +25,7 @@ not depend on Tauri, so they can be tested and run from the command line.
    encore-player ── queue, engine, resolver, radio, preload
      ├─ encore-ytm        YouTube Music API client and parsers
      ├─ encore-auth       cookies, browser import, Keychain
-     ├─ encore-resolver   stream URLs via a managed yt-dlp + its runtimes
+     ├─ encore-resolver   stream URLs: yt-dlp's extractor in Rust, ejs on QuickJS
      ├─ encore-audio      decode and output
      ├─ encore-lyrics     lyrics sources, matching, cache
      └─ encore-core       shared types, queue model, storage
@@ -38,7 +38,7 @@ not depend on Tauri, so they can be tested and run from the command line.
 | `encore-core` | Domain types, the `MusicService` and `StreamResolver` traits, the queue, the SQLite store with its backups and the local data of `local` (bookmarks, folders, the play log, ...), the paced background lane for long lists (`paging`), artwork keys, log redaction. |
 | `encore-ytm` | YouTube Music's internal API (`WEB_REMIX`, plus `ANDROID_MUSIC` for lyrics). Typed parsers for its responses, continuations, likes, playlist management, history, song/video pairs, play reporting to history, account and channel listing. |
 | `encore-auth` | The cookie jar, the `SAPISIDHASH` authorization header (including brand channels), cookie readers for Chromium browsers, Firefox and Safari, and the Keychain session store. |
-| `encore-resolver` | Downloads, verifies and keeps the player components (Python, Deno, yt-dlp; D22), and runs the pinned yt-dlp on them as a long-lived helper. Cookies are passed per request in memory, never written to disk. Each URL is probed before playback. |
+| `encore-resolver` | Encore's own extractor (D37): yt-dlp's InnerTube clients, requests and fallbacks ported module for module (`base/` is `_base.py`, `video/` is `_video.py`, `jsc/` is `jsc/`), pinned in `upstream.toml`, and the unmodified yt-dlp-ejs solver on QuickJS-ng compiled in (`rquickjs`) for the `n` and signature challenges. Nothing to install. Cookies stay in memory. Each URL is probed before playback. Also removes D22's old components once. |
 | `encore-audio` | Symphonia (AAC, and Opus through libopus) decoding to cpal, with a lock-free ring buffer and resampling. Streams over HTTP ranges into a disk cache. |
 | `encore-player` | The controller. Owns the queue, drives the engine, resolves and preloads the next song, fetches radio for autoplay, and emits events. Its play observer writes every audible play to the local log. |
 | `encore-lyrics` | YouTube Music timed lyrics, then LRCLIB synced, then plain lyrics. Scores LRCLIB matches by title, artist and duration, and caches results. |
@@ -118,14 +118,17 @@ and lyrics and covers come from what was kept with the downloads.
 installs a newer Encore only when the user restarts from the UI or quits
 (D24). Every exit, with or without an update, goes through
 `Core::prepare_exit`: playback paused and saved, history settled, downloads
-and the yt-dlp helpers stopped.
+and the resolver stopped (a running challenge solve is interrupted).
 
 ## When YouTube changes things
 
 Requests and parsers fail loudly and specifically. A song that cannot be played is
-skipped with a visible reason, at most three times in a row. Stream resolution is behind
-the `StreamResolver` trait, so yt-dlp can be updated or replaced without touching the
-rest of the app.
+skipped with a visible reason, at most three times in a row. A failure only a newer Encore
+can fix (a player script the solver can't read, SABR-only formats) says so, in the song's
+message and in Settings → Playback. Stream resolution is behind the `StreamResolver`
+trait. Its code follows yt-dlp file by file, so a fix upstream maps onto one module:
+[upstream.md](upstream.md) is the procedure, `scripts/sync-upstream.sh` shows what changed
+since the pinned commit and refreshes the solver bundles.
 
 The numbered design decisions that code comments refer to, such as `(D6)`, are in
 [decisions.md](decisions.md).
