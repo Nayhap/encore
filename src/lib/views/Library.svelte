@@ -1,15 +1,16 @@
 <script lang="ts">
+  // The chips and the toolbar; each kind of list is its own component
+  // (./library).
   import { call, type CollectionCard, type LibraryPage, type LibrarySection, type ShelfItem, type Track } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
-  import { kindLabel } from "$lib/data";
   import { Resource } from "$lib/load.svelte";
-  import { account, collectionMenu, nav, newPlaylist, player, playlists, ui } from "$lib/state.svelte";
-  import Cover from "$lib/components/Cover.svelte";
+  import { account, nav, playlists } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import KeepButton from "$lib/components/KeepButton.svelte";
   import Status from "$lib/components/Status.svelte";
-  import Tile from "$lib/components/Tile.svelte";
-  import TrackTable from "$lib/components/TrackTable.svelte";
+  import Artists from "./library/Artists.svelte";
+  import Collections from "./library/Collections.svelte";
+  import Songs from "./library/Songs.svelte";
 
   type Filter = "Playlists" | "Albums" | "Artists" | "Songs";
   const sections: Record<Filter, LibrarySection> = { Playlists: "playlists", Albums: "albums", Artists: "artists", Songs: "liked" };
@@ -96,48 +97,11 @@
   {:else}
     <Status loading={page.loading && !items.length} error={page.error} onretry={() => page.reload()} empty={!page.loading && !items.length ? `No ${filter.toLowerCase()} in your library yet.` : null} />
     {#if filter === "Songs"}
-      {#if songs.length}<TrackTable tracks={songs} label="Liked music" collectionId="ytm:VLLM" />{/if}
+      {#if songs.length}<Songs {songs} />{/if}
     {:else if filter === "Artists"}
-      <div class="grid">
-        {#each sorted as a (a.type + ("id" in a ? a.id : ""))}
-          <Tile item={a} size={0} />
-        {/each}
-      </div>
-    {:else if layout === "grid"}
-      <div class="grid">
-        {#if filter === "Playlists"}
-          <button class="new" onclick={() => newPlaylist()}>
-            <span class="new-art"><Icon name="plus" size={30} stroke={1.5} /></span>
-            <span class="t">New playlist</span>
-          </button>
-        {/if}
-        {#each cols as c (c.id)}
-          <Tile item={c} size={0} />
-        {/each}
-      </div>
+      <Artists items={sorted} />
     {:else}
-      <ul class="list">
-        {#if filter === "Playlists"}
-          <li>
-            <button onclick={() => newPlaylist()}>
-              <span class="thumb new-thumb"><Icon name="plus" size={22} stroke={1.5} /></span>
-              <span class="txt"><span class="t ell">New playlist</span></span>
-            </button>
-          </li>
-        {/if}
-        {#each cols as c (c.id)}
-          <li>
-            <button onclick={() => nav.go({ name: "collection", id: c.id })} oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}>
-              <span class="thumb"><Cover art={c.art} radius={6} size={120} label={c.title} /></span>
-              <span class="txt">
-                <span class="t ell">{c.title}</span>
-                <span class="s ell">{c.subtitle || kindLabel[c.kind]}</span>
-              </span>
-              {#if player.source?.collectionId === c.id}<span class="playing">Playing</span>{/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <Collections {cols} {layout} playlists={filter === "Playlists"} />
     {/if}
     {#if loadingMore}<p class="loading">Loading more…</p>{/if}
   {/if}
@@ -195,83 +159,6 @@
   .seg button[aria-pressed="true"] {
     background: var(--hover);
     color: var(--text);
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-    gap: 28px 20px;
-  }
-  .grid :global(.tile) {
-    width: auto !important;
-  }
-  .new {
-    display: grid;
-    align-content: start;
-    gap: 10px;
-    text-align: left;
-  }
-  .new-art {
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    border-radius: 10px;
-    border: 1.5px dashed color-mix(in srgb, var(--text) 25%, transparent);
-    color: var(--mute);
-    transition: border-color 0.15s, color 0.15s;
-  }
-  .new:hover .new-art {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .t {
-    font-weight: 600;
-  }
-  .list {
-    list-style: none;
-    margin: 0 -8px;
-    padding: 0;
-  }
-  .list button {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    padding: 7px 8px;
-    border-radius: 9px;
-    text-align: left;
-  }
-  .list button:hover {
-    background: var(--hover);
-  }
-  .thumb {
-    width: 52px;
-    flex: none;
-  }
-  .new-thumb {
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    border-radius: 6px;
-    border: 1.5px dashed color-mix(in srgb, var(--text) 25%, transparent);
-    color: var(--mute);
-  }
-  .list button:hover .new-thumb {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .txt {
-    flex: 1;
-    display: grid;
-    min-width: 0;
-  }
-  .s {
-    font-size: 13px;
-    color: var(--mute);
-  }
-  .playing {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent);
   }
   .loading {
     margin-top: 16px;
