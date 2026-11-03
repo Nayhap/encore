@@ -848,7 +848,8 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         bail!("--report needs a connection; leave out --offline");
     }
     let resolver = cli_resolver(&svc);
-    let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop/audio");
+    // `$ENCORE_CACHE_DIR` keeps a test away from the running app's cache.
+    let cache_dir = std::env::var_os("ENCORE_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop")).join("audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
     let auth: encore_player::AuthProvider = Arc::new(move || encore_cli_auth(&it));
