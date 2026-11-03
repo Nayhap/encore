@@ -46,7 +46,7 @@ impl Plan {
         Plan { queue: list.into(), used, authenticated }
     }
 
-    pub fn next(&mut self) -> Option<String> {
+    pub fn pop_next(&mut self) -> Option<String> {
         self.queue.pop_front()
     }
 
@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     fn drain(p: &mut Plan) -> Vec<String> {
-        std::iter::from_fn(|| p.next()).collect()
+        std::iter::from_fn(|| p.pop_next()).collect()
     }
 
     #[test]
@@ -109,20 +109,20 @@ mod tests {
     #[test]
     fn an_age_gate_moves_embedded_up_and_asks_for_verification_signed_in() {
         let mut p = Plan::new(false, None);
-        assert_eq!(p.next().as_deref(), Some("tv_samsung"));
+        assert_eq!(p.pop_next().as_deref(), Some("tv_samsung"));
         p.after("tv_samsung", true, false);
         assert_eq!(drain(&mut p), ["web_embedded", "visionos", "tv"]);
 
         let mut p = Plan::new(true, None);
-        assert_eq!(p.next().as_deref(), Some("web_embedded"));
+        assert_eq!(p.pop_next().as_deref(), Some("web_embedded"));
         p.after("web_embedded", true, false);
-        assert_eq!(p.next().as_deref(), Some("web_creator"));
+        assert_eq!(p.pop_next().as_deref(), Some("web_creator"));
         p.after("tv_samsung", true, false);
         assert_eq!(drain(&mut p), ["tv_samsung", "tv"]);
 
         let mut p = Plan::new(true, Some("tv"));
-        p.next();
+        p.pop_next();
         p.after("tv", true, true);
-        assert!(p.next().is_none(), "an explicit client stays alone");
+        assert!(p.pop_next().is_none(), "an explicit client stays alone");
     }
 }

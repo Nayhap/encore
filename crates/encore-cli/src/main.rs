@@ -575,7 +575,7 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(svc.it.resolve_auth().ok_or_else(|| anyhow!("--auth session needs a signed-in session with a channel (encore-cli whoami)"))?)
                 }
             };
-            resolve(&svc, &ItemId::parse(&video_id).remote().to_string(), auth.as_ref(), client, diagnostics, j).await?;
+            resolve(&svc, ItemId::parse(&video_id).remote(), auth.as_ref(), client, diagnostics, j).await?;
         }
     }
     Ok(())

@@ -181,12 +181,11 @@ pub fn build_url(c: &Candidate, sig: Option<&str>, n: Option<&str>) -> Option<St
         let mut q = u.query_pairs_mut();
         q.clear();
         for (k, v) in &pairs {
-            if k == "n" {
-                if let Some(n) = n {
+            if k == "n"
+                && let Some(n) = n {
                     q.append_pair(k, n);
                     continue;
                 }
-            }
             q.append_pair(k, v);
         }
         if let Some(sig) = sig {

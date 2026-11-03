@@ -72,11 +72,10 @@ pub fn validate(request: &ChallengeRequest, results: ChallengeResults) -> Challe
     if data.len() != request.challenges.len() || !request.challenges.iter().all(|c| data.contains_key(c)) {
         return Err(format!("invalid {:?} output", request.kind));
     }
-    if request.kind == ChallengeType::N {
-        if let Some((c, _)) = data.iter().find(|(c, r)| r.ends_with(c.as_str())) {
+    if request.kind == ChallengeType::N
+        && let Some((c, _)) = data.iter().find(|(c, r)| r.ends_with(c.as_str())) {
             return Err(format!("n result is invalid for a challenge of {} characters", c.len()));
         }
-    }
     Ok(data)
 }
 

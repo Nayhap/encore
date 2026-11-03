@@ -88,8 +88,8 @@ impl PlayerJs {
     pub fn forget(&self, files_too: bool) {
         *self.id.lock() = None;
         *self.current.lock() = None;
-        if files_too {
-            if let Ok(rd) = std::fs::read_dir(&self.dir) {
+        if files_too
+            && let Ok(rd) = std::fs::read_dir(&self.dir) {
                 for e in rd.flatten() {
                     let p = e.path();
                     // Only our own files: `<hex id>-main.js`.
@@ -99,7 +99,6 @@ impl PlayerJs {
                     }
                 }
             }
-        }
     }
 
     async fn get_text(&self, url: &str) -> Result<String, PlayerJsError> {
@@ -119,11 +118,10 @@ impl PlayerJs {
     }
 
     async fn player_id(&self) -> Result<String, PlayerJsError> {
-        if let Some((id, at)) = self.id.lock().clone() {
-            if at.elapsed() < PLAYER_ID_TTL {
+        if let Some((id, at)) = self.id.lock().clone()
+            && at.elapsed() < PLAYER_ID_TTL {
                 return Ok(id);
             }
-        }
         let js = self.get_text(IFRAME_API).await?;
         let id = player_id_from_iframe_api(&js).filter(|i| valid_id(i)).ok_or_else(|| PlayerJsError::Missing("no player id in the iframe API".into()))?;
         *self.id.lock() = Some((id.clone(), Instant::now()));

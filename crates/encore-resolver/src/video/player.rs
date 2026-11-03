@@ -20,11 +20,10 @@ pub fn body(c: &InnertubeClient, video_id: &str, sts: Option<u32>, ytcfg: Option
         cpc["signatureTimestamp"] = json!(sts);
     }
     // web_embedded may need these; "no harm in including" them (2945).
-    if c.is_embedded() {
-        if let Some(f) = ytcfg.and_then(base::ytcfg::encrypted_host_flags) {
+    if c.is_embedded()
+        && let Some(f) = ytcfg.and_then(base::ytcfg::encrypted_host_flags) {
             cpc["encryptedHostFlags"] = json!(f);
         }
-    }
     let mut b = json!({
         "context": base::context(c, ytcfg),
         "videoId": video_id,

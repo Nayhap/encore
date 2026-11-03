@@ -397,12 +397,11 @@ impl NativeResolver {
         let key = Self::cache_key(video_id, &id, opts);
         let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
         let _g = lock.lock().await;
-        if let Some(c) = self.cache.lock().get(&key) {
-            if c.until > Instant::now() {
+        if let Some(c) = self.cache.lock().get(&key)
+            && c.until > Instant::now() {
                 diag.cached = true;
                 return Ok(c.stream.clone());
             }
-        }
         let mut last = None;
         for _ in 0..2 {
             if self.closed.load(Ordering::SeqCst) {
@@ -457,7 +456,7 @@ impl NativeResolver {
         let mut plan = video::plan::Plan::new(id.is_authenticated(), opts.client.as_deref());
         let mut causes: Vec<Cause> = Vec::new();
         let mut best: Option<Ready> = None;
-        while let Some(key) = plan.next() {
+        while let Some(key) = plan.pop_next() {
             let t0 = Instant::now();
             let Some(c) = base::client(&key) else {
                 causes.push(Cause::Refused(0));

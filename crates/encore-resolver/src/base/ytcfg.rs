@@ -38,11 +38,10 @@ pub fn fix(c: &InnertubeClient, ytcfg: &mut Value, authenticated: bool) {
         ytcfg["INNERTUBE_CONTEXT"]["thirdParty"] = c.innertube_context["thirdParty"].clone();
     }
     // yt-dlp issue 12563: not effective when logged in.
-    if c.key == "tv" && !authenticated {
-        if let Some(ci) = ytcfg["INNERTUBE_CONTEXT"]["client"]["configInfo"].as_object_mut() {
+    if c.key == "tv" && !authenticated
+        && let Some(ci) = ytcfg["INNERTUBE_CONTEXT"]["client"]["configInfo"].as_object_mut() {
             ci.remove("appInstallData");
         }
-    }
 }
 
 /// `encryptedHostFlags` of the embedded player's context config.
