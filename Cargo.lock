@@ -1548,6 +1548,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-discord"
+version = "0.4.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "encore-downloads"
 version = "0.4.0"
 dependencies = [
