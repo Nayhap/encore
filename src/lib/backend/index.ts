@@ -2,6 +2,7 @@
 // browser (`bun run dev`) it uses the mock backend so design work continues
 // without a session.
 import type * as T from "./types";
+import type { FeatureApis } from "./features/types";
 
 export * from "./types";
 
@@ -65,7 +66,9 @@ export interface Api {
   moreShelves(cursor: string): Promise<T.Page>;
   search(query: string, filter: T.SearchFilter | null): Promise<T.SearchResults>;
   suggestions(query: string): Promise<string[]>;
-  collection(id: string): Promise<T.Collection>;
+  /** `params` when the link carries them (an artist's "All songs"). */
+  collection(id: string, params?: string | null): Promise<T.Collection>;
+  /** The next page, in turn with playback and downloads (D10, D23). */
   collectionMore(cursor: string): Promise<T.EntriesPage>;
   artist(id: string): Promise<T.Artist>;
   library(section: T.LibrarySection): Promise<T.LibraryPage>;
@@ -74,7 +77,7 @@ export interface Api {
   playerSnapshot(): Promise<T.PlayerSnapshot>;
   queueSnapshot(): Promise<T.QueueSnapshot>;
   playTracks(tracks: T.Track[], start: number, source: T.QueueSource | null, shuffle: boolean): Promise<void>;
-  playCollection(id: string, start: number, shuffle: boolean): Promise<void>;
+  playCollection(id: string, start: number, shuffle: boolean, params?: string | null): Promise<void>;
   playTrack(track: T.Track): Promise<void>;
   startRadio(playlistId: string, label: string): Promise<void>;
   toggle(): Promise<void>;
@@ -153,6 +156,8 @@ export interface Api {
   setAutoUpdate(on: boolean): Promise<T.UpdateStatus>;
   /** URL for an art key at a given edge size. */
   artUrl(key: string, size: number): string;
+  /** The feature areas' calls, one object per area (./features). */
+  features: FeatureApis;
 }
 
 let impl: Promise<Api> | null = null;

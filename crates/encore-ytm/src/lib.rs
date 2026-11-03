@@ -6,7 +6,9 @@ pub mod history;
 pub mod pages;
 pub mod parse;
 pub mod playlists;
+pub mod releases;
 pub mod scrub;
+pub mod taste;
 pub mod tracking;
 
 use std::collections::HashMap;
@@ -37,6 +39,8 @@ enum CursorKind {
     },
     Radio { playlist_id: Option<String> },
     History,
+    /// An artist's release grid (D35).
+    Releases,
 }
 
 #[derive(Clone)]
@@ -94,6 +98,34 @@ impl RowTokens {
         self.map.lock().remove(id);
     }
 }
+
+/// "Not interested" tokens by video id (D36): in memory only, bound to the
+/// account epoch, kept a few hours.
+#[derive(Default)]
+struct Dismissals {
+    map: Mutex<HashMap<String, (String, u64, Instant)>>,
+}
+
+const DISMISSAL_TTL: Duration = Duration::from_secs(6 * 3600);
+
+impl Dismissals {
+    fn keep(&self, resp: &Value, epoch: u64) {
+        let found = taste::not_interested_tokens(resp);
+        if found.is_empty() {
+            return;
+        }
+        let mut m = self.map.lock();
+        m.retain(|_, r| r.2.elapsed() < DISMISSAL_TTL);
+        for (id, t) in found {
+            m.insert(id, (t, epoch, Instant::now()));
+        }
+    }
+    fn get(&self, video_id: &str, epoch: u64) -> Option<String> {
+        self.map.lock().get(video_id).filter(|r| r.1 == epoch && r.2.elapsed() < DISMISSAL_TTL).map(|r| r.0.clone())
+    }
+}
+
+static DISMISSALS: std::sync::LazyLock<Dismissals> = std::sync::LazyLock::new(Dismissals::default);
 
 const PAIR_TTL: Duration = Duration::from_secs(30 * 60);
 const NO_PAIR_TTL: Duration = Duration::from_secs(10 * 60);
@@ -316,6 +348,7 @@ impl MusicService for YtMusic {
     async fn home(&self, ctx: &RequestContext) -> Result<Page> {
         self.check(ctx)?;
         let v = self.browse("FEmusic_home", None).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         let p = pages::browse_page(&v).map_err(parse_err)?;
         Ok(self.page_with_cursor(p, ctx.epoch))
     }
@@ -323,6 +356,7 @@ impl MusicService for YtMusic {
     async fn explore(&self, ctx: &RequestContext) -> Result<Page> {
         self.check(ctx)?;
         let v = self.browse("FEmusic_explore", None).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         let p = pages::browse_page(&v).map_err(parse_err)?;
         Ok(self.page_with_cursor(p, ctx.epoch))
     }
@@ -333,6 +367,7 @@ impl MusicService for YtMusic {
             return Err(AppError::invalid("That page is not supported."));
         }
         let v = self.browse(browse_id, params).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         let p = pages::browse_page(&v).map_err(parse_err)?;
         Ok(self.page_with_cursor(p, ctx.epoch))
     }
@@ -341,6 +376,7 @@ impl MusicService for YtMusic {
         self.check(ctx)?;
         let c = self.cursors.take(cursor, ctx.epoch)?;
         let v = self.continue_browse("browse", &c.cont, json!({})).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         let p = pages::shelves_continuation(&v).map_err(parse_err)?;
         Ok(Page { title: None, shelves: p.value, chips: vec![], cursor: self.cursors.put(CursorKind::Shelves, p.cont, ctx.epoch) })
     }
@@ -385,6 +421,10 @@ impl MusicService for YtMusic {
     }
 
     async fn collection(&self, ctx: &RequestContext, id: &ItemId) -> Result<Collection> {
+        self.collection_at(ctx, id, None).await
+    }
+
+    async fn collection_at(&self, ctx: &RequestContext, id: &ItemId, params: Option<&str>) -> Result<Collection> {
         self.check(ctx)?;
         let mut bid = id.remote().to_string();
         if !(bid.starts_with("MPRE") || bid.starts_with("VL") || bid.starts_with("FE")) {
@@ -393,7 +433,7 @@ impl MusicService for YtMusic {
         if bid == "VLLM" {
             self.require_auth()?;
         }
-        let v = self.browse(&bid, None).await?;
+        let v = self.browse(&bid, params).await?;
         let p = pages::collection(&v, &ItemId::ytm(&bid)).map_err(parse_err)?;
         let n = p.value.entries.len();
         let mut c = p.value;
@@ -618,6 +658,7 @@ impl MusicService for YtMusic {
         self.check(ctx)?;
         self.require_auth()?;
         let v = self.browse("FEmusic_history", None).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         if parse::is_signed_out(&v) {
             return Err(AppError::session_expired());
         }
@@ -632,6 +673,7 @@ impl MusicService for YtMusic {
         let c = self.cursors.take(cursor, ctx.epoch)?;
         let CursorKind::History = c.kind else { return Err(AppError::invalid("Not a history cursor.")) };
         let v = self.continue_browse("browse", &c.cont, json!({})).await?;
+        DISMISSALS.keep(&v, ctx.epoch);
         let mut raw = history::history_continuation(&v).map_err(parse_err)?;
         // Stop on a repeated token or an empty page.
         if raw.groups.is_empty() || raw.cont.as_ref() == Some(&c.cont) {
@@ -715,6 +757,18 @@ impl MusicService for YtMusic {
         }
         let w = self.browse(&bid, None).await?;
         Ok(pages::plain_lyrics(&w, id))
+    }
+
+    // features: taste (lane D)
+    async fn not_interested(&self, ctx: &RequestContext, video_id: &str) -> Result<Option<MutationOutcome>> {
+        self.check(ctx)?;
+        let Some(token) = DISMISSALS.get(video_id, ctx.epoch).filter(|_| self.it.signed_in()) else { return Ok(None) };
+        let out = match self.it.post(Client::WebRemix, "feedback", json!({ "feedbackTokens": [token] }), &[]).await {
+            Ok(v) => history::feedback_outcome(&v),
+            Err(e) if e.code == ErrorCode::Network => MutationOutcome::OutcomeUnknown,
+            Err(e) => return Err(e),
+        };
+        Ok(Some(out))
     }
 }
 

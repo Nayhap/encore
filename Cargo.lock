@@ -1413,17 +1413,21 @@ dependencies = [
 
 [[package]]
 name = "encore"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "encore-analysis",
  "encore-audio",
  "encore-auth",
  "encore-core",
+ "encore-discord",
  "encore-downloads",
+ "encore-lastfm",
  "encore-lyrics",
  "encore-player",
  "encore-resolver",
+ "encore-wiki",
  "encore-ytm",
  "image",
  "libc",
@@ -1439,6 +1443,7 @@ dependencies = [
  "specta-typescript",
  "tauri",
  "tauri-build",
+ "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
@@ -1451,8 +1456,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-analysis"
+version = "0.5.0"
+dependencies = [
+ "rustfft",
+ "symphonia",
+ "symphonia-adapter-libopus",
+]
+
+[[package]]
 name = "encore-audio"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cpal",
  "hex",
@@ -1471,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "encore-auth"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -1500,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "encore-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1523,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "encore-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -1535,14 +1549,22 @@ dependencies = [
  "sha2 0.11.1",
  "specta",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "url",
  "uuid",
 ]
 
 [[package]]
+name = "encore-discord"
+version = "0.5.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "encore-downloads"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "encore-audio",
@@ -1562,8 +1584,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-lastfm"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "encore-core",
+ "hex",
+ "md-5",
+ "parking_lot 0.13.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "encore-lyrics"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "encore-core",
@@ -1577,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "encore-player"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "encore-audio",
@@ -1588,11 +1627,12 @@ dependencies = [
  "specta",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "encore-resolver"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -1616,8 +1656,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-wiki"
+version = "0.5.0"
+dependencies = [
+ "encore-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "unicode-normalization",
+ "url",
+]
+
+[[package]]
 name = "encore-ytm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "encore-auth",
@@ -3072,6 +3124,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4327,6 +4389,32 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "glib-sys",
+ "gobject-sys",
+ "gtk-sys",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "percent-encoding",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5587,6 +5675,48 @@ dependencies = [
  "serde_json",
  "tauri-utils",
  "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-dialog"
+version = "2.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce0fb9c2b6d34a9720627ed930ebc8af26f61e648695aecaeb03d5c33c5896f5"
+dependencies = [
+ "log",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tauri-plugin-fs",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "tauri-plugin-fs"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d58eb1d4984e535f47a642ffec09a2da6f5c18a12b5902d12126cb7626d628b"
+dependencies = [
+ "anyhow",
+ "dunce",
+ "glob",
+ "log",
+ "objc2-foundation",
+ "percent-encoding",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "tauri",
+ "tauri-plugin",
+ "tauri-utils",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+ "url",
 ]
 
 [[package]]

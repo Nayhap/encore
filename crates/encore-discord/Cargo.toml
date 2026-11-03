@@ -1,0 +1,10 @@
+[package]
+name = "encore-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Discord Rich Presence over the desktop client's local IPC (D31). Our own
+# few frames: no SDK, no network.
+[dependencies]
+serde_json.workspace = true

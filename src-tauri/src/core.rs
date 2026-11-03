@@ -8,10 +8,11 @@ use encore_audio::AudioCache;
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::queue::Queue;
 use encore_core::service::{MusicService, ResolveAuth};
-use encore_core::store::Store;
+use encore_core::store::{self, Recovery, Store};
 use encore_downloads::DownloadManager;
 use encore_lyrics::LyricsService;
 use encore_player::Player;
+use encore_player::plays::PlayObserver;
 use encore_resolver::{ResolverConfig, Runtimes, YtDlpResolver};
 use encore_ytm::account::Accounts;
 use encore_ytm::{InnerTube, YtMusic};
@@ -81,6 +82,12 @@ pub struct Core {
     /// `None` when downloads can't work here (`DOWNLOADS_OFF`).
     pub downloads: Option<Arc<DownloadManager>>,
     pub connectivity: Arc<crate::connectivity::Connectivity>,
+    /// Every play, as the local log records it (D30): lanes D and E follow it.
+    #[allow(dead_code)]
+    pub plays: Arc<PlayObserver>,
+    /// The feature areas' own state (`crate::features`).
+    #[allow(dead_code)]
+    pub features: crate::features::Features,
     #[allow(dead_code)]
     pub paths: Paths,
     /// A message from startup for the UI, and whether the UI is listening
@@ -163,8 +170,62 @@ impl Core {
                 }
             }
         };
-        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, downloads, connectivity, paths, startup_notice: parking_lot::Mutex::new((false, None)), exit_prepared: tokio::sync::Mutex::new(false) });
+        let plays = player.observe_plays(store.clone());
+        let core = Arc::new(Core {
+            ytm,
+            accounts,
+            player,
+            lyrics,
+            resolver,
+            store,
+            audio_cache,
+            art,
+            downloads,
+            connectivity,
+            plays,
+            features: Default::default(),
+            paths,
+            startup_notice: parking_lot::Mutex::new((false, None)),
+            exit_prepared: tokio::sync::Mutex::new(false),
+        });
+        core.keep_backups();
         Ok(core)
+    }
+
+    /// The daily backup of the database (D11): checked soon after launch,
+    /// then every hour, on a thread of its own.
+    fn keep_backups(&self) {
+        let store = self.store.clone();
+        let _ = std::thread::Builder::new().name("encore-backups".into()).spawn(move || {
+            std::thread::sleep(Duration::from_secs(20));
+            loop {
+                match store.backup_if_due() {
+                    Ok(Some(p)) => tracing::info!(backup = %p.display(), "database backed up"),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e.message, "couldn't back up the database"),
+                }
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        });
+    }
+
+    /// What to tell the user when this start replaced a damaged database;
+    /// `found` is how many downloaded songs were found again from their files.
+    pub fn recovery_notice(&self, found: usize) -> Option<String> {
+        let songs = if found == 1 { "1 downloaded song".to_string() } else { format!("{found} downloaded songs") };
+        match self.store.recovery() {
+            // The downloads index was lost on its own: as 0.4 said it (D23).
+            None => (found > 0).then(|| format!("Encore's database was damaged and replaced. It found your {songs} again; download playlists and albums again to keep them up to date.")),
+            Some(Recovery::Restored { made }) => {
+                let mut t = format!("Encore's database was damaged, so it was restored from a backup made {}. Anything you saved or changed since then is gone.", age(store::now() - made));
+                if found > 0 {
+                    t.push_str(&format!(" Encore also found {songs} newer than the backup."));
+                }
+                Some(t)
+            }
+            Some(Recovery::Fresh) if found > 0 => Some(format!("Encore's database was damaged and no backup of it worked, so it started a new one. It found your {songs} again; download playlists and albums again to keep them up to date. Your settings, bookmarks and listening stats are gone.")),
+            Some(Recovery::Fresh) => Some("Encore's database was damaged and no backup of it worked, so it started a new one. Your settings, bookmarks and listening stats are gone; your downloads and your YouTube Music library are not.".into()),
+        }
     }
 
     /// Show `text` once the UI is up (now, if it already is). Returns the
@@ -237,7 +298,8 @@ impl Core {
     /// never hangs on the network:
     /// 1. playback stops (paused, nothing loading starts later, no command
     ///    starts it) and the queue and position are saved now;
-    /// 2. the play being reported gets its last history ping (≤ 2 s);
+    /// 2. the play being reported gets its last history ping, and the local
+    ///    play log closes its open play with the time heard (≤ 2 s, D30);
     /// 3. downloads stop after the current range and let go of their
     ///    folder, without touching the user's pause (≤ 5 s);
     /// 4. the yt-dlp helpers are killed and waited for, and none starts again.
@@ -251,14 +313,14 @@ impl Core {
         }
         let t0 = std::time::Instant::now();
         self.player.shut_down();
-        let history = self.player.settle_history(Duration::from_secs(2)).await;
+        let (history, plays) = tokio::join!(self.player.settle_history(Duration::from_secs(2)), self.player.settle_plays(Duration::from_secs(2)));
         let downloads = match &self.downloads {
             Some(d) => tokio::time::timeout(Duration::from_secs(5), d.quiesce()).await.is_ok(),
             None => true,
         };
         self.resolver.runtimes().cancel();
         let helpers = tokio::time::timeout(Duration::from_secs(3), self.resolver.shut_down()).await.is_ok();
-        tracing::info!(history, downloads, helpers, ms = t0.elapsed().as_millis() as u64, "ready to exit");
+        tracing::info!(history, plays, downloads, helpers, ms = t0.elapsed().as_millis() as u64, "ready to exit");
         *done = true;
     }
 
@@ -321,6 +383,18 @@ impl Core {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+/// "6 hours ago", "yesterday", "3 days ago".
+fn age(secs: i64) -> String {
+    let h = secs.max(0) / 3600;
+    match h {
+        0 => "less than an hour ago".into(),
+        1 => "an hour ago".into(),
+        2..=23 => format!("{h} hours ago"),
+        24..=47 => "yesterday".into(),
+        _ => format!("{} days ago", h / 24),
     }
 }
 

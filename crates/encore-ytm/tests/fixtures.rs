@@ -352,3 +352,66 @@ fn signed_player_answer_has_tracking() {
     assert_eq!(t.watchtime.as_ref().map(|u| u.path()), Some("/api/stats/watchtime"));
     assert_eq!(t.schedule.due(3), 70.0);
 }
+
+// ---------- an artist's releases and community playlists (D35) ----------
+
+#[test]
+fn artist_release_links_carry_their_params() {
+    let a = pages::artist(&fx("artist"), &ItemId::ytm("UCRr1xG_2WIDs18a6cIiCxeA")).unwrap().value;
+    let links: Vec<&PageLink> = a.shelves.iter().filter_map(|s| s.more.as_ref()).filter(|l| l.browse_id.starts_with("MPAD")).collect();
+    assert_eq!(links.len(), 2, "albums and singles");
+    assert!(links.iter().all(|l| l.params.is_some()));
+    assert_ne!(links[0].params, links[1].params, "each shelf has its own params");
+}
+
+#[test]
+fn release_grid_parses_albums_with_years() {
+    let p = pages::releases(&fx("discography")).unwrap();
+    assert_eq!(p.value.len(), 11);
+    assert!(p.value.iter().all(|c| c.kind == CollectionKind::Album && c.id.remote().starts_with("MPRE")));
+    assert!(p.value.iter().all(|c| c.year.is_some() && c.art.is_some()), "{:?}", p.value.iter().map(|c| (&c.title, c.year)).collect::<Vec<_>>());
+    assert!(p.value.iter().any(|c| c.title == "Random Access Memories"));
+    assert!(p.cont.is_none(), "this artist's list fits one page");
+}
+
+#[test]
+fn release_grid_tells_singles_from_eps() {
+    let p = pages::releases(&fx("discography_singles")).unwrap().value;
+    assert_eq!(p.len(), 26);
+    assert!(p.iter().all(|c| matches!(c.kind, CollectionKind::Single | CollectionKind::Ep)));
+    assert!(p.iter().any(|c| c.kind == CollectionKind::Single));
+    assert!(p.iter().all(|c| c.year.is_some()));
+}
+
+#[test]
+fn release_grid_continues_both_ways() {
+    let p = pages::releases_continuation(&fx("releases_continuation_synthetic")).unwrap();
+    assert_eq!(p.value.len(), 3);
+    assert_eq!(p.cont, Some(Cont::Query("SCRUBBED_CONTINUATION".into())));
+    // New style: appended items ending in a continuation item.
+    let items = fx("releases_continuation_synthetic")["continuationContents"]["gridContinuation"]["items"].clone();
+    let mut list = items.as_array().unwrap().clone();
+    list.push(serde_json::json!({ "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "NEXT" } } } }));
+    let v = serde_json::json!({ "onResponseReceivedActions": [{ "appendContinuationItemsAction": { "continuationItems": list } }] });
+    let p = pages::releases_continuation(&v).unwrap();
+    assert_eq!(p.value.len(), 3);
+    assert_eq!(p.cont, Some(Cont::Body("NEXT".into())));
+    // A grid that ends with a continuation item on its first page.
+    let mut first = fx("discography");
+    let grid = &mut first["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"][0]["gridRenderer"]["items"];
+    grid.as_array_mut().unwrap().push(serde_json::json!({ "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "MORE" } } } }));
+    let p = pages::releases(&first).unwrap();
+    assert_eq!(p.value.len(), 11);
+    assert_eq!(p.cont, Some(Cont::Body("MORE".into())));
+}
+
+#[test]
+fn community_playlist_search_lists_playlists() {
+    let p = pages::search(&fx("search_community"), "daft punk").unwrap();
+    let r = p.value;
+    assert!(r.playlists.len() >= 10, "{}", r.playlists.len());
+    assert!(r.playlists.iter().all(|c| c.kind == CollectionKind::Playlist && c.id.remote().starts_with("VL")));
+    assert!(r.playlists.iter().all(|c| !c.title.is_empty() && c.art.is_some()));
+    assert!(r.songs.is_empty() && r.albums.is_empty());
+    assert!(p.cont.is_some());
+}

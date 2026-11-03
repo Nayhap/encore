@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "$lib/state.svelte";
+  import { keyLabels, ui } from "$lib/state.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
@@ -60,7 +60,9 @@
     ["D", "Download the current song"],
     ["F", "Full-screen lyrics"],
     ["↑ ↓", "Volume"],
+    ...keyLabels(),
     [mod("K"), "Search and commands"],
+    [mod("F"), "Find in a list"],
     [mod("\\"), "Show or hide now playing panel"],
     [`${mod("[")} ${mod("]")}`, "Back or forward"],
   ];
@@ -70,6 +72,10 @@
   <div class="catch" role="presentation" onmousedown={() => (ui.menu = null)} oncontextmenu={(e) => { e.preventDefault(); ui.menu = null; }}></div>
   <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{pos.x}px" style:top="{pos.y}px" onkeydown={menuKey}>
     {#each ui.menu.items as it}
+      {#if it.sep}
+        <div class="sep" role="separator"></div>
+        {#if typeof it.sep === "string"}<div class="head" aria-hidden="true">{it.sep}</div>{/if}
+      {/if}
       {#if it.disabled}
         <!-- Not available now: still focusable, and says why when chosen. -->
         <button role="menuitem" class="off" aria-disabled="true" title={it.disabled} onclick={() => { ui.menu = null; ui.say(it.disabled!); }}>
@@ -77,9 +83,10 @@
           <span>{it.label}</span>
         </button>
       {:else}
-        <button role="menuitem" class:danger={it.danger} onclick={() => { ui.menu = null; it.run(); }}>
+        <button role="menuitem" class:danger={it.danger} aria-haspopup={it.more ? "menu" : undefined} onclick={() => { ui.menu = null; it.run(); }}>
           {#if it.icon}<Icon name={it.icon} size={16} />{/if}
           <span>{it.label}</span>
+          {#if it.more}<i class="chev"><Icon name="right" size={14} /></i>{/if}
         </button>
       {/if}
     {/each}
@@ -120,8 +127,8 @@
       {#if ui.toast.level === "info"}<Icon name="check" size={16} />{/if}
       <span>{ui.toast.text}</span>
       {#if ui.toast.action}
-        {@const act = ui.toast.action}
-        <button class="toast-act" onclick={() => ((ui.toast = null), act.run())}>{act.label}</button>
+        <!-- The action is read before the toast goes (it is null after). -->
+        <button class="toast-act" onclick={() => { const run = ui.toast?.action?.run; ui.toast = null; run?.(); }}>{ui.toast.action.label}</button>
       {/if}
       {#if ui.toast.level !== "info"}
         <button class="toast-x" aria-label="Dismiss" onclick={() => (ui.toast = null)}><Icon name="x" size={14} /></button>
@@ -140,6 +147,8 @@
     position: fixed;
     z-index: 61;
     min-width: 220px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
     padding: 5px;
     border-radius: 12px;
     background: var(--raise);
@@ -176,6 +185,32 @@
   .menu button.danger:hover,
   .menu button.danger:focus-visible {
     background: hsl(0 70% 55% / 0.14);
+  }
+  .menu button span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+  .chev {
+    display: grid;
+    margin-right: -4px;
+    opacity: 0.7;
+  }
+  .sep {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--line);
+  }
+  .head {
+    padding: 4px 10px 3px;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--dim);
   }
   .menu button.off {
     color: var(--dim);

@@ -310,3 +310,13 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+
+/* Cover ambience (D27): how strongly the blurred cover shows behind now
+   playing and full-screen lyrics. */
+:root,
+:root[data-theme="dark"] {
+  --wash-alpha: 0.5;
+}
+:root[data-theme="light"] {
+  --wash-alpha: 0.42;
+}

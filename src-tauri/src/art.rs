@@ -2,6 +2,9 @@
 //! size/MIME limits, disk LRU, dominant hue computed once. The same cached
 //! file feeds macOS Now Playing. Covers of downloaded songs are kept apart,
 //! out of the LRU, and answer every size when the network can't (D23).
+//! Covers the user chose for folders are local art (D34): checked and
+//! re-encoded once into `<app data>/covers`, served under keys of their own,
+//! never fetched and never through the remote allow-list.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +19,10 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_000_000;
 const CACHE_LIMIT: u64 = 256 * 1024 * 1024;
 const SIZES: [u32; 4] = [120, 226, 544, 1080];
+/// A chosen picture may be a large photo; what is kept is one small square.
+const LOCAL_MAX_BYTES: u64 = 25 * 1024 * 1024;
+const LOCAL_MAX_PIXELS: u64 = 64_000_000;
+const LOCAL_EDGE: u32 = 640;
 
 type HueHook = Box<dyn Fn(&str, u16, u16) + Send + Sync>;
 
@@ -103,6 +110,9 @@ impl ArtCache {
 
     /// The file for a key: the cached one, else a downloaded song's cover.
     pub fn path_for(&self, key: &str, size: u32) -> Option<PathBuf> {
+        if art::is_local_key(key) {
+            return Some(local_path(&local_dir(), key));
+        }
         if !Self::valid_key(key) {
             return None;
         }
@@ -129,6 +139,9 @@ impl ArtCache {
 
     /// Bytes and MIME type for an art key at (at least) `size` pixels.
     pub async fn get(&self, key: &str, size: u32) -> Result<(Vec<u8>, &'static str), String> {
+        if art::is_local_key(key) {
+            return self.get_local(key).await;
+        }
         if !Self::valid_key(key) {
             return Err("bad art key".into());
         }
@@ -211,6 +224,37 @@ impl ArtCache {
         Ok((b.to_vec(), mime))
     }
 
+    /// A local cover: one size for every request, its hue sent once a run.
+    async fn get_local(&self, key: &str) -> Result<(Vec<u8>, &'static str), String> {
+        let b = tokio::fs::read(local_path(&local_dir(), key)).await.map_err(|_| "no such cover".to_string())?;
+        let mime = mime_of(&b).ok_or("cover is not an image")?;
+        let first = LOCAL_HUES.get_or_init(Default::default).lock().insert(key.to_string());
+        if first {
+            let bytes = b.clone();
+            if let Some((h1, h2)) = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten()
+                && let Some(f) = self.on_hue.lock().as_ref()
+            {
+                f(key, h1, h2);
+            }
+        }
+        Ok((b, mime))
+    }
+
+    /// Make a local cover from a picture the user chose: checked to be a
+    /// JPEG, PNG or WebP of a sane size, cropped to a square and saved as a
+    /// new JPEG (nothing else of the original is kept). Returns its key.
+    /// Blocking: call it off the async runtime.
+    pub fn import_local(&self, file: &std::path::Path) -> Result<String, String> {
+        import_local_into(&local_dir(), file)
+    }
+
+    /// Delete a local cover's file (its folder no longer uses it).
+    pub fn remove_local(&self, key: &str) {
+        if art::is_local_key(key) {
+            let _ = std::fs::remove_file(local_path(&local_dir(), key));
+        }
+    }
+
     fn evict(&self) {
         let Ok(rd) = std::fs::read_dir(&self.dir) else { return };
         let mut v: Vec<(PathBuf, u64, SystemTime)> = rd.flatten().filter_map(|e| e.metadata().ok().map(|m| (e.path(), m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)))).collect();
@@ -237,6 +281,55 @@ impl ArtCache {
             }
         }
     }
+}
+
+static LOCAL_HUES: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+/// `<app data>/covers`, beside the database: durable, unlike the art cache.
+fn local_dir() -> PathBuf {
+    static D: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    D.get_or_init(|| crate::core::Paths::new().data.join("covers")).clone()
+}
+
+fn local_path(dir: &std::path::Path, key: &str) -> PathBuf {
+    dir.join(format!("{key}.jpg"))
+}
+
+fn import_local_into(dir: &std::path::Path, file: &std::path::Path) -> Result<String, String> {
+    const NOT_IMAGE: &str = "That file isn't a picture Encore can use. Choose a JPEG, PNG or WebP image.";
+    const UNREADABLE: &str = "Encore couldn't open that file.";
+    const UNSAVED: &str = "Encore couldn't save that picture. Check that the disk isn't full.";
+    let len = std::fs::metadata(file).map_err(|_| UNREADABLE.to_string())?.len();
+    if len > LOCAL_MAX_BYTES {
+        return Err("That picture is too large. Choose one under 25 MB.".into());
+    }
+    let b = std::fs::read(file).map_err(|_| UNREADABLE.to_string())?;
+    mime_of(&b).ok_or(NOT_IMAGE)?;
+    let reader = || image::ImageReader::new(std::io::Cursor::new(&b)).with_guessed_format().map_err(|_| NOT_IMAGE.to_string());
+    let (w, h) = reader()?.into_dimensions().map_err(|_| NOT_IMAGE.to_string())?;
+    if (w as u64) * (h as u64) > LOCAL_MAX_PIXELS || w < 16 || h < 16 {
+        return Err("That picture is too large or too small. Choose another one.".into());
+    }
+    let img = reader()?.decode().map_err(|_| NOT_IMAGE.to_string())?;
+    let side = w.min(h);
+    let square = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    let edge = side.min(LOCAL_EDGE);
+    let rgb = square.resize_exact(edge, edge, image::imageops::FilterType::Lanczos3).to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88).encode_image(&rgb).map_err(|_| UNSAVED.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|_| UNSAVED.to_string())?;
+    let key = art::new_local_key();
+    let path = local_path(dir, &key);
+    let tmp = path.with_extension("part");
+    std::fs::write(&tmp, &out).map_err(|_| UNSAVED.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path).map_err(|_| UNSAVED.to_string())?;
+    Ok(key)
 }
 
 /// Parse `art://localhost/<key>?s=<size>` (or `http://art.localhost/…`).
@@ -277,6 +370,32 @@ mod tests {
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
         let (h1, _) = hues(buf.get_ref()).unwrap();
         assert!((215..=235).contains(&h1), "{h1}");
+    }
+
+    #[test]
+    fn local_covers_are_checked_and_re_encoded() {
+        let dir = std::env::temp_dir().join(format!("encore-covers-{}", std::process::id()));
+        let src = dir.join("in");
+        std::fs::create_dir_all(&src).unwrap();
+        let mut img = image::RgbImage::new(300, 200);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([200, 40, 90]);
+        }
+        let png = src.join("a.png");
+        img.save(&png).unwrap();
+        let key = import_local_into(&dir, &png).unwrap();
+        assert!(art::is_local_key(&key));
+        let out = std::fs::read(local_path(&dir, &key)).unwrap();
+        assert_eq!(mime_of(&out), Some("image/jpeg"));
+        let back = image::load_from_memory(&out).unwrap();
+        assert_eq!((back.width(), back.height()), (200, 200), "cropped to a square, never enlarged");
+        let fake = src.join("b.png");
+        std::fs::write(&fake, b"\x89PNG not really").unwrap();
+        assert!(import_local_into(&dir, &fake).is_err());
+        let text = src.join("c.txt");
+        std::fs::write(&text, b"hello").unwrap();
+        assert!(import_local_into(&dir, &text).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

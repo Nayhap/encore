@@ -1,11 +1,14 @@
 //! Encore core: domain types, the `MusicService` trait, the queue, storage
-//! (with the downloads index), artwork keys and secret redaction. No Tauri,
-//! no network.
+//! (with the downloads index and the local data of `local`), the paced
+//! background lane for long lists, artwork keys and secret redaction. No
+//! Tauri, no network.
 
 pub mod art;
 pub mod downloads;
 pub mod error;
+pub mod local;
 pub mod model;
+pub mod paging;
 pub mod queue;
 pub mod redact;
 pub mod service;

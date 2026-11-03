@@ -1,7 +1,9 @@
 <script lang="ts">
+  import type { Folder } from "$lib/backend";
   import { kindLabel } from "$lib/data";
-  import { account, collectionMenu, downloads, nav, newPlaylist, player, playlists, ui, updates, type View } from "$lib/state.svelte";
+  import { account, collectionMenu, downloads, fileIn, folderMenu, importFolder, moveInFolder, nav, needsOnline, newFolder, newPlaylist, player, playlists, saved, setCollapsed, ui, unfile, updates, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import FolderCover from "./saved/FolderCover.svelte";
   import { isMac, mod } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
@@ -19,9 +21,76 @@
     account.state.state;
     void playlists.load();
   });
-  const pinned = $derived(playlists.list);
+  // Folders are Encore's own (D34), there signed out too; each account has its own.
+  $effect(() => {
+    account.state.state;
+    void saved.load();
+  });
+  // Lists filed in a folder show inside it, not again below.
+  const pinned = $derived.by(() => {
+    const filed = saved.filed;
+    return playlists.list.filter((c) => !filed.has(c.id));
+  });
   const isActive = (v: View) => nav.view.name === v.name;
   const isOpen = (id: string) => nav.view.name === "collection" && nav.view.id === id;
+  const isFolderOpen = (id: string) => nav.view.name === "folder" && nav.view.id === id;
+  const itemsText = (n: number) => (n === 1 ? "1 item" : n ? `${n} items` : "empty");
+
+  // The narrow rail shows covers and icons only: names move to tooltips
+  // and accessible names, which the wide sidebar doesn't need.
+  let compact = $state(false);
+  $effect(() => {
+    const mq = matchMedia("(max-width: 1000px)");
+    compact = mq.matches;
+    const on = () => (compact = mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  });
+  const tip = (s: string) => (compact ? s : undefined);
+  // In the rail the update dot needs its words too.
+  const settingsTip = $derived(updates.ready ? `Settings · Encore ${updates.version} is ready to install` : "Settings");
+
+  function addMenu(e: MouseEvent) {
+    ui.openMenu(e, [
+      { label: "New playlist…", icon: "plus", disabled: !account.signedIn ? "Sign in to create playlists." : needsOnline("create a playlist"), run: () => newPlaylist() },
+      { label: "New folder…", icon: "folder", run: () => newFolder() },
+      { label: "Import folder…", icon: "download", run: () => void importFolder() },
+    ]);
+  }
+
+  // Drag a list onto a folder to file it there, within a folder to order
+  // it, onto the loose lists to take it out again.
+  const DRAG = "application/x-encore-list";
+  let dragging = $state<{ id: string; from: Folder | null } | null>(null);
+  let over = $state<string | null>(null);
+
+  function start(e: DragEvent, id: string, from: Folder | null) {
+    dragging = { id, from };
+    e.dataTransfer?.setData(DRAG, id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+  function end() {
+    dragging = null;
+    over = null;
+  }
+  function hover(e: DragEvent, key: string) {
+    if (!dragging) return;
+    e.preventDefault();
+    over = key;
+  }
+  function dropOnFolder(f: Folder, before: string | null = null) {
+    const d = dragging;
+    end();
+    if (!d) return;
+    if (d.from?.id === f.id) {
+      if (before !== d.id) void moveInFolder(f, d.id, before);
+    } else void fileIn(f, d.id);
+  }
+  function dropLoose() {
+    const d = dragging;
+    end();
+    if (d?.from) void unfile(d.from, d.id);
+  }
   const initial = $derived((account.name ?? "Y").trim()[0]?.toUpperCase() ?? "Y");
 </script>
 
@@ -30,7 +99,7 @@
     {#if !isMac}<span class="brand" data-tauri-drag-region><img src="/icon.png" alt="" data-tauri-drag-region /><span data-tauri-drag-region>Encore</span></span>{/if}
   </div>
 
-  <button class="search" onclick={() => (ui.palette = true)}>
+  <button class="search" aria-label={tip("Search")} title={tip(`Search (${mod("K")})`)} onclick={() => (ui.palette = true)}>
     <Icon name="search" size={16} />
     <span>Search</span>
     <kbd>{mod("K")}</kbd>
@@ -39,7 +108,7 @@
   <ul class="primary">
     {#each items as it}
       <li>
-        <button class="nav" class:active={isActive(it.view)} aria-current={isActive(it.view) ? "page" : undefined} onclick={() => nav.go(it.view)}>
+        <button class="nav" class:active={isActive(it.view)} aria-current={isActive(it.view) ? "page" : undefined} aria-label={tip(it.label)} title={tip(it.label)} onclick={() => nav.go(it.view)}>
           <Icon name={it.icon} size={19} />
           <span>{it.label}</span>
           {#if it.view.name === "downloads"}
@@ -57,15 +126,80 @@
 
   <div class="section">
     <span>Playlists</span>
-    <button class="icon-btn" aria-label="New playlist" title="New playlist" onclick={() => newPlaylist()}><Icon name="plus" size={16} /></button>
+    <button class="icon-btn" aria-label="New playlist or folder" title="New playlist or folder" onclick={addMenu}><Icon name="plus" size={16} /></button>
   </div>
-  <ul class="pins">
+  <ul class="pins" class:loose-over={over === "loose"} ondragover={(e) => dragging?.from && hover(e, "loose")} ondragleave={() => over === "loose" && (over = null)} ondrop={dropLoose}>
+    {#each saved.folders as f (f.id)}
+      <li class="folder" class:over={over === f.id}>
+        <div class="frow" role="group" ondragover={(e) => { e.stopPropagation(); hover(e, f.id); }} ondrop={(e) => { e.stopPropagation(); dropOnFolder(f); }}>
+          <button
+            class="pin"
+            class:active={isFolderOpen(f.id)}
+            aria-label={tip(`${f.name}, folder, ${itemsText(f.items.length)}`)}
+            title={tip(`${f.name} · ${itemsText(f.items.length)}`)}
+            onclick={() => nav.go({ name: "folder", id: f.id, title: f.name })}
+            oncontextmenu={(e) => ui.openMenu(e, folderMenu(f))}
+          >
+            <span class="thumb"><FolderCover folder={f} radius={5} size={120} /></span>
+            <span class="txt"><span class="name ell">{f.name}</span></span>
+            <span class="n" aria-label={itemsText(f.items.length)}>{f.items.length || ""}</span>
+          </button>
+          {#if f.items.length}
+            <button
+              class="chev"
+              aria-expanded={!f.collapsed}
+              aria-label={f.collapsed ? `Show what's in ${f.name}` : `Hide what's in ${f.name}`}
+              title={f.collapsed ? `Show what's in ${f.name}` : `Hide what's in ${f.name}`}
+              onclick={() => setCollapsed(f, !f.collapsed)}
+            >
+              <Icon name="down" size={compact ? 12 : 15} />
+            </button>
+          {/if}
+        </div>
+        {#if !f.collapsed && f.items.length}
+          <ul class="inner">
+            {#each f.items as it (it.itemId)}
+              {@const c = it.card}
+              <li class:over={over === `${f.id}/${c.id}`}>
+                <button
+                  class="pin"
+                  class:active={isOpen(c.id)}
+                  draggable="true"
+                  ondragstart={(e) => start(e, c.id, f)}
+                  ondragend={end}
+                  ondragover={(e) => { e.stopPropagation(); hover(e, `${f.id}/${c.id}`); }}
+                  ondrop={(e) => { e.stopPropagation(); dropOnFolder(f, c.id); }}
+                  aria-label={tip(`${c.title}, in ${f.name}`)}
+                  title={tip(`${c.title} · in ${f.name}`)}
+                  onclick={() => nav.go({ name: "collection", id: c.id })}
+                  oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}
+                >
+                  <span class="thumb"><Cover art={c.art} radius={5} size={120} label={c.title} /></span>
+                  <span class="txt">
+                    <span class="name ell">{c.title}</span>
+                    <span class="sub ell">{c.subtitle || kindLabel[c.kind]}</span>
+                  </span>
+                  {#if player.source?.collectionId === c.id}
+                    <span class="eq" class:paused={!player.playing} aria-label="Playing"><i></i><i></i><i></i></span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </li>
+    {/each}
     {#each pinned as c (c.id)}
       {@const playing = player.source?.collectionId === c.id}
       <li>
         <button
           class="pin"
           class:active={isOpen(c.id)}
+          draggable={saved.folders.length ? "true" : undefined}
+          ondragstart={(e) => start(e, c.id, null)}
+          ondragend={end}
+          aria-label={tip(c.title)}
+          title={tip(c.title)}
           onclick={() => nav.go({ name: "collection", id: c.id })}
           oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}
         >
@@ -85,7 +219,7 @@
   </ul>
 
   <div class="foot">
-    <button class="account" onclick={() => nav.go({ name: "settings" })}>
+    <button class="account" aria-label={tip(settingsTip)} title={tip(settingsTip)} onclick={() => nav.go({ name: "settings" })}>
       <span class="avatar">{initial}{#if updates.ready}<i class="ready" title="Encore {updates.version} is ready to install"></i>{/if}</span>
       <span class="txt">
         <span class="name ell">{account.name ?? (account.state.state === "expired" ? "Session expired" : account.state.state === "choosingChannel" ? "Choose a channel" : "Not signed in")}</span>
@@ -253,6 +387,77 @@
     width: 38px;
     flex: none;
   }
+
+  /* Folders (D34): a row like a playlist's, then what's in it, indented
+     under a hairline. */
+  .frow {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .frow .pin {
+    padding-right: 34px;
+  }
+  .n {
+    font-size: 12px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .chev {
+    position: absolute;
+    right: 4px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    color: var(--dim);
+    transition: color 0.15s, background-color 0.15s;
+  }
+  .chev :global(svg) {
+    transition: transform 0.18s var(--ease);
+  }
+  .chev[aria-expanded="false"] :global(svg) {
+    transform: rotate(-90deg);
+  }
+  .chev:hover,
+  .chev:focus-visible {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .frow:hover .chev {
+    color: var(--mute);
+  }
+  .inner {
+    margin: 0 0 4px 25px;
+    padding-left: 6px;
+    border-left: 1px solid var(--line);
+  }
+  .inner .thumb {
+    width: 30px;
+  }
+  .inner .pin {
+    padding: 4px 6px;
+  }
+  .inner .name {
+    font-size: 13px;
+  }
+  .inner .sub {
+    font-size: 11.5px;
+  }
+  .folder.over > .frow .pin,
+  .inner li.over .pin {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+  .inner li.over .pin {
+    box-shadow: inset 0 2px 0 var(--accent);
+    background: none;
+  }
+  .pins.loose-over {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border-radius: 9px;
+  }
   .txt {
     flex: 1;
     display: grid;
@@ -386,6 +591,35 @@
     }
     .thumb {
       width: 40px;
+    }
+    .n {
+      display: none;
+    }
+    /* The folder's expander becomes a small tab under its cover, and what's
+       in it hangs from a hairline, so the nesting reads without names. */
+    .frow {
+      flex-direction: column;
+    }
+    .frow .pin {
+      padding-right: 4px;
+    }
+    .chev {
+      position: static;
+      width: 40px;
+      height: 14px;
+      margin: 1px 0 2px;
+      border-radius: 5px;
+    }
+    .inner {
+      margin: 0 0 6px 6px;
+      padding-left: 5px;
+      border-left: 2px solid var(--line);
+    }
+    .inner .pin {
+      padding: 3px 4px;
+    }
+    .inner .thumb {
+      width: 31px;
     }
   }
 </style>

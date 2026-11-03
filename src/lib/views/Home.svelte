@@ -2,7 +2,7 @@
   import { call, type CollectionCard, type Page } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
-  import { collectionMenu, nav, player, ui } from "$lib/state.svelte";
+  import { collectionMenu, nav, player, taste, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Shelves from "$lib/components/Shelves.svelte";
@@ -47,10 +47,13 @@
     void page.reload();
   }
 
+  // Blocked songs and artists, and podcasts if hidden, leave at once (Rust
+  // filters new pages the same way, D36, D27).
+  const shelves = $derived(taste.filterShelves(page.data?.shelves ?? []));
   // The first shelf of playlists/albums becomes the quick-jump grid.
-  const quickShelf = $derived(page.data?.shelves.find((s) => s.items.filter((i) => i.type === "collection").length >= 6) ?? null);
+  const quickShelf = $derived(shelves.find((s) => s.items.filter((i) => i.type === "collection").length >= 6) ?? null);
   const quick = $derived((quickShelf?.items.filter((i) => i.type === "collection") ?? []).slice(0, 8) as CollectionCard[]);
-  const rest = $derived([...(page.data?.shelves.filter((s) => s !== quickShelf) ?? []), ...more]);
+  const rest = $derived([...shelves.filter((s) => s !== quickShelf), ...taste.filterShelves(more)]);
 </script>
 
 <div class="page">

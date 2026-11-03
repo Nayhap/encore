@@ -10,6 +10,13 @@
 //! callback. A track has ended when its decoder is done **and** its ring is
 //! drained (D5). If a next deck is queued (preload) the callback switches to
 //! it on the very next frame, which gives near-gapless transitions.
+//!
+//! For the A–B loop and the sleep timer (D26) the engine also keeps: the
+//! loop itself (in the decoder, see `decode`), a spare ring the callback
+//! switches to at B's frame when the decoder had already passed B, a fade
+//! gain the sleep timer lowers to silence, and a switch that keeps the
+//! callback from taking up the preloaded deck ("sleep at the end of this
+//! song").
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -23,7 +30,7 @@ use parking_lot::Mutex;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::cache::AudioCache;
-use crate::decode::{WorkerCmd, WorkerEvent, run_worker};
+use crate::decode::{Spare, Timeline, WorkerCmd, WorkerEvent, run_worker};
 use crate::source::SourceSpec;
 
 /// Seconds of PCM buffered per deck.
@@ -45,6 +52,8 @@ pub enum EngineEvent {
     DeviceChanged { name: String },
     /// No audio output could be opened; playback waits until one appears.
     NoOutput { error: String },
+    /// A fade started by `fade_out` reached silence.
+    FadedOut,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,6 +89,9 @@ enum CbMsg {
     ClearNext,
     PromoteNext,
     Clear,
+    /// Switch from the current ring to this one (same deck, same frame
+    /// counter) once the counter reaches `at`.
+    Splice { ring: Ring, at: u64 },
 }
 
 struct Atoms {
@@ -95,17 +107,27 @@ struct Atoms {
     /// set when the callback hit an empty ring that was not done
     starving: AtomicBool,
     device_error: AtomicBool,
+    /// A gain on top of the volume (f32 bits): 1, or lower during a fade.
+    fade: AtomicU32,
+    /// Don't take up the preloaded deck when the current one ends.
+    hold_next: AtomicBool,
 }
 
 struct DeckInfo {
     id: u64,
-    base: f64,
+    timeline: Arc<Mutex<Timeline>>,
     frames: Arc<AtomicU64>,
     duration: Option<f64>,
     tx: Sender<WorkerCmd>,
     spec: SourceSpec,
     gain: f32,
     started: bool,
+    /// The A–B loop, in song seconds.
+    lp: Option<(f64, f64)>,
+    /// Counts this deck's rings: a seek starts a new one.
+    ring: u64,
+    /// The ring the decoder may continue a new loop in.
+    spare: Option<Ring>,
 }
 
 enum Cmd {
@@ -117,6 +139,9 @@ enum Cmd {
     Resume,
     Stop,
     Volume,
+    Loop { range: Option<(f64, f64)> },
+    Fade { secs: f64 },
+    FadeCancel,
     Shutdown,
 }
 
@@ -127,9 +152,12 @@ pub struct Engine {
     events: Mutex<Option<Receiver<EngineEvent>>>,
 }
 
+/// The audible deck's id, timeline, frame counter and length.
+type Clock = (u64, Arc<Mutex<Timeline>>, Arc<AtomicU64>, Option<f64>);
+
 #[derive(Default)]
 struct SharedStatus {
-    current: Option<(u64, f64, Arc<AtomicU64>, Option<f64>)>,
+    current: Option<Clock>,
     next: Option<u64>,
     device: String,
     rate: u32,
@@ -156,6 +184,8 @@ impl Engine {
             ended_id: AtomicU64::new(0),
             starving: AtomicBool::new(false),
             device_error: AtomicBool::new(false),
+            fade: AtomicU32::new(1f32.to_bits()),
+            hold_next: AtomicBool::new(false),
         });
         let shared = Arc::new(Mutex::new(SharedStatus::default()));
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -175,6 +205,9 @@ impl Engine {
     }
 
     pub fn load(&self, id: u64, spec: SourceSpec, start: f64, gain_db: f32, play: bool) {
+        if play {
+            self.atoms.fade.store(1f32.to_bits(), Ordering::Relaxed);
+        }
         let _ = self.tx.send(Cmd::Load { id, spec, start, gain_db, play });
     }
     pub fn preload(&self, id: u64, spec: SourceSpec, gain_db: f32) {
@@ -191,8 +224,36 @@ impl Engine {
         let _ = self.tx.send(Cmd::Pause);
     }
     pub fn resume(&self) {
+        // A sleep timer's fade ends with the pause; playing again is at
+        // full volume.
+        self.atoms.fade.store(1f32.to_bits(), Ordering::Relaxed);
         self.atoms.paused.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Resume);
+    }
+
+    /// Loop the current deck between two song times (D26), or stop
+    /// looping. The wrap is exact to the frame and gapless; see `decode`.
+    pub fn set_loop(&self, range: Option<(f64, f64)>) {
+        let range = range.filter(|(a, b)| a.is_finite() && b.is_finite() && *a >= 0.0 && b > a);
+        let _ = self.tx.send(Cmd::Loop { range });
+    }
+
+    /// Fade to silence over `secs` (the sleep timer, D26), without touching
+    /// the volume; `EngineEvent::FadedOut` follows. `resume`, a new load
+    /// that plays and `cancel_fade` bring it back.
+    pub fn fade_out(&self, secs: f64) {
+        let _ = self.tx.send(Cmd::Fade { secs: secs.max(0.05) });
+    }
+
+    pub fn cancel_fade(&self) {
+        self.atoms.fade.store(1f32.to_bits(), Ordering::Relaxed);
+        let _ = self.tx.send(Cmd::FadeCancel);
+    }
+
+    /// While on, the deck that ends is not followed by the preloaded one:
+    /// `EngineEvent::Ended` comes instead of `Advanced` (D26).
+    pub fn hold_next(&self, on: bool) {
+        self.atoms.hold_next.store(on, Ordering::Relaxed);
     }
     pub fn stop(&self) {
         let _ = self.tx.send(Cmd::Stop);
@@ -207,8 +268,8 @@ impl Engine {
         let s = self.shared.lock();
         let rate = s.rate.max(1) as f64;
         let (id, position, duration) = match &s.current {
-            Some((id, base, frames, dur)) => {
-                let p = base + frames.load(Ordering::Relaxed) as f64 / rate;
+            Some((id, timeline, frames, dur)) => {
+                let p = timeline.lock().at(frames.load(Ordering::Relaxed), rate);
                 (*id, dur.map(|d| p.min(d)).unwrap_or(p), *dur)
             }
             None => (0, 0.0, None),
@@ -282,6 +343,8 @@ fn silent_output() -> Output {
 struct Cb {
     current: Option<Ring>,
     next: Option<Ring>,
+    /// A loop's spare ring and the frame to switch to it at.
+    splice: Option<(u64, Ring)>,
     vol: f32,
     scratch: Vec<f32>,
 }
@@ -297,7 +360,7 @@ where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let channels = config.channels as usize;
-    let mut cb = Cb { current: None, next: None, vol: f32::from_bits(atoms.volume.load(Ordering::Relaxed)), scratch: vec![0.0; 16384] };
+    let mut cb = Cb { current: None, next: None, splice: None, vol: f32::from_bits(atoms.volume.load(Ordering::Relaxed)), scratch: vec![0.0; 16384] };
     let a_err = atoms.clone();
     let stream = device
         .build_output_stream(
@@ -309,6 +372,9 @@ where
                     match m {
                         CbMsg::SetCurrent(r) => {
                             if let Some(old) = cb.current.replace(r) {
+                                let _ = retired.push(old);
+                            }
+                            if let Some((_, old)) = cb.splice.take() {
                                 let _ = retired.push(old);
                             }
                         }
@@ -327,9 +393,20 @@ where
                                 if let Some(old) = cb.current.replace(nx) {
                                     let _ = retired.push(old);
                                 }
+                                if let Some((_, old)) = cb.splice.take() {
+                                    let _ = retired.push(old);
+                                }
+                            }
+                        }
+                        CbMsg::Splice { ring, at } => {
+                            if let Some((_, old)) = cb.splice.replace((at, ring)) {
+                                let _ = retired.push(old);
                             }
                         }
                         CbMsg::Clear => {
+                            if let Some((_, old)) = cb.splice.take() {
+                                let _ = retired.push(old);
+                            }
                             if let Some(old) = cb.current.take() {
                                 let _ = retired.push(old);
                             }
@@ -340,7 +417,7 @@ where
                     }
                 }
                 let frames = data.len() / channels;
-                let target = f32::from_bits(atoms.volume.load(Ordering::Relaxed));
+                let target = f32::from_bits(atoms.volume.load(Ordering::Relaxed)) * f32::from_bits(atoms.fade.load(Ordering::Relaxed));
                 let paused = atoms.paused.load(Ordering::Relaxed);
                 if cb.scratch.len() < frames * 2 {
                     // Only happens if the device asks for an unusually large buffer.
@@ -351,7 +428,29 @@ where
                 if !paused {
                     while filled < frames {
                         let Some(cur) = cb.current.as_mut() else { break };
-                        let want = (frames - filled) * 2;
+                        let mut want = (frames - filled) * 2;
+                        // A loop's spare ring takes over at its frame: read
+                        // this ring up to there and no further.
+                        let splice = cb.splice.as_ref().map(|(at, sp)| (*at, sp.id == cur.id));
+                        if let Some((at, same)) = splice {
+                            let f = cur.frames.load(Ordering::Relaxed);
+                            if !same || f >= at {
+                                let (_, sp) = cb.splice.take().unwrap();
+                                let old = if same {
+                                    // Late (the counter is past `at`): count
+                                    // from `at`, so positions match what is heard.
+                                    sp.frames.store(at, Ordering::Relaxed);
+                                    cb.current.replace(sp)
+                                } else {
+                                    Some(sp) // another deck's: drop it
+                                };
+                                if let Some(old) = old {
+                                    let _ = retired.push(old);
+                                }
+                                continue;
+                            }
+                            want = want.min(((at - f) * 2) as usize);
+                        }
                         let avail = cur.cons.slots() & !1;
                         let n = want.min(avail);
                         if n > 0 {
@@ -371,12 +470,24 @@ where
                             atoms.playing_id.store(cur.id, Ordering::Relaxed);
                             continue;
                         }
+                        if cb.splice.is_some() && cur.cons.slots() < 2 {
+                            // The ring ran dry before the switch frame:
+                            // switch now rather than wait.
+                            let (at, sp) = cb.splice.take().unwrap();
+                            sp.frames.store(at, Ordering::Relaxed);
+                            if let Some(old) = cb.current.replace(sp) {
+                                let _ = retired.push(old);
+                            }
+                            continue;
+                        }
                         if cur.done.load(Ordering::Acquire) && cur.cons.slots() < 2 {
-                            // Track finished: hand over to the preloaded deck, if any.
+                            // Track finished: hand over to the preloaded deck,
+                            // if any and if the sleep timer allows it.
                             let old = cb.current.take().unwrap();
                             let old_id = old.id;
                             let _ = retired.push(old);
-                            if let Some(nx) = cb.next.take() {
+                            let next = if atoms.hold_next.load(Ordering::Relaxed) { None } else { cb.next.take() };
+                            if let Some(nx) = next {
                                 atoms.playing_id.store(nx.id, Ordering::Relaxed);
                                 cb.current = Some(nx);
                             } else {
@@ -442,16 +553,18 @@ fn spawn_deck(
     let (p, c) = new_ring(rate);
     let done = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(AtomicU64::new(0));
+    let timeline = Timeline::new(start);
     let (tx, rx) = mpsc::channel();
     let spec2 = spec.clone();
     let cache2 = cache.clone();
     let d2 = done.clone();
     let wev2 = wev.clone();
+    let (t2, f2) = (timeline.clone(), frames.clone());
     std::thread::Builder::new()
         .name(format!("encore-decode-{id}"))
-        .spawn(move || run_worker(id, spec2, cache2, rate, start, p, d2, rx, wev2))
+        .spawn(move || run_worker(id, spec2, cache2, rate, start, p, d2, t2, f2, rx, wev2))
         .expect("spawn decoder");
-    let info = DeckInfo { id, base: start, frames: frames.clone(), duration: None, tx, spec, gain, started: false };
+    let info = DeckInfo { id, timeline, frames: frames.clone(), duration: None, tx, spec, gain, started: false, lp: None, ring: 0, spare: None };
     (info, Ring { id, cons: c, done, frames, gain })
 }
 
@@ -491,10 +604,12 @@ fn actor(
     let mut suspect: Option<(Instant, u64)> = None;
     // When the callback count last changed, and its value then.
     let mut stall: (Instant, u64) = (Instant::now(), 0);
+    // The sleep timer's fade: since when, how long, from what gain.
+    let mut fade: Option<(Instant, f64, f32)> = None;
 
     let publish = |shared: &Arc<Mutex<SharedStatus>>, current: &Option<DeckInfo>, next: &Option<DeckInfo>| {
         let mut s = shared.lock();
-        s.current = current.as_ref().map(|d| (d.id, d.base, d.frames.clone(), d.duration));
+        s.current = current.as_ref().map(|d| (d.id, d.timeline.clone(), d.frames.clone(), d.duration));
         s.next = next.as_ref().map(|d| d.id);
     };
 
@@ -526,6 +641,9 @@ fn actor(
                     }
                     atoms.ended_id.store(0, Ordering::Relaxed);
                     atoms.paused.store(!play, Ordering::Relaxed);
+                    if play {
+                        fade = None;
+                    }
                     // A load of the preloaded track just promotes its deck.
                     if next.as_ref().is_some_and(|n| n.id == id) && start == 0.0 {
                         let n = next.take().unwrap();
@@ -570,15 +688,41 @@ fn actor(
                         let (p, c) = new_ring(out.rate);
                         let done = Arc::new(AtomicBool::new(false));
                         let frames = Arc::new(AtomicU64::new(0));
-                        let _ = d.tx.send(WorkerCmd::Seek { secs, prod: p, done: done.clone() });
-                        d.base = secs;
+                        let timeline = Timeline::new(secs);
+                        let _ = d.tx.send(WorkerCmd::Seek { secs, prod: p, done: done.clone(), timeline: timeline.clone(), frames: frames.clone() });
+                        d.timeline = timeline;
                         d.frames = frames.clone();
+                        d.ring += 1;
+                        d.spare = None;
                         let _ = out.msgs.push(CbMsg::SetCurrent(Ring { id: d.id, cons: c, done, frames, gain: d.gain }));
                         atoms.ended_id.store(0, Ordering::Relaxed);
                         publish(&shared, &current, &next);
                     }
                 }
-                Cmd::Pause | Cmd::Resume | Cmd::Volume => {}
+                Cmd::Resume => fade = None,
+                Cmd::Pause | Cmd::Volume => {}
+                Cmd::Loop { range } => {
+                    if let Some(d) = current.as_mut() {
+                        let range = match (range, d.duration) {
+                            (Some((a, b)), Some(dur)) => Some((a.min(dur), b.min(dur))).filter(|(a, b)| b > a),
+                            (r, _) => r,
+                        };
+                        d.lp = range;
+                        d.spare = None;
+                        let spare = range.map(|_| {
+                            let (p, c) = new_ring(out.rate);
+                            let done = Arc::new(AtomicBool::new(false));
+                            d.spare = Some(Ring { id: d.id, cons: c, done: done.clone(), frames: d.frames.clone(), gain: d.gain });
+                            Spare { prod: p, done, ring: d.ring }
+                        });
+                        let _ = d.tx.send(WorkerCmd::Loop { range, spare });
+                    }
+                }
+                Cmd::Fade { secs } => fade = Some((Instant::now(), secs, f32::from_bits(atoms.fade.load(Ordering::Relaxed)))),
+                Cmd::FadeCancel => {
+                    fade = None;
+                    atoms.fade.store(1f32.to_bits(), Ordering::Relaxed);
+                }
                 Cmd::Stop => {
                     let _ = out.msgs.push(CbMsg::Clear);
                     if let Some(d) = current.take() {
@@ -613,6 +757,22 @@ fn actor(
                     let _ = events.send(EngineEvent::Failed { id, error });
                 }
                 WorkerEvent::Seeked { .. } => {}
+                WorkerEvent::Spliced { id, ring, at } => {
+                    if let Some(sp) = current.as_mut().filter(|d| d.id == id && d.ring == ring).and_then(|d| d.spare.take()) {
+                        let _ = out.msgs.push(CbMsg::Splice { ring: sp, at });
+                    }
+                }
+            }
+        }
+
+        // The sleep timer's fade, a little lower every turn: squared, so
+        // it sounds even rather than dropping away at the end.
+        if let Some((since, secs, from)) = fade {
+            let x = (since.elapsed().as_secs_f64() / secs).min(1.0) as f32;
+            atoms.fade.store((from * (1.0 - x) * (1.0 - x)).to_bits(), Ordering::Relaxed);
+            if x >= 1.0 {
+                fade = None;
+                let _ = events.send(EngineEvent::FadedOut);
             }
         }
 
@@ -685,7 +845,7 @@ fn actor(
             let changed = last_dev_check.elapsed() > Duration::from_secs(2) && (no_output.is_some() || default_device_name().is_some_and(|n| n != out.name));
             last_dev_check = Instant::now();
             if changed || device_error {
-                let pos = shared.lock().current.as_ref().map(|(_, base, fr, _)| base + fr.load(Ordering::Relaxed) as f64 / out.rate as f64);
+                let pos = shared.lock().current.as_ref().map(|(_, tl, fr, _)| tl.lock().at(fr.load(Ordering::Relaxed), out.rate as f64));
                 let built = build_output(&atoms);
                 if let Err(e) = &built {
                     // Lost the output and none to replace it: run silent, say
@@ -715,6 +875,10 @@ fn actor(
                         let mut info = info;
                         info.duration = c.duration;
                         info.started = true;
+                        info.lp = c.lp;
+                        if c.lp.is_some() {
+                            let _ = info.tx.send(WorkerCmd::Loop { range: c.lp, spare: None });
+                        }
                         let _ = out.msgs.push(CbMsg::SetCurrent(ring));
                         current = Some(info);
                     }

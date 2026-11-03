@@ -2,14 +2,23 @@
   import { call, type BackendError, type HistoryGroup, type HistoryPage } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
-  import { account, nav, openExternal, ui } from "$lib/state.svelte";
+  import { account, nav, openExternal, taste, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Status from "$lib/components/Status.svelte";
   import TrackTable from "$lib/components/TrackTable.svelte";
+  import Stats from "./history/Stats.svelte";
 
   // Your YouTube Music history, grouped by day as YouTube groups it (D19).
   // Not cached: it changes with every play.
   const ACTIVITY = "https://myactivity.google.com/product/youtube";
+
+  // Played (YouTube's list, D19) or Stats (Encore's own log, D30, which
+  // needs no account). The last one picked opens next time.
+  let tab = $state<"played" | "stats">(localStorage.getItem("historyTab") === "stats" ? "stats" : "played");
+  function pick(t: "played" | "stats") {
+    tab = t;
+    localStorage.setItem("historyTab", t);
+  }
 
   let groups = $state<HistoryGroup[]>([]);
   let cursor = $state<string | null>(null);
@@ -85,8 +94,15 @@
 <div class="page">
   <h1 class="page-title">History</h1>
 
-  {#if !account.signedIn}
-    <Status empty="Sign in to see what you've played on YouTube Music." />
+  <div class="tabs" role="group" aria-label="Show">
+    <button class="chip" aria-pressed={tab === "played"} onclick={() => pick("played")}>Played</button>
+    <button class="chip" aria-pressed={tab === "stats"} onclick={() => pick("stats")}>Stats</button>
+  </div>
+
+  {#if tab === "stats"}
+    <Stats />
+  {:else if !account.signedIn}
+    <Status empty="Sign in to see what you've played on YouTube Music. Your stats in Encore work without an account." />
     <button class="pill primary" onclick={() => nav.go({ name: "settings" })}>Sign in</button>
   {:else}
     {#if page?.paused || page?.notice}
@@ -98,6 +114,8 @@
         </div>
         <button class="pill" onclick={() => openExternal(ACTIVITY)}>Manage history <Icon name="external" size={14} /></button>
       </div>
+    {:else if taste.private}
+      <p class="off">Private session: plays aren't added to your history{taste.privateLeftText ? ` (${taste.privateLeftText})` : ""}. <button onclick={() => taste.setPrivate(false)}>End it</button></p>
     {:else if !ui.reportHistory}
       <p class="off">Plays in Encore aren't sent to your history. <button onclick={() => nav.go({ name: "settings" })}>Change in Settings</button></p>
     {/if}
@@ -123,6 +141,11 @@
 </div>
 
 <style>
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+  }
   .day {
     margin-top: 22px;
   }

@@ -1,0 +1,22 @@
+[package]
+name = "encore-lastfm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Last.fm with the user's own API key (D31): desktop auth, now playing,
+# scrobbles from an offline queue, play counts.
+[dependencies]
+encore-core.workspace = true
+async-trait.workspace = true
+reqwest = { workspace = true, features = ["form"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+hex.workspace = true
+md-5 = "0.11"
+
+[dev-dependencies]
+tokio.workspace = true
+parking_lot.workspace = true

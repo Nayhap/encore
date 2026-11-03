@@ -1,15 +1,9 @@
 // Tauri implementation of the backend facade over the generated bindings.
 import { protocolUrl } from "$lib/platform";
 import { commands, events } from "./bindings";
-import { BackendError, type Api, type Handlers } from "./index";
-
-type R<T> = { status: "ok"; data: T } | { status: "error"; error: any };
-
-async function u<T>(p: Promise<R<T>>): Promise<T> {
-  const r = await p;
-  if (r.status === "error") throw new BackendError(r.error);
-  return r.data;
-}
+import { tauriFeatures } from "./features/tauri";
+import { type Api, type Handlers } from "./index";
+import { u } from "./unwrap";
 
 export const tauriApi: Api = {
   async subscribe(h: Handlers) {
@@ -46,7 +40,7 @@ export const tauriApi: Api = {
   moreShelves: (c) => u(commands.moreShelves(c)) as any,
   search: (q, f) => u(commands.search(q, f)) as any,
   suggestions: (q) => u(commands.suggestions(q)),
-  collection: (id) => u(commands.collection(id)) as any,
+  collection: (id, p) => u(commands.collection(id, p ?? null)) as any,
   collectionMore: (c) => u(commands.collectionMore(c)) as any,
   artist: (id) => u(commands.artist(id)) as any,
   library: (s) => u(commands.library(s)) as any,
@@ -55,7 +49,7 @@ export const tauriApi: Api = {
   playerSnapshot: () => u(commands.playerSnapshot()) as any,
   queueSnapshot: () => u(commands.queueSnapshot()) as any,
   playTracks: (t, s, src, sh) => u(commands.playTracks(t, s, src, sh)) as any,
-  playCollection: (id, s, sh) => u(commands.playCollection(id, s, sh)) as any,
+  playCollection: (id, s, sh, p) => u(commands.playCollection(id, s, sh, p ?? null)) as any,
   playTrack: (t) => u(commands.playTrack(t)) as any,
   startRadio: (p, l) => u(commands.startRadio(p, l)) as any,
   toggle: () => u(commands.toggle()) as any,
@@ -117,4 +111,5 @@ export const tauriApi: Api = {
   updateUnskip: () => u(commands.updateUnskip()) as any,
   setAutoUpdate: (on) => u(commands.setAutoUpdate(on)) as any,
   artUrl: (key, size) => protocolUrl("art", `${key}?s=${size}`),
+  features: tauriFeatures,
 };

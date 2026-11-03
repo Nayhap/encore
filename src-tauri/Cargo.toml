@@ -1,6 +1,6 @@
 [package]
 name = "encore"
-version = "0.4.0"
+version = "0.5.0"
 description = "Encore, a YouTube Music desktop client"
 authors = ["Encore"]
 edition = "2024"
@@ -49,6 +49,24 @@ tauri-plugin-single-instance = "2"
 # In-app updates (D24), driven from Rust only.
 tauri-plugin-updater = "~2.14"
 semver = "1"
+
+# features: one block per lane, appended to only by that lane.
+# features: playback (lane A)
+
+# features: library tools (lane B)
+
+# features: saved (lane C)
+# Open and save sheets for folder covers and folder files, used from Rust
+# only (no JavaScript permission).
+tauri-plugin-dialog = "2"
+
+# features: taste and stats (lane D)
+
+# features: integrations (lane E)
+encore-analysis = { path = "../crates/encore-analysis" }
+encore-discord = { path = "../crates/encore-discord" }
+encore-lastfm = { path = "../crates/encore-lastfm" }
+encore-wiki = { path = "../crates/encore-wiki" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

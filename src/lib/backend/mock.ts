@@ -3,6 +3,10 @@
 import * as M from "./mockdata";
 import type { Api, Handlers } from "./index";
 import type * as T from "./types";
+import { mockFeatures } from "./mock/index";
+import { mockPlayer } from "./mock/playback";
+import { mockStatsPlayed } from "./mock/stats";
+import { mockPodcastShelf, mockPrivate } from "./mock/taste";
 
 const art = (a: M.Art): T.ArtRef => ({ key: `mock:${a.seed}:${a.motif}`, h1: a.h1, h2: a.h2 });
 const mid = (id: string) => `mock:${id}`;
@@ -54,7 +58,7 @@ function card(c: M.MCollection): T.CollectionCard {
     id: mid(c.id),
     kind: kindOf(c),
     title: c.title,
-    subtitle: c.year ? `${c.kind === "album" ? "Album" : "Playlist"} • ${c.by} • ${c.year}` : `${c.kind === "mix" ? "Mix" : "Playlist"} • ${c.by}`,
+    subtitle: c.year ? `${c.kind === "album" ? "Album" : c.kind === "single" ? "Single" : "Playlist"} • ${c.by} • ${c.year}` : `${c.kind === "mix" ? "Mix" : "Playlist"} • ${c.by}`,
     artists: c.artistId ? [{ name: c.by, id: mid(c.artistId) }] : [],
     year: c.year ?? null,
     art: art(c.art),
@@ -71,8 +75,58 @@ const item = {
 };
 const shelf = (title: string, items: T.ShelfItem[], layout: "carousel" | "list" | "grid" = "carousel", subtitle: string | null = null): T.Shelf => ({ title, subtitle, layout, items, more: null });
 
+// ---------- the catalogue for library tools (lane B, D34, D35) ----------
+// "Everything twice" (yours) has exact copies and songs next to their music
+// videos, for Duplicates; "The long way round" has 1,340 rows that arrive
+// 100 at a time, for "Searching 500 of 1,340 · Load all".
+{
+  const ids = M.tracks.map((t) => t.id);
+  const pick = (n: number, step: number, from = 0) => Array.from({ length: n }, (_, i) => ids[(from + i * step) % ids.length]);
+  const twice = [...pick(24, 1)];
+  twice.splice(6, 0, ids[2]);
+  twice.splice(13, 0, ids[0] + MV, ids[9]);
+  twice.push(ids[4], ids[14] + MV, ids[2]);
+  M.collections.push(
+    { id: "pl-twice", kind: "playlist", title: "Everything twice", by: "You", art: { seed: 230, h1: 160, h2: 280, motif: "stripes" }, trackIds: twice, desc: "Some songs are in here more than once." },
+    { id: "pl-long", kind: "playlist", title: "The long way round", by: "Encore Radio", art: { seed: 231, h1: 25, h2: 200, motif: "wave" }, trackIds: pick(1340, 7, 3), desc: "Everything, in no particular order." },
+  );
+}
+// Rows per page of a long mock playlist.
+const PAGE = 100;
+// Each artist's singles and EPs: their album's songs, one or two at a time.
+const singles: M.MCollection[] = M.collections
+  .filter((c) => c.kind === "album")
+  .flatMap((a) =>
+    a.trackIds.slice(0, 3).map((t, i): M.MCollection => ({
+      id: `sg-${t}`, kind: "single", title: `${M.tracks.find((x) => x.id === t)!.title}${i === 2 ? " (Remixes)" : ""}`, by: a.by, artistId: a.artistId,
+      year: (a.year ?? 2024) - i, art: { ...a.art, seed: a.art.seed + 40 + i, h1: (a.art.h1 + 40 * (i + 1)) % 360 }, trackIds: i === 2 ? a.trackIds.slice(0, 2) : [t],
+    })),
+  );
+const anyCollection = (id: string) => M.collections.find((x) => x.id === id) ?? singles.find((x) => x.id === id) ?? community(id);
+// Playlists other listeners made, as the community-playlist search finds them (D35).
+const owners = ["nightbus", "Mara K.", "lofi archive", "Theo", "city lights radio", "june"];
+function communityFor(a: M.MArtist): M.MCollection[] {
+  const songs = M.tracks.filter((t) => t.artistId === a.id).map((t) => t.id);
+  const others = M.tracks.filter((t) => t.artistId !== a.id).map((t) => t.id);
+  return [`${a.name} essentials`, `best of ${a.name}`, `${a.name} + friends`, "late night drive", "songs for the train home", `${a.name.toLowerCase()} deep cuts`].map((title, i) => ({
+    id: `cp-${a.id}-${i}`, kind: "playlist", title, by: owners[i % owners.length], art: { seed: 400 + i * 7 + a.art.seed, h1: (a.art.h1 + i * 50) % 360, h2: (a.art.h2 + i * 30) % 360, motif: (["orbit", "grid", "wave", "sun", "blocks", "stripes"] as const)[i] },
+    trackIds: [...songs, ...others.slice(i * 3, i * 3 + 6)],
+  }));
+}
+function community(id: string) {
+  const m = id.match(/^cp-(.+)-\d+$/);
+  const a = m && M.artists.find((x) => x.id === m[1]);
+  return a ? communityFor(a).find((c) => c.id === id) : undefined;
+}
+/** The mock's catalogue, for ./mock/libraryTools.ts. */
+export const mockCatalogue = {
+  singlesOf: (artistId: string) => singles.filter((s) => s.artistId === artistId).map(card),
+  albumsOf: (artistId: string) => M.collections.filter((c) => c.kind === "album" && c.artistId === artistId).map(card),
+  year: (albumId: string) => anyCollection(raw(albumId))?.year ?? null,
+};
+
 const liked = new Set<string>(M.collections.find((c) => c.id === "pl-liked")!.trackIds.map(mid));
-const delay = <T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
+const delay =<T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 
 // ---------- your playlists and history ----------
 
@@ -100,7 +154,9 @@ const hist: { title: string; rows: T.HistoryRow[] }[] = [
 hist[0].rows = [M.tracks[3], M.tracks[14], M.tracks[0]].map((t) => row(t.id));
 let reportHistory = true;
 function played(t: T.Track) {
-  if (!reportHistory || auth.state !== "signedIn") return;
+  // The local play log counts every play (D30); history skips a private session's (D36).
+  mockStatsPlayed(t);
+  if (!reportHistory || auth.state !== "signedIn" || mockPrivate()) return;
   hist[0].rows.unshift({ rowId: `h${++rowN}`, track: t, removable: true });
   h?.history({ trackId: t.id });
 }
@@ -141,6 +197,7 @@ function snap(): T.PlayerSnapshot {
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
     error: P.error, skippedInARow: 0, queueLoading: false, noOutput: false,
+    loop: mockPlayer.loop, sleep: mockPlayer.sleep, private: mockPlayer.private,
   };
 }
 function publish(queueChanged = false) {
@@ -185,8 +242,10 @@ function go(i: number, at = 0) {
     i = j;
   }
   P.error = null;
+  if (P.index !== i) endLoop();
   P.index = i;
   P.position = at;
+  noteCycle();
   // Downloaded songs need no player components (D22, D23).
   if (!isLocal(P.entries[i]?.track.id) && !needsSetupBeforePlay()) return;
   P.playing = true;
@@ -215,13 +274,32 @@ function extendRadio() {
 }
 function ended() {
   if (P.index == null) return;
+  const sl = mockPlayer.sleepState.mode;
+  const last = P.index >= P.entries.length - 1;
+  if (sl === "endOfSong" || (sl === "endOfQueue" && last)) {
+    // The sleep timer waited for this song: the next one waits, paused (D26).
+    mockPlayer.sleepState.mode = null;
+    P.playing = false;
+    endLoop();
+    if (sl === "endOfSong" && !last) {
+      P.index++;
+      P.position = 0;
+      P.phase = "paused";
+      tgen++;
+      sendLyrics();
+    } else P.phase = "ended";
+    publish(true);
+    anchor();
+    h?.notice({ text: "Paused by the sleep timer.", level: "info", action: null });
+    return;
+  }
   if (P.repeat === "one") {
     P.position = 0;
     sgen++;
     anchor();
   } else if (P.index < P.entries.length - 1) go(P.index + 1);
   else if (P.repeat === "all") go(0);
-  else if (P.autoplay && extendRadio()) go(P.index + 1);
+  else if (P.autoplay && mockPlayer.sleepState.mode !== "endOfQueue" && extendRadio()) go(P.index + 1);
   else {
     P.playing = false;
     P.phase = "ended";
@@ -234,11 +312,110 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
   const cur = P.index != null ? P.entries[P.index] : null;
+  const sl = mockPlayer.sleepState;
+  if (sl.mode === "timer" && Date.now() >= sl.deadline) {
+    // The Rust engine fades out over the last 10 s first.
+    sl.mode = null;
+    if (P.playing) {
+      P.playing = false;
+      P.phase = "paused";
+      h?.notice({ text: "Paused by the sleep timer.", level: "info", action: null });
+    }
+    publish();
+    anchor();
+  }
   if (!P.playing || !cur) return;
   P.position += dt;
+  const l = mockPlayer.loop;
+  if (l?.a != null && l.b != null && P.position >= l.b) {
+    // Wraps at B, like the engine (D26).
+    P.position = l.a + (P.position - l.b);
+    anchor();
+  }
   if (P.position >= (cur.track.duration ?? 0)) ended();
 }, 100);
 setInterval(() => P.playing && anchor(), 500);
+
+const refuse = (message: string) => ({ code: "invalid", message, retryable: false, action: null });
+
+/** End the loop on a song change, putting repeat-one back. */
+function endLoop() {
+  if (!mockPlayer.loop) return;
+  mockPlayer.loop = null;
+  if (mockPlayer.loopRepeat) P.repeat = mockPlayer.loopRepeat;
+  mockPlayer.loopRepeat = null;
+}
+
+export function simLoop(a: number, b: number) {
+  const cur = P.index != null ? P.entries[P.index] : null;
+  const dur = cur?.track.duration;
+  if (!cur || P.phase === "idle") throw refuse("Play the song to loop part of it.");
+  if (!dur) throw refuse("This song's length isn't known yet. Try again in a moment.");
+  [a, b] = a <= b ? [a, b] : [b, a];
+  a = Math.max(0, Math.min(a, dur));
+  b = Math.max(0, Math.min(b, dur));
+  if (b - a < 1) throw refuse("A loop needs to be at least a second long.");
+  if (!mockPlayer.loop && P.repeat === "one") {
+    mockPlayer.loopRepeat = "one";
+    P.repeat = "off";
+  }
+  mockPlayer.loop = { a, b };
+  if (P.position < a - 0.05 || P.position >= b) {
+    P.position = a;
+    sgen++;
+  }
+  publish();
+  anchor();
+}
+
+export function simClearLoop() {
+  endLoop();
+  publish();
+  anchor();
+}
+
+export function simSleep(mode: T.SleepMode, minutes: number | null) {
+  if (mode === "endOfSong" && mockPlayer.loop) throw refuse("Clear the loop to stop at the end of this song.");
+  if (mode === "timer" && !(minutes && minutes > 0)) throw refuse("Choose how long until Encore pauses.");
+  mockPlayer.sleepState.mode = mode;
+  mockPlayer.sleepState.deadline = Date.now() + (minutes ?? 0) * 60_000;
+  publish();
+}
+
+export function simCancelSleep() {
+  mockPlayer.sleepState.mode = null;
+  publish();
+}
+
+/** Shuffle cycles (D33), per collection for this session: the songs
+ *  played in the current cycle. */
+const cycles = new Map<string, Set<string>>();
+function noteCycle() {
+  const id = P.source?.collectionId;
+  const e = P.index != null ? P.entries[P.index] : null;
+  if (!P.shuffle || !id || !e || e.origin !== "collection") return;
+  const c = cycles.get(id) ?? new Set();
+  c.add(e.track.id);
+  const members = new Set(P.entries.filter((x) => x.origin === "collection").map((x) => x.track.id));
+  cycles.set(id, c.size >= members.size ? new Set() : c);
+}
+
+/** A collection shuffled in its cycle: each song once, the ones not yet
+ *  played in the cycle first. */
+function replaceCycle(tracks: T.Track[], source: T.QueueSource) {
+  const seen = new Set<string>();
+  tracks = tracks.filter((t) => !seen.has(t.id) && seen.add(t.id));
+  const played = cycles.get(source.collectionId!) ?? new Set();
+  const fresh = shuffled(tracks.filter((t) => !played.has(t.id)));
+  const stale = shuffled(tracks.filter((t) => played.has(t.id)));
+  const es = [...fresh, ...stale].map((t) => ({ uid: uid(), track: t, origin: "collection" as const }));
+  const rank = new Map(tracks.map((t, i) => [t.id, i]));
+  P.canon = [...es].sort((x, y) => rank.get(x.track.id)! - rank.get(y.track.id)!).map((e) => e.uid);
+  P.entries = es;
+  P.shuffle = true;
+  P.source = source;
+  go(0);
+}
 
 function replace(tracks: T.Track[], start: number, source: T.QueueSource | null, shuffle: boolean) {
   let es = tracks.map((t) => ({ uid: uid(), track: t, origin: "collection" as const }));
@@ -263,6 +440,11 @@ if (!new URLSearchParams(location.search).has("empty")) {
   P.index = 0;
   P.phase = "paused";
   P.source = { label: c.title, collectionId: mid(c.id), radioPlaylist: null };
+  // `?loop`, `?sleep`, `?autoplayoff` (mock/playback.ts).
+  const q = new URLSearchParams(location.search);
+  if (q.has("loop")) mockPlayer.loop = { a: 41, b: 63 };
+  if (q.has("sleep")) Object.assign(mockPlayer.sleepState, { mode: "timer", deadline: Date.now() + 23 * 60_000 + 12_000 });
+  if (q.has("autoplayoff")) P.autoplay = false;
 }
 
 // ---------- player components (D22) ----------
@@ -653,6 +835,7 @@ export const mockApi: Api = {
         shelf("Quick picks", M.tracks.filter((t) => t.plays).slice(0, 12).map(item.t), "list"),
         shelf("Mixed for you", [...M.collections.filter((c) => c.kind === "mix").map(item.c), ...M.artists.slice(0, 4).map(item.a)], "carousel", "Updated daily"),
         shelf("New releases", M.collections.filter((c) => c.kind === "album").map(item.c)),
+        mockPodcastShelf(),
       ],
     }),
   explore: () =>
@@ -671,14 +854,21 @@ export const mockApi: Api = {
       ],
     }),
   browsePage: (b, p) =>
-    delay({
+    b.startsWith("MPAD")
+      ? delay({ title: M.artists.find((a) => `MPAD${a.id}` === b)?.name ?? null, chips: [], cursor: null, shelves: [shelf("", (p === "singles" ? singles.filter((c) => `MPAD${c.artistId}` === b) : M.collections.filter((c) => c.kind === "album" && `MPAD${c.artistId}` === b)).map(item.c), "grid")] })
+      : delay({
       title: p ?? (b === "FEmusic_charts" ? "Charts" : b === "FEmusic_new_releases" ? "New releases" : "Moods & genres"),
       chips: [],
       cursor: null,
       shelves: [shelf("Playlists", M.collections.filter((c) => c.kind !== "album").map(item.c)), shelf("Albums", M.collections.filter((c) => c.kind === "album").map(item.c))],
     }),
   moreShelves: async () => ({ title: null, chips: [], cursor: null, shelves: [] }),
-  async search(q) {
+  async search(q, filter) {
+    // The community-playlist search (D35): listeners' playlists for an artist.
+    if (filter === "communityPlaylists") {
+      const a = M.artists.find((x) => x.name.toLowerCase() === q.trim().toLowerCase());
+      return delay({ query: q, top: null, songs: [], videos: [], albums: [], artists: [], playlists: a ? communityFor(a).map(card) : [], didYouMean: null, cursor: null }, 300);
+    }
     const norm = (s: string) => s.toLowerCase().normalize("NFKC");
     const s = norm(q.trim());
     const hit = (...xs: string[]) => xs.some((x) => norm(x).includes(s));
@@ -700,23 +890,38 @@ export const mockApi: Api = {
       return delay({ ...k.card, description: null, stats: `${k.ids.length} songs`, trackCount: k.ids.length, entries: k.ids.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null, videoId: t })), cursor: null, playlistId: null, saved: null, editable: false, privacy: null, related: [] } as T.Collection);
     }
     if (id === "ytm:VLLM" && auth.state !== "signedIn") throw { code: "authRequired", message: "Sign in to YouTube Music to use this.", retryable: false, action: "signIn" };
-    const c = M.collections.find((x) => x.id === raw(id) || (id === "ytm:VLLM" && x.id === "pl-liked"));
+    const c = id === "ytm:VLLM" ? M.collections.find((x) => x.id === "pl-liked") : anyCollection(raw(id));
     if (!c) throw { code: "notFound", message: "That collection does not exist.", retryable: false, action: null };
+    // Long lists arrive a page at a time, as YouTube sends them.
+    const long = c.trackIds.length > 2 * PAGE;
     return delay({
       id: mid(c.id), kind: kindOf(c), title: c.title, subtitle: card(c).subtitle, artists: card(c).artists, year: c.year ?? null, art: art(c.art),
       description: c.desc ?? null, stats: `${c.trackIds.length} songs`, trackCount: c.trackIds.length,
-      entries: c.trackIds.map((t, i) => ({ entryId: c.by === "You" ? setsOf(c)[i] : `${t}#${i}`, track: track(t), setVideoId: c.by === "You" ? setsOf(c)[i] : null, videoId: track(t).id })),
-      cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
+      entries: (long ? c.trackIds.slice(0, PAGE) : c.trackIds).map((t, i) => ({ entryId: c.by === "You" ? setsOf(c)[i] : `${t}#${i}`, track: track(t), setVideoId: c.by === "You" ? setsOf(c)[i] : null, videoId: track(t).id })),
+      cursor: long ? `${c.id}@${PAGE}` : null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
     });
   },
-  collectionMore: async () => ({ entries: [], cursor: null }),
+  async collectionMore(cursor) {
+    const [cid, at] = cursor.split("@");
+    const c = anyCollection(cid);
+    const from = Number(at);
+    if (!c || !Number.isFinite(from)) return { entries: [], cursor: null, complete: false };
+    const to = Math.min(c.trackIds.length, from + PAGE);
+    const entries = c.trackIds.slice(from, to).map((t, k) => ({ entryId: `${t}#${from + k}`, track: track(t), setVideoId: null, videoId: track(t).id }));
+    return delay({ entries, cursor: to < c.trackIds.length ? `${c.id}@${to}` : null, complete: to >= c.trackIds.length }, 700);
+  },
   async artist(id) {
     const a = M.artists.find((x) => x.id === raw(id));
     if (!a) throw { code: "notFound", message: "That artist does not exist.", retryable: false, action: null };
     return delay({
       id: mid(a.id), name: a.name, subscribers: `${a.subs} subscribers`, description: a.blurb, art: art(a.art),
       topSongs: M.tracks.filter((t) => t.artistId === a.id).slice(0, 5).map(toTrack), topSongsMore: null,
-      shelves: [shelf("Albums", M.collections.filter((c) => c.artistId === a.id).map(item.c)), shelf("Fans also like", M.artists.filter((x) => x.id !== a.id).slice(0, 6).map(item.a))].filter((s) => s.items.length),
+      // The release shelves link to the artist's discography, each with its own params (D35).
+      shelves: [
+        { ...shelf("Albums", M.collections.filter((c) => c.artistId === a.id).map(item.c)), more: { title: "Albums", browseId: `MPAD${a.id}`, params: "albums", hue: null } },
+        { ...shelf("Singles & EPs", singles.filter((c) => c.artistId === a.id).map(item.c)), more: { title: "Singles & EPs", browseId: `MPAD${a.id}`, params: "singles", hue: null } },
+        shelf("Fans also like", M.artists.filter((x) => x.id !== a.id).slice(0, 6).map(item.a)),
+      ].filter((s) => s.items.length),
       subscribed: false, channelId: a.id, radioPlaylist: `RD${a.id}`, shufflePlaylist: null,
     });
   },
@@ -748,8 +953,9 @@ export const mockApi: Api = {
       if (!local.length) throw { code: "network", message: "None of these songs are downloaded yet. Connect to the internet to play them.", retryable: true, action: null };
       return replace(local, shuffle ? Math.floor(Math.random() * local.length) : 0, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
     }
-    const s = shuffle ? Math.floor(Math.random() * c.entries.length) : start;
-    replace(c.entries.map((e) => e.track), s, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
+    const src = { label: c.title, collectionId: id, radioPlaylist: null };
+    if (shuffle) return replaceCycle(c.entries.map((e) => e.track), src);
+    replace(c.entries.map((e) => e.track), start, src, false);
   },
   async playTrack(t) {
     replace([t], 0, { label: `${t.title} radio`, collectionId: null, radioPlaylist: null }, false);
@@ -787,6 +993,8 @@ export const mockApi: Api = {
     const cur = P.index != null ? P.entries[P.index] : null;
     if (!cur) return;
     P.position = Math.min(Math.max(0, t), (cur.track.duration ?? 0) - 0.1);
+    const l = mockPlayer.loop;
+    if (l?.a != null && l.b != null && (P.position < l.a - 0.05 || P.position > l.b + 0.05)) endLoop();
     sgen++;
     if (P.phase === "ended") P.phase = "paused";
     publish();
@@ -851,10 +1059,20 @@ export const mockApi: Api = {
   },
   async setRepeat(m) {
     P.repeat = m;
+    mockPlayer.loopRepeat = null;
     publish();
   },
   async setAutoplay(on) {
     P.autoplay = on;
+    if (!on && P.index != null) {
+      const keep = P.entries.filter((e, i) => i <= P.index! || e.origin !== "radio");
+      if (keep.length !== P.entries.length) {
+        const gone = new Set(P.entries.filter((e) => !keep.includes(e)).map((e) => e.uid));
+        P.entries = keep;
+        P.canon = P.canon.filter((u) => !gone.has(u));
+        return publish(true);
+      }
+    }
     publish();
   },
   async setVolume(v) {
@@ -1112,4 +1330,28 @@ export const mockApi: Api = {
     return upStatus();
   },
   artUrl: () => "",
+  features: mockFeatures,
+};
+
+/** What the feature mocks (./mock/<area>.ts) share with this one: the
+ *  simulated player and its events, the catalogue and the handlers. Read
+ *  it inside functions only (the feature mocks load before this file has
+ *  finished). */
+export const mockKit = {
+  get handlers() {
+    return h;
+  },
+  /** The simulated player's state; `publish()` sends it. */
+  player: P,
+  publish,
+  snapshot: snap,
+  track,
+  delay,
+  /** Online, as the mock's connection says (`?offline`). */
+  get online() {
+    return dl.online;
+  },
+  get signedIn() {
+    return auth.state === "signedIn";
+  },
 };

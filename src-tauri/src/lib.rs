@@ -5,6 +5,7 @@ mod commands;
 mod connectivity;
 mod core;
 mod events;
+mod features;
 mod logging;
 mod media;
 mod selftest;
@@ -115,6 +116,68 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             window::snap_layouts,
             window::set_system_titlebar,
             window::get_system_titlebar,
+            // One block per area, each appended to only by its lane
+            // (foundation.md): `features::<area>::<command>,` lines.
+            // features: playback (lane A)
+            features::playback::loop_set,
+            features::playback::loop_clear,
+            features::playback::sleep_set,
+            features::playback::sleep_cancel,
+
+            // features: library tools (lane B)
+            features::library_tools::library_sort_facts,
+            features::library_tools::library_years,
+            features::library_tools::library_years_stop,
+            features::library_tools::library_like,
+            features::library_tools::library_like_stop,
+            features::library_tools::library_discography,
+
+            // features: saved (lane C)
+            features::saved::bookmarks_list,
+            features::saved::bookmarks_add,
+            features::saved::bookmarks_remove,
+            features::saved::saved_queues_list,
+            features::saved::saved_queue_save,
+            features::saved::saved_queue_restore,
+            features::saved::saved_queue_remove,
+            features::saved::folders_list,
+            features::saved::folders_create,
+            features::saved::folders_rename,
+            features::saved::folders_remove,
+            features::saved::folders_set_collapsed,
+            features::saved::folders_add,
+            features::saved::folders_remove_item,
+            features::saved::folders_move_item,
+            features::saved::folders_choose_cover,
+            features::saved::folders_clear_cover,
+            features::saved::folders_export,
+            features::saved::folders_import,
+
+            // features: taste and stats (lane D)
+            features::taste::taste_state,
+            features::taste::taste_block,
+            features::taste::taste_unblock,
+            features::taste::taste_set_hide_podcasts,
+            features::taste::taste_private,
+            features::stats::stats_overview,
+            features::stats::stats_period,
+            features::stats::stats_play_counts,
+            features::stats::stats_clear,
+
+            // features: integrations (lane E)
+            features::lastfm::lastfm_status,
+            features::lastfm::lastfm_begin,
+            features::lastfm::lastfm_finish,
+            features::lastfm::lastfm_cancel,
+            features::lastfm::lastfm_disconnect,
+            features::lastfm::lastfm_plays,
+            features::presence::presence_status,
+            features::presence::presence_set,
+            features::wiki::wiki_artist,
+            features::details::details_track,
+            features::details::details_analyse,
+            features::details::details_cancel,
+
         ])
         .events(collect_events![
             PlayerStateEvent,
@@ -132,7 +195,23 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             DownloadsEvent,
             DownloadItemEvent,
             ConnectivityEvent,
-            UpdateEvent
+            UpdateEvent,
+            // features: playback (lane A)
+
+            // features: library tools (lane B)
+            features::library_tools::LibraryYearEvent,
+            features::library_tools::LibraryLikeEvent,
+
+            // features: saved (lane C)
+
+            // features: taste and stats (lane D)
+            features::taste::TasteEvent,
+            features::stats::StatsEvent,
+
+            // features: integrations (lane E)
+            features::lastfm::LastfmEvent,
+            features::presence::PresenceEvent,
+
         ])
 }
 
@@ -261,10 +340,13 @@ pub fn run() {
             let _ = w.set_focus();
         }
     }));
-    app.plugin(tauri_plugin_opener::init())
-        // Updates (D24): used from Rust only; the UI has no updater permission.
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(builder.invoke_handler())
+    let app = app.plugin(tauri_plugin_opener::init());
+    // Updates (D24): used from Rust only; the UI has no updater permission.
+    let app = app.plugin(tauri_plugin_updater::Builder::new().build());
+    // features: plugins, one `let app = app.plugin(...);` line per lane.
+    let app = app.plugin(tauri_plugin_dialog::init()); // lane C: folder covers and files
+
+    app.invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
             let uri = req.uri().to_string();
@@ -365,14 +447,12 @@ pub fn run() {
             if let Some(d) = &core.downloads {
                 d.set_setup_ready(core.resolver.runtimes().status().usable);
                 d.start();
-                // The index was lost and rebuilt from the song files (D23).
-                let n = d.recovered();
-                if n > 0 {
-                    let text = format!("Encore's database was damaged and replaced. It found your {n} downloaded songs again; download playlists and albums again to keep them up to date.");
-                    if let Some(text) = core.startup_notice(text) {
-                        let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&handle);
-                    }
-                }
+            }
+            // A damaged database was replaced (D11), and downloaded songs
+            // the index no longer knew were found from their files (D23).
+            let found = core.downloads.as_ref().map(|d| d.recovered()).unwrap_or(0);
+            if let Some(text) = core.recovery_notice(found).and_then(|t| core.startup_notice(t)) {
+                let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&handle);
             }
             // Plays go to YouTube Music history while the setting is on (D18).
             let h4 = handle.clone();
@@ -380,6 +460,7 @@ pub fn run() {
                 let _ = HistoryEvent { track_id: id.0.clone() }.emit(&h4);
             }));
             media::install(&handle, core.clone());
+            features::install(&handle, &core);
             keepalive(handle.clone(), core.clone());
             // Updates (D24): checks start 20 s from now.
             let updates = updates::Updates::new(handle.clone(), core.clone());

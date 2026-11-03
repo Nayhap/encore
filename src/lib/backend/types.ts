@@ -72,6 +72,49 @@ export type UpdateStatus = B.UpdateStatus_Serialize;
 export type UpdateInfo = B.UpdateInfo_Serialize;
 export type UpdatePhase = B.UpdatePhase;
 export type InstallKind = B.InstallKind;
+export type LoopRange = B.LoopRange;
+export type SleepTimer = B.SleepTimer_Serialize;
+export type SleepMode = B.SleepMode;
+export type PrivateSession = B.PrivateSession_Serialize;
+// features: each lane adds the names of its own binding types below its
+// line (append-only; see foundation.md).
+// features: playback (lane A)
+
+// features: library tools (lane B)
+export type SortRow = B.SortRow_Deserialize;
+export type SortFacts = B.SortFacts_Serialize;
+export type YearsStart = B.YearsStart;
+export type LibraryYearEvent = B.LibraryYearEvent_Serialize;
+export type LibraryLikeEvent = B.LibraryLikeEvent_Serialize;
+export type Discography = B.Discography_Serialize;
+
+// features: saved (lane C)
+export type Bookmark = B.Bookmark_Serialize;
+export type BookmarkKind = B.BookmarkKind;
+export type BookmarkTarget = B.BookmarkTarget_Serialize;
+export type PageRef = B.PageRef_Serialize;
+export type SavedQueueInfo = B.SavedQueueInfo_Serialize;
+export type Folder = B.Folder_Serialize;
+export type FolderItem = B.FolderItem_Serialize;
+
+// features: taste and stats (lane D)
+export type BlockKind = B.BlockKind;
+export type Blocked = B.Blocked_Serialize;
+export type TasteState = B.TasteState_Serialize;
+export type StatsPeriod = B.StatsPeriod_Serialize;
+export type StatsOverview = B.StatsOverview_Serialize;
+export type ListeningStats = B.ListeningStats_Serialize;
+export type TopTrack = B.TopTrack_Serialize;
+export type TopCredit = B.TopCredit_Serialize;
+
+// features: integrations (lane E)
+export type LastfmStatus = B.LastfmStatus_Serialize;
+export type PresenceStatus = B.PresenceStatus;
+export type WikiExtract = B.WikiExtract_Serialize;
+export type SongDetails = B.SongDetails_Serialize;
+export type SongFile = B.SongFile_Serialize;
+export type AudioAnalysis = B.AudioAnalysis_Serialize;
+
 
 /** Mock-only procedural artwork (dev without Tauri). */
 export type Motif = "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks";

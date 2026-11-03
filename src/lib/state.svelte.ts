@@ -1,7 +1,8 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track, type UpdateStatus } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type LoopRange, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type PrivateSession, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type SleepTimer, type Track, type UpdateStatus } from "./backend";
 import { catalog } from "./catalog.svelte";
 import { sizeText } from "./data";
+import { collectionMenuItems, grouped, loadFeatures, subscribeFeatures, trackMenuItems, type MenuItem, type TrackBand } from "./features/hooks";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
 // methods are the UI contract; each one becomes a backend command. Position
@@ -38,6 +39,12 @@ class Player {
   liked = new SvelteSet<string>();
   lyrics = $state<Lyrics | null>(null);
   lyricsFor = $state<string | null>(null);
+  /** The snapshot's reserved fields (lanes A and D fill them in Rust). */
+  abLoop = $state<LoopRange | null>(null);
+  sleep = $state<SleepTimer | null>(null);
+  privateSession = $state<PrivateSession | null>(null);
+  /** When `privateSession` arrived: its `remaining` counts from here. */
+  privateSessionAt = 0;
 
   current: Track | undefined = $derived(this.index != null ? this.queue[this.index]?.track : undefined);
   currentEntry: QueueEntry | undefined = $derived(this.index != null ? this.queue[this.index] : undefined);
@@ -65,6 +72,9 @@ class Player {
     if (!a.playing) return;
     const dt = Math.min((performance.now() - a.at) / 1000, 2);
     let p = a.pos + dt;
+    // Inside an A–B loop the engine wraps at B (D26, lane A).
+    const l = this.abLoop;
+    if (l?.a != null && l.b != null && a.pos < l.b && p >= l.b) p = l.a + ((p - l.b) % Math.max(l.b - l.a, 0.001));
     if (this.duration != null) p = Math.min(p, this.duration);
     this.position = p;
   };
@@ -98,6 +108,10 @@ class Player {
     this.duration = s.duration;
     this.error = s.error?.message ?? null;
     this.noOutput = s.noOutput ?? false;
+    this.abLoop = s.loop ?? null;
+    this.sleep = s.sleep ?? null;
+    this.privateSession = s.private ?? null;
+    this.privateSessionAt = Date.now();
     const sg = big(s.seekGen);
     if (trackChanged || sg > this.#seekGen || this.#localSeek < 0n) {
       this.#seekGen = sg;
@@ -179,8 +193,9 @@ class Player {
     this.playTracks(tracks, start, source ? { label: source.label, collectionId: source.collectionId ?? null, radioPlaylist: null } : null, shuffle);
   }
 
-  playCollection(id: string, start = 0, shuffle = false) {
-    this.#run((a) => a.playCollection(id, start, shuffle), "Could not play");
+  /** `params` when the link carries them (an artist's "All songs"). */
+  playCollection(id: string, start = 0, shuffle = false, params: string | null = null) {
+    this.#run((a) => a.playCollection(id, start, shuffle, params), "Could not play");
   }
 
   /** With context, play that list from the track; without, start its radio. */
@@ -312,12 +327,14 @@ export type View =
   | { name: "home" }
   | { name: "explore" }
   | { name: "library" }
-  | { name: "collection"; id: string }
+  | { name: "collection"; id: string; params?: string | null }
   | { name: "artist"; id: string }
   | { name: "page"; browseId: string; params?: string | null; title?: string }
   | { name: "history" }
   | { name: "downloads" }
-  | { name: "settings" };
+  | { name: "settings" }
+  // Lane C: a folder of playlists and albums (D34).
+  | { name: "folder"; id: string; title?: string };
 
 class Nav {
   stack = $state<View[]>([{ name: "home" }]);
@@ -340,20 +357,14 @@ class Nav {
   }
 }
 
+export type { MenuItem };
+
 /** A button on a toast. */
 export interface ToastAction {
   label: string;
   run: () => void;
 }
 
-export interface MenuItem {
-  label: string;
-  icon?: string;
-  run: () => void;
-  danger?: boolean;
-  /** Why it can't be used right now (offline, for one); shown instead of running. */
-  disabled?: string;
-}
 
 export type Theme = "system" | "dark" | "light";
 
@@ -1018,21 +1029,28 @@ export function trackMenu(id: string, uid?: string): MenuItem[] {
   const entry = uid ?? (player.current?.id === id ? player.currentEntry?.uid : undefined);
   const liked = player.liked.has(id);
   const artist = tr.artists.find((a) => a.id);
-  const items: MenuItem[] = [
+  // Five groups (`TrackBand`): play it, keep it, this song, go to, and
+  // "Don't play this again" alone at the bottom.
+  const band: Record<TrackBand, MenuItem[]> = { play: [], keep: [], song: [], goto: [], last: [] };
+  band.play.push(
     { label: "Play next", icon: "playNext", run: () => (player.playNext(id), ui.say(`“${tr.title}” plays next`)) },
     { label: "Add to queue", icon: "queue", run: () => (player.addToQueue(id), ui.say(`Added “${tr.title}” to queue`)) },
-    { label: "Start radio", icon: "radio", disabled: needsOnline("start a radio"), run: () => player.playTrack(id) },
-    { label: liked ? "Remove from liked music" : "Add to liked music", icon: liked ? "heartFill" : "heart", disabled: needsOnline("change your likes"), run: () => (player.toggleLike(id), ui.say(liked ? "Removed from liked music" : "Added to liked music")) },
-  ];
+  );
+  band.keep.push({ label: liked ? "Remove from liked music" : "Add to liked music", icon: liked ? "heartFill" : "heart", disabled: needsOnline("change your likes"), run: () => (player.toggleLike(id), ui.say(liked ? "Removed from liked music" : "Added to liked music")) });
+  if (account.signedIn) band.keep.push({ label: "Add to playlist…", icon: "plus", disabled: needsOnline("add to a playlist"), run: () => void pickPlaylist([id]) });
+  const extra = trackMenuItems.items({ track: tr, uid: entry });
+  const keepExtra = extra.filter((i) => i.band === "keep");
+  band.keep.push(...keepExtra);
+  if (downloads.available && tr.playable) band.keep.push(downloadItem(id));
+  for (const i of extra) if (i.band !== "keep") band[i.band ?? "song"].push(i);
   if ((tr.kind === "song" || tr.kind === "video") && versions.get(id) !== null) {
-    items.push({ label: tr.kind === "video" ? "Play the song version" : "Play the video version", icon: "swap", disabled: needsOnline("switch versions"), run: () => void playOtherVersion(tr, entry) });
+    band.song.push({ label: tr.kind === "video" ? "Play the song version" : "Play the video version", icon: "swap", disabled: needsOnline("switch versions"), run: () => void playOtherVersion(tr, entry) });
   }
-  if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", disabled: needsOnline("add to a playlist"), run: () => void pickPlaylist([id]) });
-  if (downloads.available && tr.playable) items.push(downloadItem(id));
-  if (artist?.id) items.push({ label: "Go to artist", icon: "artist", run: () => nav.go({ name: "artist", id: artist.id! }) });
-  if (tr.album?.id) items.push({ label: "Go to album", icon: "album", run: () => nav.go({ name: "collection", id: tr.album!.id! }) });
-  items.push({ label: "Copy link", icon: "link", run: () => (navigator.clipboard?.writeText(`https://music.youtube.com/watch?v=${remote(id)}`), ui.say("Link copied")) });
-  return items;
+  band.song.push({ label: "Start radio", icon: "radio", disabled: needsOnline("start a radio"), run: () => player.playTrack(id) });
+  if (artist?.id) band.goto.push({ label: "Go to artist", icon: "artist", run: () => nav.go({ name: "artist", id: artist.id! }) });
+  if (tr.album?.id) band.goto.push({ label: "Go to album", icon: "album", run: () => nav.go({ name: "collection", id: tr.album!.id! }) });
+  band.goto.push({ label: "Copy link", icon: "link", run: () => (navigator.clipboard?.writeText(`https://music.youtube.com/watch?v=${remote(id)}`), ui.say("Link copied")) });
+  return grouped(band.play, band.keep, band.song, band.goto, band.last);
 }
 
 export function collectionMenu(id: string): MenuItem[] {
@@ -1060,19 +1078,23 @@ export function collectionMenu(id: string): MenuItem[] {
     : kept?.mine
       ? [{ label: "Remove download…", icon: "downloaded", run: () => downloads.unkeep(id, kept) }]
       : [{ label: "Download", icon: "download", disabled: ui.online ? undefined : KEEP_OFFLINE, run: () => void downloads.keep(id) }];
-  return [
-    { label: "Play", icon: "play", run: () => player.playCollection(id) },
-    { label: "Shuffle", icon: "shuffle", run: () => player.playCollection(id, 0, true) },
-    { label: "Play next", icon: "playNext", run: () => withTracks((ids) => (player.playNext(ids), ui.say(`“${title}” plays next`))) },
-    { label: "Add to queue", icon: "queue", run: () => withTracks((ids) => (player.addToQueue(ids), ui.say(`Added “${title}” to queue`))) },
-    ...dl,
-    {
-      label: "Copy link",
-      icon: "link",
-      run: () => (navigator.clipboard?.writeText(listId.startsWith("MPRE") ? `https://music.youtube.com/browse/${listId}` : `https://music.youtube.com/playlist?list=${listId}`), ui.say("Link copied")),
-    },
-    ...mineItems,
-  ];
+  return grouped(
+    [
+      { label: "Play", icon: "play", run: () => player.playCollection(id) },
+      { label: "Shuffle", icon: "shuffle", run: () => player.playCollection(id, 0, true) },
+      { label: "Play next", icon: "playNext", run: () => withTracks((ids) => (player.playNext(ids), ui.say(`“${title}” plays next`))) },
+      { label: "Add to queue", icon: "queue", run: () => withTracks((ids) => (player.addToQueue(ids), ui.say(`Added “${title}” to queue`))) },
+    ],
+    [...dl, ...collectionMenuItems.items(id)],
+    [
+      {
+        label: "Copy link",
+        icon: "link",
+        run: () => (navigator.clipboard?.writeText(listId.startsWith("MPRE") ? `https://music.youtube.com/browse/${listId}` : `https://music.youtube.com/playlist?list=${listId}`), ui.say("Link copied")),
+      },
+    ],
+    mineItems,
+  );
 }
 
 // ---------- playlist actions (D20) ----------
@@ -1145,16 +1167,6 @@ async function pickPlaylist(trackIds: string[]) {
   ]);
 }
 
-/** Play an artist: their radio if YouTube offers one, else the top songs. */
-export async function playArtist(id: string, shuffle = false) {
-  const a = await call((x) => x.artist(id)).catch((e: BackendError) => (ui.say(`Could not load the artist: ${e.message}`), null));
-  if (!a) return;
-  catalog.addArtist(a);
-  const radio = shuffle ? a.shufflePlaylist ?? a.radioPlaylist : a.radioPlaylist ?? a.shufflePlaylist;
-  if (radio) player.startRadio(radio, a.name);
-  else player.playTracks(a.topSongs, 0, { label: a.name, collectionId: null, radioPlaylist: null }, shuffle);
-}
-
 /** Connect to the backend: subscribe first, then bootstrap (D13). */
 export async function connect() {
   await call((a) =>
@@ -1177,6 +1189,7 @@ export async function connect() {
       update: (s) => updates.apply(s),
     }),
   );
+  await subscribeFeatures();
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
@@ -1192,6 +1205,10 @@ export async function connect() {
   if (cur && player.lyricsFor !== cur.id) {
     call((a) => a.lyrics(cur)).then((l) => player.setLyrics(cur.id, l)).catch(() => {});
   }
+  void loadFeatures();
 }
 
 export { catalog };
+
+// The feature modules (./features): their state, actions and hooks.
+export * from "./features";

@@ -11,9 +11,12 @@
 //! The [`HistoryReporter`] task feeds it from the player's own events and
 //! sends the pings through a [`PlayReporter`], one at a time. Failures are
 //! logged once and never touch playback. Offline nothing is opened or sent,
-//! and a play that started offline is never reported later (D23). Before
-//! Encore quits or installs an update, [`Settle`] ends the play in progress
-//! and waits a bounded time for its last ping (D24).
+//! and a play that started offline is never reported later (D23). A private
+//! session works the same way (D36): from the moment it starts nothing more
+//! is opened or sent, not even pings already queued, and a play that began
+//! in one is never reported, even if the session ends while it plays.
+//! Before Encore quits or installs an update, [`Settle`] ends the play in
+//! progress and waits a bounded time for its last ping (D24).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -219,12 +222,14 @@ impl HistoryReporter {
     /// online. `link` counts connection changes: even while online, odd
     /// while offline. A play, its report and every ping belong to the
     /// connection they started on; once it changes they are dropped, even if
-    /// the connection is back by then (D23). `on_registered` runs after a
-    /// play's first ping was accepted.
-    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) -> Settle {
+    /// the connection is back by then (D23). `private` is set during a
+    /// private session (D36). `on_registered` runs after a play's first
+    /// ping was accepted.
+    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, private: Arc<AtomicBool>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) -> Settle {
         let (send_tx, mut send_rx) = mpsc::channel::<Outgoing>(SEND_QUEUE);
         let (settle_tx, settle_rx) = mpsc::unbounded_channel();
         let link2 = link.clone();
+        let private2 = private.clone();
         // One ping at a time, in order.
         tokio::spawn(async move {
             let mut failed_for: Option<ItemId> = None;
@@ -238,7 +243,7 @@ impl HistoryReporter {
                 };
                 // Pings are not kept for later: a play replayed hours after
                 // the fact would be wrong history (D23).
-                if link2.load(Ordering::SeqCst) != at {
+                if link2.load(Ordering::SeqCst) != at || private2.load(Ordering::SeqCst) {
                     continue;
                 }
                 let first = matches!(ping, Ping::Playback { .. });
@@ -257,7 +262,7 @@ impl HistoryReporter {
                 }
             }
         });
-        tokio::spawn(run(events, reporter, enabled, link, send_tx, settle_rx));
+        tokio::spawn(run(events, reporter, enabled, link, private, send_tx, settle_rx));
         Settle(settle_tx)
     }
 }
@@ -267,6 +272,8 @@ async fn run(
     reporter: Arc<dyn PlayReporter>,
     enabled: Arc<AtomicBool>,
     link: Arc<AtomicU64>,
+    // A private session runs (D36).
+    private: Arc<AtomicBool>,
     send: mpsc::Sender<Outgoing>,
     mut settle: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
 ) {
@@ -303,10 +310,11 @@ async fn run(
                     continue;
                 }
                 let now_link = link.load(Ordering::SeqCst);
+                let private_now = private.load(Ordering::SeqCst);
                 let connected = now_link % 2 == 0;
-                // The connection changed since this play began: it is not
-                // reported, now or later.
-                if let Some(a) = active.as_mut().filter(|a| a.link != now_link) {
+                // The connection changed since this play began, or a private
+                // session started: it is not reported, now or later.
+                if let Some(a) = active.as_mut().filter(|a| a.link != now_link || private_now) {
                     a.report = ReportState::Off;
                 }
                 match ev {
@@ -318,7 +326,7 @@ async fn run(
                         let same = active.as_ref().is_some_and(|a| a.track_gen == s.track_gen && a.uid == cur.uid);
                         if !same {
                             end(active.take(), now);
-                            let report = if connected { ReportState::Waiting } else { ReportState::Off };
+                            let report = if connected && !private_now { ReportState::Waiting } else { ReportState::Off };
                             active = Some(Active { track_gen: s.track_gen.clone(), uid: cur.uid.clone(), id: cur.track.id.clone(), seek_gen: s.seek_gen.clone(), itag: None, listen: Listen::new(), report, link: now_link });
                         }
                         let a = active.as_mut().unwrap();
@@ -344,9 +352,9 @@ async fn run(
                 // Long enough heard: ask for this play's report, once.
                 if let Some(a) = active.as_mut().filter(|a| matches!(a.report, ReportState::Waiting) && a.listen.counts()) {
                     a.report = ReportState::Opening;
-                    let (r, tx, id, tg, uid, link, at) = (reporter.clone(), open_tx.clone(), a.id.clone(), a.track_gen.clone(), a.uid.clone(), link.clone(), a.link);
+                    let (r, tx, id, tg, uid, link, at, private) = (reporter.clone(), open_tx.clone(), a.id.clone(), a.track_gen.clone(), a.uid.clone(), link.clone(), a.link, private.clone());
                     tokio::spawn(async move {
-                        if link.load(Ordering::SeqCst) != at {
+                        if link.load(Ordering::SeqCst) != at || private.load(Ordering::SeqCst) {
                             return;
                         }
                         let res = match r.open_report(&id).await {
@@ -371,6 +379,10 @@ async fn run(
                 // A report for a play that has already ended (or went
                 // offline meanwhile) is dropped unsent.
                 let Some(a) = active.as_mut().filter(|a| a.track_gen == tg && a.uid == uid && matches!(a.report, ReportState::Opening) && a.link == link.load(Ordering::SeqCst)) else { continue };
+                if private.load(Ordering::SeqCst) {
+                    a.report = ReportState::Off;
+                    continue;
+                }
                 if !enabled.load(Ordering::Relaxed) {
                     active = None;
                     continue;
@@ -560,7 +572,7 @@ mod tests {
         PlayerEvent::State(PlayerSnapshot {
             revision: "1".into(), track_gen: tg.to_string(), seek_gen: "0".into(), phase, playing: phase == Phase::Playing, current: Some(entry(id)), index: Some(0),
             position: pos, duration: Some(200.0), shuffle: false, repeat: Repeat::Off, autoplay: false, volume: 1.0, muted: false, source: None, stream: None,
-            error: None, skipped_in_a_row: 0, queue_loading: false, no_output: false,
+            error: None, skipped_in_a_row: 0, queue_loading: false, no_output: false, ab_loop: None, sleep: None, private: None,
         })
     }
     fn anchor(tg: u64, pos: f64) -> PlayerEvent {
@@ -572,7 +584,7 @@ mod tests {
         let log = Arc::new(Log::default());
         let reg = Arc::new(Mutex::new(Vec::new()));
         let r2 = reg.clone();
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(AtomicU64::new(0)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), open_delay)), Arc::new(AtomicBool::new(on)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)), Arc::new(move |id: &ItemId| r2.lock().push(id.remote().to_string())));
         (tx, log, reg)
     }
 
@@ -581,7 +593,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         let log = Arc::new(Log::default());
         let link = Arc::new(AtomicU64::new(1));
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(|_: &ItemId| {}));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(AtomicBool::new(false)), Arc::new(|_: &ItemId| {}));
         tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
         for i in 1..=6 {
             tx.send(anchor(1, i as f64 * 0.5)).unwrap();
@@ -605,7 +617,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         let log = Arc::new(Log::default());
         let link = Arc::new(AtomicU64::new(0));
-        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(|_: &ItemId| {}));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), link.clone(), Arc::new(AtomicBool::new(false)), Arc::new(|_: &ItemId| {}));
         tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
         for i in 1..=6 {
             tx.send(anchor(1, i as f64 * 0.5)).unwrap();
@@ -652,7 +664,7 @@ mod tests {
     async fn settling_sends_the_last_ping_before_it_returns() {
         let (tx, rx) = broadcast::channel(64);
         let log = Arc::new(Log::default());
-        let s = HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)), Arc::new(|_: &ItemId| {}));
+        let s = HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)), Arc::new(|_: &ItemId| {}));
         tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
         for i in 1..=8 {
             tx.send(anchor(1, i as f64 * 0.5)).unwrap();
@@ -697,4 +709,37 @@ mod tests {
         assert!(log.opened.lock().is_empty());
     }
 
+    #[tokio::test]
+    async fn a_private_session_stops_reports_and_its_plays_stay_unreported() {
+        let (tx, rx) = broadcast::channel(256);
+        let log = Arc::new(Log::default());
+        let private = Arc::new(AtomicBool::new(false));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)), private.clone(), Arc::new(|_: &ItemId| {}));
+        tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=6 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        let before = log.pings.lock().len();
+        assert!(before > 0, "reported before the session");
+        // The session starts halfway through: nothing more for this play.
+        private.store(true, Ordering::SeqCst);
+        for i in 7..=60 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        // A play inside the session, which ends while it plays.
+        tx.send(state("b", 2, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=6 {
+            tx.send(anchor(2, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        private.store(false, Ordering::SeqCst);
+        for i in 7..=60 {
+            tx.send(anchor(2, i as f64 * 0.5)).unwrap();
+        }
+        tx.send(state("c", 3, Phase::Loading, 0.0)).unwrap();
+        settle().await;
+        assert_eq!(log.pings.lock().len(), before);
+        assert_eq!(*log.opened.lock(), vec!["a"], "b was never opened");
+    }
 }

@@ -28,7 +28,16 @@
   lines stand taller, so you can see the chorus coming and jump to it.
 - **Lyrics and the queue side by side** while you browse. Drag to reorder.
 - **Search and commands in one box** (<kbd>⌘K</kbd>, or <kbd>Ctrl+K</kbd> on
-  Windows and Linux). Shift+Enter plays next.
+  Windows and Linux). Shift+Enter plays next; start with `>` for commands,
+  `#` for your playlists and folders, `@` for artists, or type `2:15` to jump
+  there.
+- **Loop part of a song** (<kbd>A</kbd>) and a **sleep timer** that fades out.
+- **Bookmarks** for pages, songs and moments in a song (<kbd>B</kbd>).
+- **Folders** for your playlists and albums, with your own covers, and a
+  small file to share one.
+- **Library tools** on every list: find (<kbd>⌘F</kbd>), sort by title,
+  year, your plays or Last.fm plays, select many to add, remove, like or
+  download, and find duplicates. Artists get their full discography.
 - **Your library**: playlists, liked songs, albums, artists, subscriptions.
   Brand channels are supported.
 - **Playlists you can manage**: create, rename, describe, make private,
@@ -36,7 +45,16 @@
   warns about duplicates and can start a new playlist.
 - **Your history**: plays count in your YouTube Music history and
   recommendations, as in the official app (you can turn this off), and a
-  History page shows what you played, by day.
+  History page shows what you played, by day, and your listening stats for
+  any month or year, kept on your computer.
+- **Don't play this again** for songs and artists, **Hide podcasts**, and a
+  **private session** that keeps an hour of listening out of your history.
+- **Queue tools**: the time left, save a queue and come back to it, or save
+  it as a playlist. Shuffle plays every song once before repeating, across
+  sessions; Autoplay off means only what you choose plays.
+- **Last.fm scrobbling** with your own API key, and **Discord** presence.
+- **Song details**: tempo and key estimated from the audio, plays, and the
+  file Encore has; artist pages without a description show Wikipedia's.
 - **Song or video**: switch between a song and its music video (audio
   only) from the now playing panel or any track's menu.
 - **Downloads for offline listening**, kept inside Encore: download songs,
@@ -49,7 +67,7 @@
   media flyout on Windows, MPRIS on Linux.
 - **Runs on macOS, Windows and Linux.**
 - **Colours that follow the cover** of the song that's playing, in light or
-  dark.
+  dark, with a soft wash of the cover behind the now playing panel and lyrics.
 
 <p align="center">
   <img src="docs/assets/screens/lyrics.webp" width="49%" alt="Full-screen lyrics">
@@ -145,6 +163,9 @@ analytics.
 | <kbd>S</kbd> / <kbd>R</kbd> / <kbd>L</kbd> | Shuffle / repeat / like |
 | <kbd>F</kbd> | Full-screen lyrics |
 | <kbd>D</kbd> | Download the song that's playing |
+| <kbd>A</kbd> | Loop: set its start, then its end; again to clear |
+| <kbd>B</kbd> | Bookmark this moment of the song |
+| <kbd>⌘F</kbd> | Find in a playlist, album or Library list |
 | <kbd>⌘K</kbd> | Search and commands |
 | <kbd>⌘\\</kbd> | Show or hide the side panel |
 | <kbd>?</kbd> | All shortcuts |

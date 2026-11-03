@@ -1,10 +1,12 @@
 <script lang="ts">
   import { mod } from "$lib/platform";
   import { artistLine, fmt } from "$lib/data";
-  import { nav, player, trackMenu, ui } from "$lib/state.svelte";
+  import { abLoop, nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import DeckChips from "./DeckChips.svelte";
   import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
+  import Session from "./Session.svelte";
   import SongMap from "./SongMap.svelte";
 
   const tr = $derived(player.current);
@@ -65,12 +67,23 @@
       </div>
       <div class="scrub">
         <span class="mono time">{fmt(player.position)}</span>
-        <SongMap lines={player.timedLines} duration={dur} position={player.position} onseek={(t) => player.seek(t)} />
+        <SongMap
+          lines={player.timedLines}
+          duration={dur}
+          position={player.position}
+          onseek={(t) => player.seek(t)}
+          loop={abLoop.range}
+          mark={abLoop.pending}
+          onloop={(a, b) => abLoop.set(a, b)}
+          onclearloop={() => abLoop.clear()}
+        />
         <span class="mono time">{fmt(dur || null)}</span>
       </div>
     </div>
 
     <div class="tools">
+      <DeckChips />
+      <Session />
       <button class="icon-btn" class:on={ui.theater} aria-label="Full-screen lyrics" title="Full-screen lyrics (F)" onclick={() => (ui.theater = !ui.theater)}><Icon name="lyrics" size={19} /></button>
       <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel ({mod('\\')})" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
       <div class="volume">

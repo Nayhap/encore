@@ -1,19 +1,27 @@
 <script lang="ts">
+  // The chips and the toolbar; each kind of list is its own component
+  // (./library).
   import { call, type CollectionCard, type LibraryPage, type LibrarySection, type ShelfItem, type Track } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
-  import { kindLabel } from "$lib/data";
   import { Resource } from "$lib/load.svelte";
-  import { account, collectionMenu, nav, newPlaylist, player, playlists, ui } from "$lib/state.svelte";
-  import Cover from "$lib/components/Cover.svelte";
+  import { account, nav, playlists } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import KeepButton from "$lib/components/KeepButton.svelte";
   import Status from "$lib/components/Status.svelte";
-  import Tile from "$lib/components/Tile.svelte";
-  import TrackTable from "$lib/components/TrackTable.svelte";
+  import Artists from "./library/Artists.svelte";
+  import Bookmarks from "./library/Bookmarks.svelte";
+  import Collections from "./library/Collections.svelte";
+  import Songs from "./library/Songs.svelte";
 
-  type Filter = "Playlists" | "Albums" | "Artists" | "Songs";
-  const sections: Record<Filter, LibrarySection> = { Playlists: "playlists", Albums: "albums", Artists: "artists", Songs: "liked" };
-  let filter = $state<Filter>("Playlists");
+  type Remote = "Playlists" | "Albums" | "Artists" | "Songs";
+  // Bookmarks are Encore's own (D25): local, there signed out and offline too.
+  type Filter = Remote | "Bookmarks";
+  const sections: Record<Remote, LibrarySection> = { Playlists: "playlists", Albums: "albums", Artists: "artists", Songs: "liked" };
+  const filters: Filter[] = ["Playlists", "Albums", "Artists", "Songs", "Bookmarks"];
+  // The chip stays as it was when coming back from a bookmark or a list.
+  const last = sessionStorage.getItem("libFilter") as Filter | null;
+  let filter = $state<Filter>(last && filters.includes(last) ? last : "Playlists");
+  $effect(() => sessionStorage.setItem("libFilter", filter));
   let sort = $state<"recent" | "az">("recent");
   let layout = $state<"grid" | "list">((localStorage.getItem("libLayout") as "grid" | "list") ?? "grid");
   $effect(() => localStorage.setItem("libLayout", layout));
@@ -21,7 +29,7 @@
   let items = $state<ShelfItem[]>([]);
   let cursor = $state<string | null>(null);
   const page = new Resource<LibraryPage>(async () => {
-    const p = await call((a) => a.library(sections[filter]));
+    const p = await call((a) => a.library(sections[filter as Remote]));
     catalog.addItems(p.items);
     items = p.items;
     cursor = p.cursor;
@@ -32,6 +40,11 @@
     account.state.state;
     // A playlist was created, renamed or deleted.
     if (filter === "Playlists") playlists.rev;
+    if (filter === "Bookmarks") {
+      items = [];
+      cursor = null;
+      return;
+    }
     void page.reload();
   });
   // Keep loading pages so "Songs" and long lists are complete.
@@ -40,12 +53,13 @@
     if (cursor && !loadingMore) void more();
   });
   async function more() {
-    if (!cursor || items.length > 5000) return;
+    if (!cursor || items.length > 5000 || filter === "Bookmarks") return;
     loadingMore = true;
     const sec = sections[filter];
     try {
       const p = await call((a) => a.libraryMore(sec, cursor!));
-      if (sec !== sections[filter]) return;
+      const now = filter as Filter;
+      if (now === "Bookmarks" || sec !== sections[now]) return;
       catalog.addItems(p.items);
       items = [...items, ...p.items];
       cursor = p.cursor;
@@ -66,11 +80,13 @@
 
   <div class="bar">
     <div class="chips" role="group" aria-label="Show">
-      {#each ["Playlists", "Albums", "Artists", "Songs"] as const as f}
+      {#each filters as f}
         <button class="chip" aria-pressed={filter === f} onclick={() => (filter = f)}>{f}</button>
       {/each}
     </div>
-    {#if filter !== "Songs"}
+    {#if filter === "Bookmarks"}
+      <!-- Nothing to sort or lay out: newest first, by kind. -->
+    {:else if filter !== "Songs"}
       <div class="tools">
         <label class="sort">
           <span class="sr">Sort by</span>
@@ -90,54 +106,19 @@
     {/if}
   </div>
 
-  {#if !account.signedIn}
+  {#if filter === "Bookmarks"}
+    <Bookmarks />
+  {:else if !account.signedIn}
     <Status error={page.error ?? null} empty={page.error ? null : "Sign in to see your playlists, albums, artists and liked songs."} />
     {#if !page.error}<button class="pill primary" onclick={() => nav.go({ name: "settings" })}>Sign in</button>{/if}
   {:else}
     <Status loading={page.loading && !items.length} error={page.error} onretry={() => page.reload()} empty={!page.loading && !items.length ? `No ${filter.toLowerCase()} in your library yet.` : null} />
     {#if filter === "Songs"}
-      {#if songs.length}<TrackTable tracks={songs} label="Liked music" collectionId="ytm:VLLM" />{/if}
+      {#if songs.length}<Songs {songs} />{/if}
     {:else if filter === "Artists"}
-      <div class="grid">
-        {#each sorted as a (a.type + ("id" in a ? a.id : ""))}
-          <Tile item={a} size={0} />
-        {/each}
-      </div>
-    {:else if layout === "grid"}
-      <div class="grid">
-        {#if filter === "Playlists"}
-          <button class="new" onclick={() => newPlaylist()}>
-            <span class="new-art"><Icon name="plus" size={30} stroke={1.5} /></span>
-            <span class="t">New playlist</span>
-          </button>
-        {/if}
-        {#each cols as c (c.id)}
-          <Tile item={c} size={0} />
-        {/each}
-      </div>
+      <Artists items={sorted} />
     {:else}
-      <ul class="list">
-        {#if filter === "Playlists"}
-          <li>
-            <button onclick={() => newPlaylist()}>
-              <span class="thumb new-thumb"><Icon name="plus" size={22} stroke={1.5} /></span>
-              <span class="txt"><span class="t ell">New playlist</span></span>
-            </button>
-          </li>
-        {/if}
-        {#each cols as c (c.id)}
-          <li>
-            <button onclick={() => nav.go({ name: "collection", id: c.id })} oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}>
-              <span class="thumb"><Cover art={c.art} radius={6} size={120} label={c.title} /></span>
-              <span class="txt">
-                <span class="t ell">{c.title}</span>
-                <span class="s ell">{c.subtitle || kindLabel[c.kind]}</span>
-              </span>
-              {#if player.source?.collectionId === c.id}<span class="playing">Playing</span>{/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <Collections {cols} {layout} playlists={filter === "Playlists"} />
     {/if}
     {#if loadingMore}<p class="loading">Loading more…</p>{/if}
   {/if}
@@ -195,83 +176,6 @@
   .seg button[aria-pressed="true"] {
     background: var(--hover);
     color: var(--text);
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-    gap: 28px 20px;
-  }
-  .grid :global(.tile) {
-    width: auto !important;
-  }
-  .new {
-    display: grid;
-    align-content: start;
-    gap: 10px;
-    text-align: left;
-  }
-  .new-art {
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    border-radius: 10px;
-    border: 1.5px dashed color-mix(in srgb, var(--text) 25%, transparent);
-    color: var(--mute);
-    transition: border-color 0.15s, color 0.15s;
-  }
-  .new:hover .new-art {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .t {
-    font-weight: 600;
-  }
-  .list {
-    list-style: none;
-    margin: 0 -8px;
-    padding: 0;
-  }
-  .list button {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    padding: 7px 8px;
-    border-radius: 9px;
-    text-align: left;
-  }
-  .list button:hover {
-    background: var(--hover);
-  }
-  .thumb {
-    width: 52px;
-    flex: none;
-  }
-  .new-thumb {
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    border-radius: 6px;
-    border: 1.5px dashed color-mix(in srgb, var(--text) 25%, transparent);
-    color: var(--mute);
-  }
-  .list button:hover .new-thumb {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .txt {
-    flex: 1;
-    display: grid;
-    min-width: 0;
-  }
-  .s {
-    font-size: 13px;
-    color: var(--mute);
-  }
-  .playing {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent);
   }
   .loading {
     margin-top: 16px;
