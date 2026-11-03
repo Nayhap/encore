@@ -1,20 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { call } from "$lib/backend";
-  import { account, autoplayCopy, openExternal, player, setup, taste, ui } from "$lib/state.svelte";
+  import { account, autoplayCopy, openExternal, player, taste, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
-  import { mb, settings } from "./shared.svelte";
-
-  const busy = $derived(settings.busy);
   // The blocked songs and artists (D36), listed on request.
   let showBlocked = $state(false);
-  const blockedCount = $derived(taste.count === 1 ? "1 song or artist" : `${taste.count} songs and artists`);
-
-  onMount(async () => {
-    // Measured once here: the size of the components folder.
-    const rt = await call((a) => a.runtimesStatus()).catch(() => null);
-    if (rt) setup.apply(rt);
-  });
 
   function setReport(on: boolean) {
     ui.reportHistory = on;
@@ -22,17 +11,6 @@
       ui.reportHistory = !on;
       ui.say(`Could not change that: ${e.message}`);
     });
-  }
-  const rt = $derived(setup.status);
-  const versions = $derived((rt?.components ?? []).map((c) => `${c.name} ${c.installed ?? c.version}`).join(" · "));
-  function removeComponents() {
-    ui.confirm = {
-      title: "Remove player components?",
-      text: `This frees about ${mb(rt?.usedBytes || rt?.diskBytes || 0)}. Streaming and new downloads need them, so they wait until you set up playback again. Downloaded songs still play.`,
-      confirm: "Remove",
-      danger: true,
-      run: () => void settings.run("runtimes", () => setup.remove()),
-    };
   }
 </script>
 
@@ -52,16 +30,7 @@
         {account.signedIn ? "Songs you play here show up in your YouTube Music history and shape your recommendations." : "When you're signed in, songs you play here show up in your YouTube Music history."}
         Plays while you're offline aren't sent. YouTube's own history setting still applies.
       </p>
-      <span class="links">
-        <button type="button" class="link" onclick={() => openExternal("https://myactivity.google.com/product/youtube")}>Manage your YouTube history <Icon name="external" size={13} /></button>
-        {#if account.signedIn}
-          {#if taste.private}
-            <button type="button" class="link" onclick={() => taste.setPrivate(false)}><Icon name="lock" size={13} /> End private session{taste.privateLeftText ? ` (${taste.privateLeftText})` : ""}</button>
-          {:else}
-            <button type="button" class="link" onclick={() => taste.setPrivate(true)}><Icon name="lock" size={13} /> Start a private session</button>
-          {/if}
-        {/if}
-      </span>
+      <button type="button" class="link" onclick={() => openExternal("https://myactivity.google.com/product/youtube")}>Manage your YouTube history <Icon name="external" size={13} /></button>
     </label>
     <input id="report-history" type="checkbox" role="switch" checked={ui.reportHistory} onchange={(e) => setReport(e.currentTarget.checked)} />
   </div>
@@ -74,7 +43,7 @@
       </p>
     </div>
     {#if taste.count}
-      <button class="pill" aria-expanded={showBlocked} onclick={() => (showBlocked = !showBlocked)}>{showBlocked ? "Hide" : `Show ${blockedCount}`}</button>
+      <button class="pill" aria-expanded={showBlocked} onclick={() => (showBlocked = !showBlocked)}>{showBlocked ? "Hide" : "Show"}</button>
     {/if}
   </div>
   {#if showBlocked && taste.count}
@@ -88,36 +57,9 @@
       {/each}
     </ul>
   {/if}
-  <div class="row">
-    <div>
-      <b>Player components</b>
-      <p>
-        {#if !rt}Checking…
-        {:else if !rt.supported}{rt.message}
-        {:else if rt.installing}{rt.usable ? "Updating" : "Setting up"} · {Math.floor((rt.progress?.fraction ?? 0) * 100)}%
-        {:else if rt.usable}{versions}{rt.usedBytes ? ` · ${mb(rt.usedBytes)}` : ""}{rt.ready ? "" : " · an update is waiting"}
-        {:else}Not installed. Playback needs Python, Deno and yt-dlp, about {mb(rt.downloadBytes ?? 0)} to download.{/if}
-      </p>
-    </div>
-    <div class="btns">
-      {#if rt?.installing}
-        <button class="pill" onclick={() => setup.show()}>Show progress</button>
-      {:else if rt?.usable}
-        <button class="pill" disabled={!!busy} onclick={() => setup.install(true).then(() => setup.show())}>Reinstall components</button>
-        <button class="pill" disabled={!!busy} onclick={removeComponents}>Remove downloaded components</button>
-      {:else if rt?.supported}
-        <button class="pill primary" onclick={() => setup.show()}>Set up playback</button>
-      {/if}
-    </div>
-  </div>
 </section>
 
 <style>
-  .links {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0 16px;
-  }
   .blocked {
     display: grid;
     gap: 2px;

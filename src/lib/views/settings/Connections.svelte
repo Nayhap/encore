@@ -20,13 +20,12 @@
     <div class="grow">
       <b>Last.fm</b>
       {#if fm?.error}
-        <p>Connected as {fm.username}, but nothing is being sent.</p>
         <p class="note error">{fm.error}</p>
       {:else if fm?.username}
-        <p>Scrobbling what you play to <b class="who">{fm.username}</b>{waiting ? ` · ${waiting}` : ""}. Plays in a private session aren't sent.</p>
+        <p>Sending your plays to <b class="who">{fm.username}</b>{waiting ? ` · ${waiting}` : ""}</p>
         <button type="button" class="link" onclick={() => openExternal(`https://www.last.fm/user/${encodeURIComponent(fm.username!)}`)}>Open your Last.fm profile <Icon name="external" size={13} /></button>
       {:else}
-        <p>Scrobble what you play here to your Last.fm profile, and sort playlists by your Last.fm plays. You use your own Last.fm API key.</p>
+        <p>Send your plays to your Last.fm profile, and sort playlists by your Last.fm plays.</p>
       {/if}
     </div>
     <div class="btns">
@@ -43,7 +42,7 @@
       <label class="grow" for="discord-presence">
         <b>Show what you're playing on Discord</b>
         <p>
-          The song, artist and cover appear on your Discord profile while Discord is open. Nothing shows while paused or in a private session.
+          The song and cover appear on your profile while Discord is open, except when paused or in a private session.
           {#if discord.enabled && !discord.connected}<span class="state">Discord isn't open.</span>{/if}
         </p>
       </label>

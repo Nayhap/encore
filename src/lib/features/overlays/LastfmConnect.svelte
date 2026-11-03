@@ -62,7 +62,7 @@
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="fm-title" tabindex="-1" bind:this={box} onkeydown={key}>
     <h2 id="fm-title">Connect Last.fm</h2>
     {#if !approving}
-      <p class="lead">Last.fm gives every app its own key, and Encore has no server to keep one, so you use yours. It takes a minute.</p>
+      <p class="lead">Connect with your Last.fm API key.</p>
       <ol>
         <li>
           <span>Create an API account on Last.fm. Any name and description will do; leave the callback URL empty.</span>
@@ -80,7 +80,7 @@
           <input bind:value={secret} type="password" class="mono" maxlength="64" placeholder="32 letters and digits" autocomplete="off" spellcheck="false" />
         </label>
         {#if error}<p class="err" role="alert">{error}</p>{/if}
-        <p class="fine">Encore keeps them in {store} and scrobbles plays from this computer, whichever YouTube account is signed in. Plays in a private session aren't sent.</p>
+        <p class="fine">Kept in {store}. Plays from this computer are sent, whichever YouTube account is signed in; plays in a private session aren't.</p>
         <div class="btns">
           <button type="button" class="pill" disabled={busy} onclick={close}>Cancel</button>
           <button type="submit" class="pill primary" disabled={!ready || busy}>{busy ? "Checking…" : "Continue in browser"}</button>
