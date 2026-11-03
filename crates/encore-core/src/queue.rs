@@ -6,6 +6,10 @@
 //! turning shuffle off keeps the played prefix and current entry fixed and
 //! restores the surviving suffix by canonical rank. Deleted entries never
 //! come back. Explicit `next` bypasses repeat-one.
+//!
+//! Shuffling is Fisher–Yates with rejection-sampled draws, so every order is
+//! equally likely (D33). A shuffle cycle puts the songs not yet played in
+//! the collection's current cycle first (`replace_cycle`, `set_shuffle_fresh`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -190,16 +194,51 @@ impl Queue {
         z ^ (z >> 31)
     }
 
-    fn shuffle_from(&mut self, start: usize) {
-        let n = self.entries.len();
-        if n <= start + 1 {
+    /// A uniform draw from `0..n` (`n > 0`). A plain `% n` favours the low
+    /// values slightly; draws from the uneven top of the range are thrown
+    /// away instead (rejection sampling, D33).
+    fn below(&mut self, n: u64) -> u64 {
+        debug_assert!(n > 0);
+        // 2^64 mod n: the size of the uneven top.
+        let rem = (u64::MAX % n + 1) % n;
+        loop {
+            let r = self.next_rand();
+            if rem == 0 || r <= u64::MAX - rem {
+                return r % n;
+            }
+        }
+    }
+
+    /// Fisher–Yates over `v` with unbiased draws.
+    fn permute<X>(&mut self, v: &mut [X]) {
+        for i in (1..v.len()).rev() {
+            let j = self.below(i as u64 + 1) as usize;
+            v.swap(i, j);
+        }
+    }
+
+    /// Shuffle the entries after `start` (the entry at `start`, the current
+    /// one, never moves). With `fresh`, the entries it accepts come first,
+    /// each group in its own uniform order (a shuffle cycle's unplayed songs).
+    fn shuffle_from(&mut self, start: usize, fresh: Option<&dyn Fn(&Track) -> bool>) {
+        if self.entries.len() <= start + 1 {
             return;
         }
-        for i in (start + 1..n).rev() {
-            // j in start+1..=i: the entry at `start` (current) never moves.
-            let j = start + 1 + (self.next_rand() % ((i - start) as u64)) as usize;
-            self.entries.swap(i, j);
-        }
+        let tail: Vec<QueueEntry> = self.entries.drain(start + 1..).collect();
+        let (mut a, mut b): (Vec<QueueEntry>, Vec<QueueEntry>) = match fresh {
+            Some(f) => tail.into_iter().partition(|e| f(&e.track)),
+            None => (tail, vec![]),
+        };
+        self.permute(&mut a);
+        self.permute(&mut b);
+        self.entries.extend(a);
+        self.entries.extend(b);
+    }
+
+    /// Start the generator again from `seed` (fresh OS randomness for a
+    /// queue restored from disk).
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = seed | 1;
     }
 
     fn mark_played(&mut self) {
@@ -231,7 +270,7 @@ impl Queue {
         if shuffle {
             let first = self.entries.remove(start);
             self.entries.insert(0, first);
-            self.shuffle_from(0);
+            self.shuffle_from(0, None);
             self.index = Some(0);
         } else {
             self.index = Some(start);
@@ -239,6 +278,36 @@ impl Queue {
         self.mark_played();
         self.bump();
         Ok(self.index.unwrap())
+    }
+
+    /// Replace the queue with a shuffle of a collection in a shuffle cycle
+    /// (D33): each song once (a playlist's repeated rows collapse), the
+    /// songs not in `played` first, the first song drawn from those. The
+    /// canonical order is the collection's own, for turning shuffle off.
+    pub fn replace_cycle(&mut self, tracks: Vec<Track>, source: Option<QueueSource>, played: &HashSet<String>) -> Result<usize> {
+        let mut seen = HashSet::new();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| seen.insert(t.id.remote().to_string())).collect();
+        if tracks.is_empty() {
+            return Err(AppError::invalid("Nothing to play."));
+        }
+        let entries: Vec<QueueEntry> = tracks.into_iter().map(|t| QueueEntry { uid: uuid(), track: t, origin: Origin::Collection }).collect();
+        self.canon = entries.iter().map(|e| e.uid.clone()).collect();
+        let fresh = |t: &Track| !played.contains(t.id.remote());
+        let n_fresh = entries.iter().filter(|e| fresh(&e.track)).count();
+        // The first song: uniform among the unplayed ones (all of them when
+        // the cycle has just started again).
+        let pick = if n_fresh > 0 { self.below(n_fresh as u64) as usize } else { self.below(entries.len() as u64) as usize };
+        let start = if n_fresh > 0 { entries.iter().enumerate().filter(|(_, e)| fresh(&e.track)).nth(pick).map(|(i, _)| i).unwrap_or(0) } else { pick };
+        self.entries = entries;
+        let first = self.entries.remove(start);
+        self.entries.insert(0, first);
+        self.shuffle_from(0, Some(&fresh));
+        self.index = Some(0);
+        self.source = source;
+        self.shuffle = true;
+        self.mark_played();
+        self.bump();
+        Ok(0)
     }
 
     /// Explicit Next: bypasses repeat-one.
@@ -486,15 +555,21 @@ impl Queue {
     }
 
     pub fn set_shuffle(&mut self, on: bool) {
+        self.set_shuffle_fresh(on, None);
+    }
+
+    /// `set_shuffle`; turning it on with `fresh` puts the entries it accepts
+    /// first (a shuffle cycle's unplayed songs, D33).
+    pub fn set_shuffle_fresh(&mut self, on: bool, fresh: Option<&dyn Fn(&Track) -> bool>) {
         if on == self.shuffle {
             return;
         }
         let start = self.index.unwrap_or(0);
         if on {
             if self.index.is_some() {
-                self.shuffle_from(start);
+                self.shuffle_from(start, fresh);
             } else if !self.entries.is_empty() {
-                self.shuffle_from(0);
+                self.shuffle_from(0, fresh);
             }
         } else {
             // Keep history and current; restore the suffix by canonical rank.
@@ -831,6 +906,57 @@ mod tests {
         assert_eq!(q.cycle_repeat(), Repeat::All);
         assert_eq!(q.cycle_repeat(), Repeat::One);
         assert_eq!(q.cycle_repeat(), Repeat::Off);
+    }
+
+    #[test]
+    fn draws_are_uniform() {
+        // 3 doesn't divide 2^64: a biased draw would still pass a loose
+        // check, so this checks the rejection path runs and stays in range,
+        // and that every order of four songs comes up about equally often.
+        let mut q = Queue::new(9);
+        assert!((0..10_000).all(|_| q.below(3) < 3));
+        assert_eq!(q.below(1), 0);
+        let mut counts: HashMap<Vec<String>, u32> = HashMap::new();
+        let n = 48_000;
+        for _ in 0..n {
+            let mut q2 = Queue::new(q.next_rand());
+            q2.replace(["a", "b", "c", "d", "e"].iter().map(|x| t(x)).collect(), 0, None, true, Origin::Collection).unwrap();
+            *counts.entry(ids(&q2)[1..].to_vec()).or_default() += 1;
+        }
+        assert_eq!(counts.len(), 24, "every order of the four after the first appears");
+        let want = n as f64 / 24.0;
+        for c in counts.values() {
+            assert!((*c as f64 - want).abs() < want * 0.12, "{c} vs {want}");
+        }
+    }
+
+    #[test]
+    fn a_cycle_plays_unplayed_songs_first() {
+        let played: HashSet<String> = ["a", "c"].iter().map(|s| s.to_string()).collect();
+        for seed in 0..50 {
+            let mut q = Queue::new(seed);
+            q.replace_cycle(vec![t("a"), t("b"), t("c"), t("d"), t("b"), t("e")], None, &played).unwrap();
+            let order = ids(&q);
+            assert_eq!(order.len(), 5, "the repeated row collapses");
+            let mut fresh = order[..3].to_vec();
+            fresh.sort();
+            assert_eq!(fresh, vec!["b", "d", "e"], "unplayed first, the first song among them");
+            assert!(q.shuffle);
+        }
+        let mut q = Queue::new(3);
+        q.replace_cycle(vec![t("a"), t("b"), t("c")], None, &played).unwrap();
+        q.set_shuffle(false);
+        let cur = ids(&q)[0].clone();
+        let rest: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).filter(|s| *s != cur).collect();
+        assert_eq!(ids(&q)[1..], rest[..], "shuffle off: the collection's order");
+    }
+
+    #[test]
+    fn shuffle_on_with_fresh_keeps_current() {
+        let mut q = q5();
+        q.next(); // b
+        q.set_shuffle_fresh(true, Some(&|t: &Track| t.title == "e"));
+        assert_eq!(&ids(&q)[..3], &["a", "b", "e"]);
     }
 
     #[test]

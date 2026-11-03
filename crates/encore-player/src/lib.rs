@@ -11,7 +11,7 @@ pub mod history;
 pub mod plays;
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,6 +22,8 @@ use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
 use encore_core::queue::{Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
 use encore_core::redact::Secret;
+use encore_core::local::Owner;
+use encore_core::local::playback::{ShuffleCycle, ShuffleCycles};
 use encore_core::local::plays::PlaySink;
 use encore_core::paging::{self, Limits, Pace, Stop};
 use encore_core::service::{Admission, LocalAudio, MusicService, PlayFailure, PlayFailureKind, PlayReporter, PlaybackGate, ResolveAuth, ResolvedStream, StreamResolver};
@@ -81,6 +83,20 @@ struct State {
     last_queue: Vec<QueueEntry>,
     last_queue_rev: u64,
     last_duration: Option<f64>,
+    /// Bumped whenever radio results would no longer be wanted (Autoplay
+    /// turned off, the queue replaced): a response for an older value is
+    /// dropped (D33).
+    radio_gen: u64,
+    /// The shuffle cycle of the collection playing, while shuffled (D33).
+    cycle: Option<CycleRun>,
+}
+
+/// A shuffle cycle in use: whose it is, the songs that make up the
+/// collection, and the cycle as stored.
+struct CycleRun {
+    owner: Owner,
+    members: HashSet<String>,
+    c: ShuffleCycle,
 }
 
 pub struct Player {
@@ -111,6 +127,8 @@ pub struct Player {
     private_until: Mutex<Option<Instant>>,
     /// What may join the queue (D36, D27); lane A asks it.
     admission: Mutex<Option<Arc<dyn Admission>>>,
+    /// Where shuffle cycles are kept (D33).
+    cycles: Mutex<Option<Arc<dyn ShuffleCycles>>>,
 }
 
 fn s(n: u64) -> String {
@@ -156,6 +174,8 @@ impl Player {
                 last_queue: vec![],
                 last_queue_rev: 0,
                 last_duration: None,
+                radio_gen: 0,
+                cycle: None,
             }),
             tx,
             next_load: AtomicU64::new(1),
@@ -171,6 +191,7 @@ impl Player {
             private: Arc::new(AtomicBool::new(false)),
             private_until: Mutex::new(None),
             admission: Mutex::new(None),
+            cycles: Mutex::new(None),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -268,6 +289,29 @@ impl Player {
     /// What may join the queue from now on (D36, D27).
     pub fn set_admission(&self, a: Arc<dyn Admission>) {
         *self.admission.lock() = Some(a);
+    }
+
+    /// Keep shuffle cycles in `c` (D33).
+    pub fn set_shuffle_cycles(&self, c: Arc<dyn ShuffleCycles>) {
+        *self.cycles.lock() = Some(c);
+    }
+
+    /// The tracks of a list that may join the queue: all that the admission
+    /// accepts (D36), plus the one at `keep`, which the user picked by name.
+    /// Returns the list and where `keep` is in it.
+    fn admit_list(&self, tracks: Vec<Track>, keep: Option<usize>) -> (Vec<Track>, usize) {
+        let Some(a) = self.admission.lock().clone() else { return (tracks, keep.unwrap_or(0)) };
+        let mut at = 0;
+        let mut out = Vec::with_capacity(tracks.len());
+        for (i, t) in tracks.into_iter().enumerate() {
+            if Some(i) == keep {
+                at = out.len();
+                out.push(t);
+            } else if a.admits(&t) {
+                out.push(t);
+            }
+        }
+        (out, at)
     }
 
     /// Whether `t` may join the queue; everything does until an
@@ -419,6 +463,8 @@ impl Player {
             st.last_duration = st.queue.current().and_then(|c| c.track.duration);
             st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
             st.track_gen += 1;
+            st.radio_gen += 1;
+            st.cycle = None;
         }
         self.publish(true);
         let cur = self.st.lock().queue.current().cloned();
@@ -447,6 +493,8 @@ impl Player {
             st.skips = 0;
             st.radio_cursor = None;
             st.radio_empty = 0;
+            st.radio_gen += 1;
+            st.cycle = None;
             st.last_duration = st.queue.current().and_then(|c| c.track.duration);
             let end = st.last_duration.map(|d| (d - 0.25).max(0.0)).unwrap_or(f64::MAX);
             st.pending_pos = if position.is_finite() { position.clamp(0.0, end) } else { 0.0 };
@@ -843,9 +891,12 @@ impl Player {
         if !self.online() {
             return 0;
         }
-        let (seed, cursor) = {
+        let (seed, cursor, radio_gen) = {
             let mut st = self.st.lock();
             if st.radio_loading || st.radio_empty >= 3 {
+                return 0;
+            }
+            if !st.queue.autoplay {
                 return 0;
             }
             st.radio_loading = true;
@@ -859,12 +910,17 @@ impl Player {
                     }
                 },
             };
-            (seed, st.radio_cursor.clone())
+            (seed, st.radio_cursor.clone(), st.radio_gen)
         };
         let ctx = self.service.context();
         let res = self.service.up_next(&ctx, &seed, cursor.as_deref()).await;
         let mut st = self.st.lock();
         st.radio_loading = false;
+        // Autoplay went off (or the queue was replaced) while this was on
+        // its way: nothing joins the queue (D33).
+        if st.radio_gen != radio_gen || !st.queue.autoplay {
+            return 0;
+        }
         match res {
             Ok(u) => {
                 st.radio_cursor = u.cursor;
@@ -875,7 +931,8 @@ impl Player {
                 } else {
                     st.queue.source = Some(QueueSource { label: "Radio".into(), collection_id: None, radio_playlist: u.playlist_id });
                 }
-                let n = st.queue.extend_radio(u.tracks);
+                let tracks: Vec<Track> = u.tracks.into_iter().filter(|t| self.admits(t)).collect();
+                let n = st.queue.extend_radio(tracks);
                 if n == 0 {
                     st.radio_empty += 1;
                 } else {
@@ -1029,6 +1086,7 @@ impl Player {
                     st.phase = Phase::Playing;
                     st.skips = 0;
                     drop(st);
+                    self.note_cycle();
                     self.publish(false);
                     self.send_anchor();
                     self.warm_upcoming();
@@ -1073,6 +1131,7 @@ impl Player {
                 };
                 self.note_passed(passed);
                 if ok {
+                    self.note_cycle();
                     self.publish(false);
                     self.send_anchor();
                     let cur = self.st.lock().queue.current().cloned();
@@ -1125,19 +1184,89 @@ impl Player {
 
     // ---------- commands (the UI contract) ----------
 
+    /// Replace the queue with `tracks` and play from `start`. Songs the
+    /// admission refuses (D36) are left out, except the one at `start`.
     pub fn play_tracks(self: &Arc<Self>, tracks: Vec<Track>, start: usize, source: Option<QueueSource>, shuffle: bool) -> Result<()> {
+        let (tracks, start) = self.admit_list(tracks, Some(start));
+        self.start_queue(None, |q| q.replace(tracks, start, source, shuffle, Origin::Collection).map(|_| ()))
+    }
+
+    /// Replace the queue through `fill` and play its current entry.
+    fn start_queue(self: &Arc<Self>, cycle: Option<CycleRun>, fill: impl FnOnce(&mut Queue) -> Result<()>) -> Result<()> {
         {
             let mut st = self.st.lock();
-            st.queue.replace(tracks, start, source, shuffle, Origin::Collection)?;
+            fill(&mut st.queue)?;
             st.radio_cursor = None;
             st.radio_empty = 0;
+            st.radio_gen += 1;
             st.skips = 0;
             st.preload = None;
+            st.cycle = cycle;
         }
         self.engine.clear_preload();
         self.play_current(0.0);
         self.publish(false);
         Ok(())
+    }
+
+    /// Shuffle a whole collection in its shuffle cycle (D33): `members` are
+    /// the collection's songs that can play here, `tracks` those to queue
+    /// now (offline, only the downloaded ones). The cycle is read, fitted
+    /// to the collection as it is now and saved under `owner`.
+    fn play_cycle(self: &Arc<Self>, owner: Owner, collection_id: &str, members: HashSet<String>, tracks: Vec<Track>, source: QueueSource) -> Result<()> {
+        let store = self.cycles.lock().clone();
+        let mut c = store.as_ref().and_then(|s| s.load(&owner, collection_id)).unwrap_or_else(|| ShuffleCycle::new(collection_id));
+        let before = c.clone();
+        let played = c.fit(&members);
+        if let Some(s) = store.as_ref().filter(|_| c != before) {
+            s.save(&owner, &c);
+        }
+        let run = CycleRun { owner, members, c };
+        self.start_queue(Some(run), |q| q.replace_cycle(tracks, Some(source), &played).map(|_| ()))
+    }
+
+    /// The song playing counts toward its collection's shuffle cycle (D33):
+    /// called once it is heard. A finished cycle starts the next one.
+    fn note_cycle(&self) {
+        let save = {
+            let mut st = self.st.lock();
+            let Some(vid) = st.queue.current().filter(|c| c.origin == Origin::Collection).map(|c| c.track.id.remote().to_string()) else { return };
+            let shuffle = st.queue.shuffle;
+            let Some(run) = st.cycle.as_mut().filter(|r| shuffle && r.members.contains(&vid)) else { return };
+            if !run.c.mark(&vid) {
+                return;
+            }
+            if run.c.played.len() >= run.members.len() {
+                run.c.cycle += 1;
+                run.c.played.clear();
+            }
+            (run.owner.clone(), run.c.clone())
+        };
+        if let Some(s) = self.cycles.lock().clone() {
+            s.save(&save.0, &save.1);
+        }
+    }
+
+    /// The cycle for shuffling the queue as it is (shuffle turned on while
+    /// a collection plays): the one in use, or the stored one.
+    fn cycle_for_queue(&self) -> Option<CycleRun> {
+        let owner = Owner::of(&self.service.context());
+        let (cid, members) = {
+            let mut st = self.st.lock();
+            let cid = st.queue.source.as_ref()?.collection_id.clone()?;
+            if st.queue_loading {
+                return None;
+            }
+            if let Some(run) = st.cycle.take().filter(|r| r.c.collection_id == cid && r.owner == owner) {
+                return Some(run);
+            }
+            let members: HashSet<String> = st.queue.entries().iter().filter(|e| e.origin == Origin::Collection).map(|e| e.track.id.remote().to_string()).collect();
+            (cid, members)
+        };
+        let store = self.cycles.lock().clone()?;
+        let mut c = store.load(&owner, &cid).unwrap_or_else(|| ShuffleCycle::new(&cid));
+        c.fit(&members);
+        Some(CycleRun { owner, members, c })
     }
 
     /// Play a collection: first page now, the rest read in order through
@@ -1151,6 +1280,7 @@ impl Player {
             return self.play_kept(id, start, shuffle);
         }
         let ctx = self.service.context();
+        let owner = Owner::of(&ctx);
         let c = match self.service.collection_at(&ctx, id, params).await {
             Ok(c) => c,
             // The connection went: a kept copy still plays.
@@ -1181,8 +1311,18 @@ impl Player {
         if tracks.is_empty() {
             return Err(AppError::invalid("Nothing in this collection can be played."));
         }
-        let start = if shuffle { (rand_seed() as usize) % tracks.len() } else { start.min(tracks.len() - 1) };
-        self.play_tracks(tracks, start, Some(src), shuffle)?;
+        if shuffle {
+            // Blocked songs (D36) are neither queued nor needed to finish a cycle.
+            let (tracks, _) = self.admit_list(tracks, None);
+            if tracks.is_empty() {
+                return Err(AppError::invalid("Nothing in this collection can be played."));
+            }
+            let members = tracks.iter().map(|t| t.id.remote().to_string()).collect();
+            self.play_cycle(owner, id.as_str(), members, tracks, src)?;
+        } else {
+            let start = start.min(tracks.len() - 1);
+            self.play_tracks(tracks, start, Some(src), false)?;
+        }
         if let Some(cid) = cursor {
             let me = self.clone();
             let rev = self.st.lock().queue.source.clone();
@@ -1197,7 +1337,8 @@ impl Player {
                     if st.queue.source != rev {
                         return;
                     }
-                    st.queue.append(page.into_iter().map(|e| e.track).filter(|t| t.playable).collect(), Origin::Collection);
+                    let page: Vec<Track> = page.into_iter().map(|e| e.track).filter(|t| t.playable && me.admits(t)).collect();
+                    st.queue.append(page, Origin::Collection);
                     drop(st);
                     me.check_preload();
                     me.publish(false);
@@ -1217,24 +1358,34 @@ impl Player {
     /// downloaded (D23). `start` is a row of the full list.
     fn play_kept(self: &Arc<Self>, id: &ItemId, start: usize, shuffle: bool) -> Result<()> {
         let local = self.local.lock().clone().ok_or_else(|| AppError::network("You're offline. Connect to the internet to play this."))?;
-        let account = self.service.context().account;
+        let ctx = self.service.context();
+        let owner = Owner::of(&ctx);
+        let account = ctx.account;
         let c = local.collection(&account, id).ok_or_else(|| AppError::network("You're offline, and this isn't downloaded. Connect to the internet to play it."))?;
         let here: Vec<bool> = c.entries.iter().map(|e| local.has(e.track.id.remote())).collect();
         let tracks: Vec<Track> = c.entries.iter().zip(&here).filter(|(_, h)| **h).map(|(e, _)| e.track.clone()).collect();
         if tracks.is_empty() {
             return Err(AppError::network("None of these songs are downloaded yet. Connect to the internet to play them."));
         }
-        let start = if shuffle {
-            (rand_seed() as usize) % tracks.len()
-        } else if here.get(start).copied().unwrap_or(false) {
+        let src = QueueSource { label: c.title.clone(), collection_id: Some(id.as_str().to_string()), radio_playlist: None };
+        if shuffle {
+            // The cycle is the whole collection's: songs that aren't
+            // downloaded stay unplayed in it until they play online.
+            let members = c.entries.iter().map(|e| &e.track).filter(|t| t.playable && self.admits(t)).map(|t| t.id.remote().to_string()).collect();
+            let (tracks, _) = self.admit_list(tracks, None);
+            if tracks.is_empty() {
+                return Err(AppError::network("None of these songs are downloaded yet. Connect to the internet to play them."));
+            }
+            return self.play_cycle(owner, id.as_str(), members, tracks, src);
+        }
+        let start = if here.get(start).copied().unwrap_or(false) {
             here[..start].iter().filter(|h| **h).count()
         } else if start == 0 {
             0
         } else {
             return Err(AppError::network("This song isn't downloaded. Connect to the internet to play it."));
         };
-        let src = QueueSource { label: c.title.clone(), collection_id: Some(id.as_str().to_string()), radio_playlist: None };
-        self.play_tracks(tracks, start, Some(src), shuffle)
+        self.play_tracks(tracks, start, Some(src), false)
     }
 
     /// Play one track; without context, start its radio.
@@ -1361,12 +1512,20 @@ impl Player {
         Ok(())
     }
 
+    /// Several songs at once (an album, a selection) pass the admission
+    /// (D36); one song asked for by name always goes in.
+    fn admit_many(&self, tracks: Vec<Track>) -> Vec<Track> {
+        if tracks.len() < 2 { tracks } else { self.admit_list(tracks, None).0 }
+    }
+
     pub fn play_next(self: &Arc<Self>, tracks: Vec<Track>) {
+        let tracks = self.admit_many(tracks);
         let start = self.st.lock().queue.play_next(tracks);
         self.after_edit(start);
     }
 
     pub fn add_to_queue(self: &Arc<Self>, tracks: Vec<Track>) {
+        let tracks = self.admit_many(tracks);
         let start = self.st.lock().queue.append(tracks, Origin::Manual);
         self.after_edit(start);
     }
@@ -1400,12 +1559,26 @@ impl Player {
             st.queue.clear_up_next();
             st.radio_cursor = None;
             st.radio_empty = 0;
+            st.radio_gen += 1;
         }
         self.after_edit(None);
     }
 
+    /// Turning shuffle on while a collection plays shuffles in its cycle
+    /// (D33): the songs not yet played in it come first.
     pub fn set_shuffle(self: &Arc<Self>, on: bool) {
-        self.st.lock().queue.set_shuffle(on);
+        let run = if on { self.cycle_for_queue() } else { None };
+        {
+            let mut st = self.st.lock();
+            match run {
+                Some(run) => {
+                    let played: HashSet<String> = run.c.played.iter().cloned().collect();
+                    st.queue.set_shuffle_fresh(true, Some(&|t: &Track| !played.contains(t.id.remote())));
+                    st.cycle = Some(run);
+                }
+                None => st.queue.set_shuffle(on),
+            }
+        }
         self.after_edit(None);
     }
 
@@ -1420,12 +1593,20 @@ impl Player {
         self.after_edit(None);
     }
 
+    /// Autoplay off means nothing joins the queue that the user didn't
+    /// choose (D33): radio songs still to come leave it, and radio on its
+    /// way is dropped when it arrives.
     pub fn set_autoplay(self: &Arc<Self>, on: bool) {
         {
             let mut st = self.st.lock();
             st.queue.set_autoplay(on);
             st.radio_empty = 0;
+            st.radio_gen += 1;
+            if !on {
+                st.queue.retain_upcoming(|e| e.origin != Origin::Radio);
+            }
         }
+        self.check_preload();
         self.publish(false);
     }
 
@@ -1551,7 +1732,7 @@ impl Player {
     }
 }
 
+/// A seed from the system's random source (v4 UUIDs come from it).
 fn rand_seed() -> u64 {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    (t.as_nanos() as u64) ^ ((std::process::id() as u64) << 32)
+    uuid::Uuid::new_v4().as_u64_pair().0
 }
