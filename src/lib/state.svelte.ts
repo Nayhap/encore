@@ -563,6 +563,8 @@ class Updates {
   sheet = $state<"update" | "whatsNew" | null>(null);
   #rev = -1n;
   #told = new Set<string>();
+  /** The version the user asked to download: its failure is said once. */
+  #asked: string | null = null;
 
   phase = $derived(this.status?.phase ?? "idle");
   ready = $derived(this.phase === "ready");
@@ -591,6 +593,10 @@ class Updates {
       this.#once(`updated:${v}`, () => ui.say(`Encore is updated to ${v}.`, "info", { label: "What's new", run: () => this.whatsNew() }));
     }
     if (!a) return;
+    if (s.phase === "failed" && this.#asked === a.version) {
+      this.#asked = null;
+      ui.say(`Couldn't download Encore ${a.version}: ${s.error ?? "it stopped"}.`, "error", { label: "Try again", run: () => void this.download() });
+    } else if (s.phase !== "downloading") this.#asked = null;
     if (s.phase === "ready") {
       this.#once(`ready:${a.version}`, () => ui.say(s.atQuit ? `Encore ${a.version} is ready. It installs when you quit Encore.` : `Encore ${a.version} is ready to install.`, "info", { label: "Restart now", run: () => void this.install() }));
     } else if (s.phase === "available" && s.skipped !== a.version && !(s.auto && s.canInstall)) {
@@ -629,6 +635,7 @@ class Updates {
   }
 
   async download() {
+    this.#asked = this.status?.available?.version ?? null;
     const s = await call((a) => a.updateDownload()).catch((e: BackendError) => (ui.say(`Couldn't download the update: ${e.message}`, "error"), null));
     if (s) this.apply(s);
   }

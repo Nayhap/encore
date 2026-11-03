@@ -235,7 +235,8 @@ impl Core {
     /// Before Encore quits or installs an update (D24). Idempotent, and a
     /// second caller waits for the first. Every step is bounded, so quitting
     /// never hangs on the network:
-    /// 1. pause, and save the queue and position now (not on the 5 s tick);
+    /// 1. playback stops (paused, nothing loading starts later, no command
+    ///    starts it) and the queue and position are saved now;
     /// 2. the play being reported gets its last history ping (≤ 2 s);
     /// 3. downloads stop after the current range and let go of their
     ///    folder, without touching the user's pause (≤ 5 s);
@@ -249,8 +250,7 @@ impl Core {
             return;
         }
         let t0 = std::time::Instant::now();
-        self.player.pause();
-        self.player.persist_now();
+        self.player.shut_down();
         let history = self.player.settle_history(Duration::from_secs(2)).await;
         let downloads = match &self.downloads {
             Some(d) => tokio::time::timeout(Duration::from_secs(5), d.quiesce()).await.is_ok(),
@@ -270,6 +270,7 @@ impl Core {
             return;
         }
         self.resolver.reopen();
+        self.player.reopen();
         if let Some(d) = &self.downloads {
             d.resume_after_quiesce();
         }

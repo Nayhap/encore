@@ -89,7 +89,7 @@
       <span class="avatar">{initial}{#if updates.ready}<i class="ready" title="Encore {updates.version} is ready to install"></i>{/if}</span>
       <span class="txt">
         <span class="name ell">{account.name ?? (account.state.state === "expired" ? "Session expired" : account.state.state === "choosingChannel" ? "Choose a channel" : "Not signed in")}</span>
-        <span class="sub">{updates.ready ? "Update ready" : "Settings"}</span>
+        <span class="sub">Settings</span>
       </span>
       <Icon name="settings" size={17} />
     </button>

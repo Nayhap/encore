@@ -744,7 +744,7 @@ pub async fn update_download(updates: U<'_>) -> Result<UpdateStatus> {
 #[tauri::command]
 #[specta::specta]
 pub async fn update_install(updates: U<'_>) -> Result<()> {
-    updates.inner().install(true).await
+    updates.inner().restart_to_update().await
 }
 
 #[tauri::command]

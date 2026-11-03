@@ -104,6 +104,8 @@ pub struct Player {
     gate: Arc<PlaybackGate>,
     /// Ends the play being reported before Encore quits (D24).
     settle: Mutex<Option<history::Settle>>,
+    /// Encore is quitting or installing an update: nothing starts (D24).
+    closed: AtomicBool,
 }
 
 fn s(n: u64) -> String {
@@ -162,6 +164,7 @@ impl Player {
             link: Arc::new(AtomicU64::new(0)),
             gate: Arc::new(PlaybackGate::default()),
             settle: Mutex::new(None),
+            closed: AtomicBool::new(false),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -341,10 +344,29 @@ impl Player {
         *self.on_persist.lock() = Some(Box::new(f));
     }
 
-    /// Save the queue and position now rather than on the next 5 s tick
-    /// (before Encore quits, D24).
-    pub fn persist_now(&self) {
+    /// Before Encore quits or installs an update (D24): pause, drop what
+    /// is loaded or preloading (a resolve that finishes later finds an old
+    /// generation and starts nothing), refuse to start anything, and save
+    /// the queue and position as they are now, not on the 5 s tick.
+    pub fn shut_down(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.pause();
+        {
+            let mut st = self.st.lock();
+            st.track_gen += 1;
+            st.loaded = None;
+            st.preload = None;
+            st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
+        }
+        self.engine.stop();
+        self.publish(false);
         self.persist();
+    }
+
+    /// The exit was called off: playback may start again (still paused,
+    /// where it was).
+    pub fn reopen(&self) {
+        self.closed.store(false, Ordering::SeqCst);
     }
 
     fn persist(&self) {
@@ -494,6 +516,9 @@ impl Player {
 
     /// Start playing the current queue entry from `start` seconds.
     fn play_current(self: &Arc<Self>, start: f64) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         let (uid, vid, my_gen) = {
             let mut st = self.st.lock();
             let Some(cur) = st.queue.current().cloned() else {
@@ -784,6 +809,9 @@ impl Player {
     }
 
     async fn tick(self: &Arc<Self>) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         let (phase, pos, dur, upcoming, need_radio) = {
             let st = self.st.lock();
             let snap = self.snapshot_locked(&st);
@@ -1171,6 +1199,9 @@ impl Player {
     }
 
     pub fn resume(&self) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         self.engine.resume();
         {
             let mut st = self.st.lock();

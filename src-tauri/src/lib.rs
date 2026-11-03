@@ -418,21 +418,21 @@ pub fn run() {
             }
 
             // Closing with an update ready installs it first (D24): the
-            // window stays up for that moment, saying so.
+            // window stays up for that moment, saying so. A second close
+            // while that runs waits for it.
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let h = app.handle().clone();
-                let (w2, u2) = (w.clone(), updates.clone());
+                let (h2, u2) = (app.handle().clone(), updates.clone());
                 w.on_window_event(move |e| match e {
-                    WindowEvent::CloseRequested { api, .. } if u2.install_on_close() => {
+                    WindowEvent::CloseRequested { api, .. } if u2.exit_state() == updates::Exit::Exiting => api.prevent_close(),
+                    WindowEvent::CloseRequested { api, .. } if u2.exit_state() == updates::Exit::Running && u2.install_on_close() && u2.begin_exit() => {
                         api.prevent_close();
-                        let (w3, u3) = (w2.clone(), u2.clone());
+                        let (h3, u3) = (h2.clone(), u2.clone());
                         tauri::async_runtime::spawn(async move {
-                            // On Windows a successful install exits here.
-                            let _ = u3.install(false).await;
-                            // Installed or not, the window was closed: quit.
-                            u3.begin_quit();
-                            let _ = w3.destroy();
+                            // On Windows a successful install exits in here.
+                            u3.finish_exit().await;
+                            h3.exit(0);
                         });
                     }
                     WindowEvent::Destroyed => {
@@ -464,9 +464,11 @@ pub fn run() {
                     let _ = w.set_focus();
                 }
             }
-            // Every quit settles playback, history, downloads and the
-            // helpers first, and installs an update that is ready (D24).
-            // The exit is held for that, then let through.
+            // One way out (D24): the first exit request settles playback,
+            // history, downloads and the helpers and installs a ready
+            // update; every request until then is held (a second close, the
+            // runtime's own request when the last window goes); after it,
+            // they go through.
             RunEvent::ExitRequested { api, code, .. } => {
                 let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) else {
                     if let Some(core) = app.try_state::<Arc<Core>>() {
@@ -474,13 +476,16 @@ pub fn run() {
                     }
                     return;
                 };
-                if !u.begin_quit() {
+                if u.exit_state() == updates::Exit::Released {
                     return;
                 }
                 api.prevent_exit();
+                if !u.begin_exit() {
+                    return;
+                }
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    u.quit().await;
+                    u.finish_exit().await;
                     if code == Some(tauri::RESTART_EXIT_CODE) {
                         app.restart();
                     }
@@ -489,14 +494,17 @@ pub fn run() {
             }
             // macOS Quit (the menu, Cmd+Q, the Dock, logout) skips
             // ExitRequested: AppKit is already terminating and the process
-            // ends when this returns, so the same work runs here, blocking.
-            // Every step has its bound.
+            // ends when this returns, so the same work runs here, blocking
+            // and bounded. A quit while Restart to update installs waits for
+            // that install instead of cutting it off.
             RunEvent::Exit => {
-                if let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone())
-                    && u.begin_quit()
-                {
-                    tauri::async_runtime::block_on(u.quit());
-                }
+                let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) else { return };
+                tauri::async_runtime::block_on(async {
+                    u.exit_settled(Duration::from_secs(30)).await;
+                    if u.begin_exit() {
+                        let _ = tokio::time::timeout(Duration::from_secs(30), u.finish_exit()).await;
+                    }
+                });
             }
             _ => {}
         });

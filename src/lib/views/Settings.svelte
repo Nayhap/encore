@@ -395,7 +395,7 @@
         <div>
           <b>Install updates automatically</b>
           <p>
-            Encore checks GitHub for new versions a few times a day, downloads them in the background (up to about 100 MB) and installs them the next time you quit or restart it. Off, it only tells you when a new version is out.
+            Encore checks GitHub for new versions a few times a day, downloads them in the background (20 to 100 MB) and installs them the next time you quit or restart it. Off, it only tells you when a new version is out.
             {#if isMac}macOS may ask once for access to your saved sign-in after an update.{/if}
           </p>
         </div>

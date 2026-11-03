@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use encore_core::error::{AppError, ErrorCode, Result};
@@ -172,12 +172,37 @@ pub struct Machine {
     total: Option<u64>,
     error: Option<String>,
     checked_at: Option<i64>,
+    /// Failed checks and failed downloads in a row, kept apart: a check
+    /// that works doesn't reset a download that keeps failing.
     failures: usize,
+    download_failures: usize,
+    /// The staged package was already handed to an installer that didn't
+    /// finish (a declined Windows prompt): it waits for Restart to update
+    /// instead of starting the installer again at every quit.
+    handed_off: bool,
 }
 
 impl Machine {
     pub fn new(current: &str, can_install: bool, auto: bool, skipped: Option<String>, checked_at: Option<i64>) -> Self {
-        Machine { current: current.into(), can_install, auto, skipped, revision: 1, generation: 0, phase: UpdatePhase::Idle, found: None, staged: None, requested: false, received: 0, total: None, error: None, checked_at, failures: 0 }
+        Machine {
+            current: current.into(),
+            can_install,
+            auto,
+            skipped,
+            revision: 1,
+            generation: 0,
+            phase: UpdatePhase::Idle,
+            found: None,
+            staged: None,
+            requested: false,
+            received: 0,
+            total: None,
+            error: None,
+            checked_at,
+            failures: 0,
+            download_failures: 0,
+            handed_off: false,
+        }
     }
 
     fn bump(&mut self) {
@@ -192,7 +217,6 @@ impl Machine {
         self.generation
     }
 
-    #[cfg(test)]
     pub fn found(&self) -> Option<&Found> {
         self.found.as_ref()
     }
@@ -223,7 +247,11 @@ impl Machine {
         let f = match r {
             Err(e) => {
                 self.failures += 1;
-                self.error = Some(e);
+                // A quiet check while an update is ready changes nothing
+                // the user sees.
+                if self.phase != UpdatePhase::Ready {
+                    self.error = Some(e);
+                }
                 if self.phase == UpdatePhase::Checking {
                     self.phase = if self.found.is_some() { UpdatePhase::Available } else { UpdatePhase::Failed };
                 }
@@ -238,6 +266,7 @@ impl Machine {
         let Some(f) = f.filter(|f| newer(&f.version, &self.current)) else {
             // A ready update whose release was pulled isn't installed.
             next.discard = self.staged.take().is_some();
+            self.handed_off = false;
             self.found = None;
             self.requested = false;
             self.phase = UpdatePhase::UpToDate;
@@ -250,6 +279,7 @@ impl Machine {
             }
             // Something newer, or the staged release was pulled: start over.
             self.staged = None;
+            self.handed_off = false;
             next.discard = true;
         }
         let skipped = self.skipped.as_deref() == Some(f.version.as_str());
@@ -301,17 +331,26 @@ impl Machine {
                 self.staged = self.found.as_ref().map(|f| f.version.clone());
             }
             Err(e) => {
-                self.failures += 1;
+                self.download_failures += 1;
                 self.phase = UpdatePhase::Failed;
                 self.error = Some(e);
             }
+        }
+        if self.phase == UpdatePhase::Ready {
+            self.download_failures = 0;
         }
         true
     }
 
     /// A package staged by an earlier run, checked again at launch.
-    pub fn restore_ready(&mut self, f: Found, requested: bool) {
+    /// `handed_off`: an installer already got it and Encore is still the
+    /// old version, so that install didn't finish.
+    pub fn restore_ready(&mut self, f: Found, requested: bool, handed_off: bool) {
         self.staged = Some(f.version.clone());
+        self.handed_off = handed_off;
+        if handed_off {
+            self.error = Some(format!("Installing Encore {} didn't finish. Choose Restart to update to try again.", f.version));
+        }
         self.found = Some(f);
         self.requested = requested;
         self.phase = UpdatePhase::Ready;
@@ -332,6 +371,7 @@ impl Machine {
                 }
                 UpdatePhase::Ready => {
                     self.staged = None;
+                    self.handed_off = false;
                     self.phase = UpdatePhase::Available;
                     next.discard = true;
                 }
@@ -366,13 +406,16 @@ impl Machine {
 
     /// Quitting now installs the ready update.
     pub fn at_quit(&self) -> bool {
-        self.phase == UpdatePhase::Ready && (self.auto || self.requested)
+        self.phase == UpdatePhase::Ready && (self.auto || self.requested) && !self.handed_off
     }
 
+    /// The install starts. A check still running is outdated from here on:
+    /// its answer can't take the package away from the installer.
     pub fn begin_install(&mut self) -> bool {
         if self.phase != UpdatePhase::Ready {
             return false;
         }
+        self.generation += 1;
         self.phase = UpdatePhase::Installing;
         self.error = None;
         self.bump();
@@ -393,9 +436,9 @@ impl Machine {
         }
     }
 
-    /// How long until the next automatic check.
+    /// How long after the last check the next automatic one is due.
     pub fn next_wait(&self) -> Duration {
-        match self.failures {
+        match self.failures.max(self.download_failures) {
             0 => CHECK_EVERY,
             n => BACKOFF[(n - 1).min(BACKOFF.len() - 1)],
         }
@@ -495,11 +538,11 @@ pub fn classify() -> (InstallKind, Option<String>) {
     match tauri::utils::platform::bundle_type() {
         // Always `App` on macOS, development builds included (hence the
         // debug check above).
-        Some(BundleType::App) => (InstallKind::App, std::env::current_exe().ok().and_then(|exe| app_refusal(&exe, writable))),
+        Some(BundleType::App) => (InstallKind::App, std::env::current_exe().ok().and_then(|exe| app_refusal(&exe, probe))),
         Some(BundleType::Nsis) => (InstallKind::Nsis, None),
         Some(BundleType::Msi) => (InstallKind::Msi, None),
         Some(BundleType::AppImage) => match std::env::var_os("APPIMAGE") {
-            Some(p) => (InstallKind::AppImage, appimage_refusal(Path::new(&p), writable)),
+            Some(p) => (InstallKind::AppImage, appimage_refusal(Path::new(&p), probe, writable_file)),
             None => (InstallKind::AppImage, Some(OTHER.into())),
         },
         Some(BundleType::Deb) => (InstallKind::Deb, Some(DEB.into())),
@@ -507,9 +550,23 @@ pub fn classify() -> (InstallKind, Option<String>) {
     }
 }
 
-/// Whether this user may write to `p`.
+/// Whether Encore may do in `dir` what an install does there: create an
+/// entry and rename it. Tried for real rather than asked with `access()`,
+/// which doesn't see macOS's privacy controls (Files and Folders) and says
+/// no for a folder an admin could still rename in.
+fn probe(dir: &Path) -> std::io::Result<()> {
+    let a = dir.join(format!(".encore-update-check-{}", std::process::id()));
+    let b = dir.join(format!(".encore-update-check-{}-renamed", std::process::id()));
+    std::fs::create_dir(&a)?;
+    let r = std::fs::rename(&a, &b);
+    let _ = std::fs::remove_dir(&a);
+    let _ = std::fs::remove_dir(&b);
+    r
+}
+
+/// Whether this user may write to the file `p` (an AppImage).
 #[cfg(unix)]
-fn writable(p: &Path) -> std::io::Result<()> {
+fn writable_file(p: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
     // SAFETY: a valid NUL-terminated path that outlives the call.
@@ -517,17 +574,18 @@ fn writable(p: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn writable(_: &Path) -> std::io::Result<()> {
+fn writable_file(_: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// macOS: the bundle is swapped for the new one with a rename in its
-/// folder. That needs the bundle and its folder to be writable here, and
-/// a real location: not a translocated copy (an app opened from where it
-/// was downloaded runs from a random read-only path) and not the disk
-/// image. Refusing here is also what keeps the plugin's fallback, an
-/// administrator password dialog from AppleScript, from ever showing.
-fn app_refusal(exe: &Path, writable: impl Fn(&Path) -> std::io::Result<()>) -> Option<String> {
+/// macOS: the bundle is swapped for the new one by renaming it out of its
+/// folder. That needs a real location (not a translocated copy, which runs
+/// from a random read-only path, and not the disk image), and both the
+/// bundle and its folder open to Encore. Refusing here, at launch and again
+/// right before every install, is what keeps the plugin's fallback (an
+/// administrator password dialog from AppleScript, which at quit would wait
+/// on the blocked main thread forever) from ever being reached.
+fn app_refusal(exe: &Path, probe: impl Fn(&Path) -> std::io::Result<()>) -> Option<String> {
     if exe.to_string_lossy().contains("/AppTranslocation/") {
         return Some(TRANSLOCATED.into());
     }
@@ -536,22 +594,23 @@ fn app_refusal(exe: &Path, writable: impl Fn(&Path) -> std::io::Result<()>) -> O
         return Some(OTHER.into());
     }
     let folder = bundle.parent()?;
-    for p in [bundle, folder] {
-        if let Err(e) = writable(p) {
-            return Some(if e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
-                DISK_IMAGE.into()
-            } else {
-                format!("Encore can't update itself in {}, because that folder isn't writable for you. Move Encore to your Applications folder, or download the new version from the releases page.", folder.display())
-            });
-        }
+    for p in [folder, bundle] {
+        let Err(e) = probe(p) else { continue };
+        return Some(match (e.kind(), e.raw_os_error()) {
+            (std::io::ErrorKind::ReadOnlyFilesystem, _) => DISK_IMAGE.into(),
+            // EPERM: macOS's privacy controls keep Encore out of the folder.
+            (_, Some(1)) => format!("macOS doesn't let Encore change files in {}. Move Encore to your Applications folder, then open it from there to let it update itself.", folder.display()),
+            _ if folder == Path::new("/Applications") => "Encore can't replace itself in /Applications with your account. Ask an administrator to install the update, or move Encore to the Applications folder in your home folder.".into(),
+            _ => format!("Encore can't update itself in {}, because that folder isn't writable for you. Move Encore to your Applications folder, or download the new version from the releases page.", folder.display()),
+        });
     }
     None
 }
 
-/// Linux: the AppImage file is replaced where it is.
-fn appimage_refusal(file: &Path, writable: impl Fn(&Path) -> std::io::Result<()>) -> Option<String> {
+/// Linux: the AppImage is replaced in its folder.
+fn appimage_refusal(file: &Path, probe: impl Fn(&Path) -> std::io::Result<()>, writable: impl Fn(&Path) -> std::io::Result<()>) -> Option<String> {
     let folder = file.parent()?;
-    if writable(file).is_err() || writable(folder).is_err() {
+    if writable(file).is_err() || probe(folder).is_err() {
         return Some(format!("Encore can't replace its AppImage in {}, because that folder isn't writable for you. Move the AppImage to a folder of yours, such as ~/Applications, and open it from there.", folder.display()));
     }
     None
@@ -578,6 +637,8 @@ fn reason(e: &tauri_plugin_updater::Error) -> String {
         E::TargetNotFound(_) | E::TargetsNotFound(_) => "the new version has no download for this system".into(),
         E::Serialization(_) | E::Semver(_) | E::UrlParse(_) => "the release information couldn't be read".into(),
         E::Minisign(_) | E::Base64(_) | E::SignatureUtf8(_) | E::SignedVersionMismatch { .. } | E::MissingSignedVersion => "the download didn't match its signature".into(),
+        // Smart App Control or an antivirus refusing the unsigned installer.
+        E::Io(io) if cfg!(windows) && io.kind() == std::io::ErrorKind::PermissionDenied => "Windows blocked the installer".into(),
         E::Io(io) => format!("a file couldn't be written ({})", io.kind()),
         other => other.to_string(),
     }
@@ -610,11 +671,28 @@ struct Staged {
     package: PathBuf,
     raw: serde_json::Value,
     requested: bool,
+    handed_off: bool,
 }
 
-/// Files in `<cache>/updates`: `<version>.<ext>` beside `<version>.json`
-/// (the raw manifest), and `<version>.requested` when the user asked for
-/// it. At most one version is kept.
+/// Marker files beside a staged package.
+const MARKERS: [&str; 2] = ["requested", "handed"];
+
+/// The files of one staged version: `<version>.<ext>`, `<version>.json`
+/// (the raw manifest), and the markers `<version>.requested` (the user
+/// asked for it) and `<version>.handed` (it went to an installer).
+fn version_files(dir: &Path, version: &str) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let prefix = format!("{version}.");
+    rd.flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix))).collect()
+}
+
+fn is_package(name: &str) -> bool {
+    !name.ends_with(".json") && !name.ends_with(".part") && !MARKERS.iter().any(|m| name.ends_with(&format!(".{m}")))
+}
+
+/// Read `<cache>/updates` at launch. At most one version is kept: the
+/// newest one newer than this Encore. Returns it, and the manifest of the
+/// version now running (its notes are the "What's new").
 fn read_staged(dir: &Path, current: &str) -> (Option<Staged>, Option<serde_json::Value>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return (None, None) };
     let mut best: Option<Staged> = None;
@@ -624,19 +702,16 @@ fn read_staged(dir: &Path, current: &str) -> (Option<Staged>, Option<serde_json:
         let Some(v) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
         let raw = std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
         if v == current {
-            // Just installed: its notes are this version's "What's new".
             installed = raw;
             continue;
         }
-        let package = names.iter().find(|q| {
-            let n = q.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            n.starts_with(&format!("{v}.")) && !n.ends_with(".json") && !n.ends_with(".requested") && !n.ends_with(".part")
-        });
+        let package = names.iter().find(|q| q.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&format!("{v}.")) && is_package(n)));
         if let (Some(raw), Some(package), true) = (raw, package, newer(&v, current))
             && best.as_ref().is_none_or(|b| newer(&v, &b.version))
         {
             let requested = dir.join(format!("{v}.requested")).exists();
-            best = Some(Staged { version: v, package: package.clone(), raw, requested });
+            let handed_off = dir.join(format!("{v}.handed")).exists();
+            best = Some(Staged { version: v, package: package.clone(), raw, requested, handed_off });
         }
     }
     // Everything else goes: older versions, partial writes, leftovers.
@@ -657,6 +732,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 // ---------- the driver ----------
 
+/// Where quitting is. One way out: the first quit, close or Restart to
+/// update takes `Running` to `Exiting` and does the work; every other exit
+/// request meanwhile is held until it is `Released`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    Running,
+    Exiting,
+    Released,
+}
+
 pub struct Updates {
     app: AppHandle,
     core: Arc<Core>,
@@ -665,17 +750,19 @@ pub struct Updates {
     m: Mutex<Machine>,
     /// The plugin's view of what was found: it verifies and installs.
     update: Mutex<Option<tauri_plugin_updater::Update>>,
-    /// The verified package on disk, while ready.
-    package: Mutex<Option<PathBuf>>,
-    /// Staging and its generation check happen one at a time.
-    staging: tokio::sync::Mutex<()>,
+    /// The verified package on disk and its version, while ready.
+    package: Mutex<Option<(String, PathBuf)>>,
+    /// Writing, publishing and deleting staged files happen one at a time.
+    staging: Mutex<()>,
     dir: PathBuf,
     endpoint: Option<url::Url>,
+    /// Check now (a reconnect).
     wake: Notify,
+    /// Look at the schedule again (a download failed: its backoff applies).
+    resched: Notify,
     last_attempt: Mutex<Option<Instant>>,
     updated: Option<UpdateInfo>,
-    /// Quitting (or restarting into the update) has begun.
-    quitting: AtomicBool,
+    exit: tokio::sync::watch::Sender<Exit>,
 }
 
 impl Updates {
@@ -704,6 +791,10 @@ impl Updates {
         if last.as_deref() != Some(current) {
             let _ = store.put(SETTINGS, LAST_SEEN_VERSION, &current.to_string(), None);
         }
+        // Its notes were read: the running version's manifest can go.
+        for p in version_files(&dir, current) {
+            let _ = std::fs::remove_file(p);
+        }
         let endpoint = endpoint_override(&core.paths.data);
         tracing::info!(install = ?kind, can = reason.is_none(), auto, "updates");
         let me = Arc::new(Updates {
@@ -714,13 +805,14 @@ impl Updates {
             reason: Mutex::new(reason),
             update: Mutex::new(None),
             package: Mutex::new(None),
-            staging: tokio::sync::Mutex::new(()),
+            staging: Mutex::new(()),
             dir,
             endpoint,
             wake: Notify::new(),
+            resched: Notify::new(),
             last_attempt: Mutex::new(None),
             updated,
-            quitting: AtomicBool::new(false),
+            exit: tokio::sync::watch::Sender::new(Exit::Running),
         });
         if let Some(s) = staged {
             me.restore(s, skipped.as_deref());
@@ -728,6 +820,8 @@ impl Updates {
         me
     }
 
+    /// The updater for checks. The 30 s timeout is for the manifest only:
+    /// downloads get none (see `download`), just the stall limit.
     fn updater(&self) -> std::result::Result<tauri_plugin_updater::Updater, tauri_plugin_updater::Error> {
         let mut b = self.app.updater_builder().timeout(Duration::from_secs(30));
         if let Some(u) = &self.endpoint {
@@ -741,10 +835,9 @@ impl Updates {
     fn restore(&self, s: Staged, skipped: Option<&str>) {
         let drop_it = |why: &str| {
             tracing::info!(version = %s.version, why, "updates: dropped the downloaded update");
-            for e in ["json", "requested"] {
-                let _ = std::fs::remove_file(self.dir.join(format!("{}.{e}", s.version)));
+            for p in version_files(&self.dir, &s.version) {
+                let _ = std::fs::remove_file(p);
             }
-            let _ = std::fs::remove_file(&s.package);
         };
         if skipped == Some(s.version.as_str()) {
             return drop_it("skipped");
@@ -762,10 +855,10 @@ impl Updates {
             return drop_it(&e);
         }
         let found = Found { version: update.version.clone(), date: update.raw_json.get("pub_date").and_then(|d| d.as_str()).map(str::to_string), notes: update.body.clone() };
-        tracing::info!(version = %found.version, "updates: a downloaded update is ready");
-        self.m.lock().restore_ready(found, s.requested);
+        tracing::info!(version = %found.version, handed_off = s.handed_off, "updates: a downloaded update is ready");
+        self.m.lock().restore_ready(found, s.requested, s.handed_off);
         *self.update.lock() = Some(update);
-        *self.package.lock() = Some(s.package);
+        *self.package.lock() = Some((s.version.clone(), s.package));
     }
 
     pub fn status(&self) -> UpdateStatus {
@@ -776,9 +869,10 @@ impl Updates {
         let _ = UpdateEvent(self.status()).emit(&self.app);
     }
 
-    /// Automatic checks: 20 s after launch, then every 6 hours (sooner
-    /// after a failure), and on reconnect when the last check is old.
-    /// Offline, they wait; development builds never check.
+    /// Automatic checks: 20 s after launch, then 6 hours after the last
+    /// one (sooner after a failed check or download), and on reconnect when
+    /// the last answer is old. Offline, they wait; development builds never
+    /// check.
     pub fn start(self: &Arc<Self>) {
         if self.kind == InstallKind::Dev {
             return;
@@ -790,10 +884,15 @@ impl Updates {
                 if me.core.connectivity.online() {
                     me.check(false).await;
                 }
-                let wait = me.m.lock().next_wait();
-                tokio::select! {
-                    _ = tokio::time::sleep(wait) => {}
-                    _ = me.wake.notified() => {}
+                loop {
+                    let since = me.last_attempt.lock().map(|t| t.elapsed()).unwrap_or_default();
+                    let wait = me.m.lock().next_wait().saturating_sub(since);
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => break,
+                        _ = me.wake.notified() => break,
+                        // A download failed: its backoff, from the last check.
+                        _ = me.resched.notified() => continue,
+                    }
                 }
             }
         });
@@ -874,22 +973,37 @@ impl Updates {
         }
     }
 
-    /// Delete the staged package.
+    /// Delete the staged package (its version's files only), unless it is
+    /// ready again meanwhile.
     fn discard(&self) {
-        *self.package.lock() = None;
-        if let Ok(rd) = std::fs::read_dir(&self.dir) {
-            for e in rd.flatten() {
-                let _ = std::fs::remove_file(e.path());
-            }
+        let _one = self.staging.lock();
+        if self.m.lock().phase() == UpdatePhase::Ready {
+            return;
+        }
+        let Some((v, _)) = self.package.lock().take() else { return };
+        for f in version_files(&self.dir, &v) {
+            let _ = std::fs::remove_file(f);
         }
     }
 
     /// Download in the background: progress at most four times a second,
-    /// stopped when it outgrows 300 MB or stalls for a minute, cancelled
-    /// (the future dropped) when the generation moves on.
+    /// stopped when it outgrows 300 MB or no data came for a minute (a slow
+    /// link that keeps going is fine), cancelled (the future dropped) when
+    /// the generation moves on.
     pub fn download(self: &Arc<Self>, requested: bool) {
-        let Some(update) = self.update.lock().clone() else { return };
-        let Some(generation) = self.m.lock().begin_download(requested) else { return };
+        // The instance and the generation together, so a check finishing
+        // in between can't pair one version's package with another's name.
+        let (generation, mut update) = {
+            let mut m = self.m.lock();
+            let Some(update) = self.update.lock().clone() else { return };
+            if m.found().map(|f| f.version.as_str()) != Some(update.version.as_str()) {
+                return;
+            }
+            let Some(g) = m.begin_download(requested) else { return };
+            (g, update)
+        };
+        // No total time limit for the package, whatever the checks use.
+        update.timeout = None;
         self.emit();
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -910,6 +1024,7 @@ impl Updates {
             );
             tokio::pin!(dl);
             let mut tick = tokio::time::interval(Duration::from_millis(250));
+            const TOO_BIG: &str = "the download was larger than any Encore release (over 300 MB), so Encore stopped it";
             let r: std::result::Result<Vec<u8>, Option<String>> = loop {
                 tokio::select! {
                     r = &mut dl => break r.map_err(|e| Some(reason(&e))),
@@ -920,7 +1035,7 @@ impl Updates {
                         let (got, len) = (received.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
                         let len = (len != u64::MAX).then_some(len);
                         if got > MAX_BYTES || len.is_some_and(|l| l > MAX_BYTES) {
-                            break Err(Some("the download was larger than any Encore release (over 300 MB), so Encore stopped it".into()));
+                            break Err(Some(TOO_BIG.into()));
                         }
                         if last.lock().elapsed() > STALL {
                             break Err(Some("the download stalled".into()));
@@ -931,58 +1046,84 @@ impl Updates {
                     }
                 }
             };
+            // A download that finished between two ticks is measured too.
+            let r = match r {
+                Ok(bytes) if bytes.len() as u64 > MAX_BYTES => Err(Some(TOO_BIG.to_string())),
+                r => r,
+            };
             let r = match r {
                 Err(None) => return,
                 Err(Some(e)) => Err(e),
-                Ok(bytes) => match me.stage(generation, &update, bytes, requested).await {
-                    Ok(true) => Ok(()),
-                    Ok(false) => return,
-                    Err(e) => Err(e),
-                },
+                Ok(bytes) => {
+                    let me2 = me.clone();
+                    let u2 = update.clone();
+                    match tokio::task::spawn_blocking(move || me2.stage(generation, &u2, &bytes, requested)).await {
+                        Ok(Ok(true)) => Ok(()),
+                        Ok(Ok(false)) => return,
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err("staging stopped".into()),
+                    }
+                }
             };
             match &r {
                 Ok(()) => tracing::info!(version = %update.version, bytes = received.load(Ordering::Relaxed), secs = t0.elapsed().as_secs(), "updates: downloaded and verified"),
                 Err(e) => tracing::info!(version = %update.version, error = %e, "updates: download failed"),
             }
-            let applied = me.m.lock().download_done(generation, r);
-            if !applied {
-                me.discard();
+            if r.is_err() && me.m.lock().download_done(generation, r) {
+                me.resched.notify_waiters();
             }
             me.emit();
         });
     }
 
     /// Write the verified package and its manifest, each by temp file and
-    /// rename, the manifest last (it is what makes the package count).
-    /// `Ok(false)`: cancelled meanwhile, nothing written.
-    async fn stage(&self, generation: u64, update: &tauri_plugin_updater::Update, bytes: Vec<u8>, requested: bool) -> std::result::Result<bool, String> {
-        let _one = self.staging.lock().await;
+    /// rename, the manifest last (it is what makes the package count), and
+    /// publish it as ready, all under the staging lock. If the generation
+    /// moved on meanwhile, only this write's own files go. `Ok(false)`:
+    /// cancelled.
+    fn stage(&self, generation: u64, update: &tauri_plugin_updater::Update, bytes: &[u8], requested: bool) -> std::result::Result<bool, String> {
+        let _one = self.staging.lock();
         if self.m.lock().generation() != generation {
             return Ok(false);
         }
-        let dir = self.dir.clone();
         let v = update.version.clone();
-        let package = dir.join(format!("{v}.{}", package_ext(&update.download_url)));
+        let package = self.dir.join(format!("{v}.{}", package_ext(&update.download_url)));
         let raw = serde_json::to_vec(&update.raw_json).unwrap_or_default();
-        let p2 = package.clone();
-        let r = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            // At most one version: the others go first.
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for e in rd.flatten() {
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&self.dir)?;
+            for p in version_files(&self.dir, &v) {
+                let _ = std::fs::remove_file(p);
+            }
+            write_atomic(&package, bytes)?;
+            if requested {
+                std::fs::write(self.dir.join(format!("{v}.requested")), b"")?;
+            }
+            write_atomic(&self.dir.join(format!("{v}.json")), &raw)
+        };
+        if let Err(e) = write() {
+            for p in version_files(&self.dir, &v) {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(format!("Encore couldn't save the update ({})", e.kind()));
+        }
+        let mut m = self.m.lock();
+        if !m.download_done(generation, Ok(())) {
+            drop(m);
+            for p in version_files(&self.dir, &v) {
+                let _ = std::fs::remove_file(p);
+            }
+            return Ok(false);
+        }
+        // Published: at most one version, so the others go.
+        if let Ok(rd) = std::fs::read_dir(&self.dir) {
+            let prefix = format!("{v}.");
+            for e in rd.flatten() {
+                if !e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
-            std::fs::create_dir_all(&dir)?;
-            write_atomic(&p2, &bytes)?;
-            if requested {
-                std::fs::write(dir.join(format!("{v}.requested")), b"")?;
-            }
-            write_atomic(&dir.join(format!("{v}.json")), &raw)
-        })
-        .await
-        .map_err(|_| "staging stopped".to_string())?;
-        r.map_err(|e| format!("Encore couldn't save the update ({})", e.kind()))?;
-        *self.package.lock() = Some(package);
+        }
+        *self.package.lock() = Some((v, package));
         Ok(true)
     }
 
@@ -1010,12 +1151,75 @@ impl Updates {
         Ok(self.status())
     }
 
-    /// Install the ready update now: Encore pauses (the queue and position
-    /// are saved and come back after the restart), settles history,
-    /// downloads and the helpers, then hands over to the installer.
-    /// `relaunch`: start the new version afterwards (otherwise Encore is
-    /// quitting). Returns only if the install failed.
-    pub async fn install(self: &Arc<Self>, relaunch: bool) -> Result<()> {
+    // ---------- exiting ----------
+
+    pub fn exit_state(&self) -> Exit {
+        *self.exit.borrow()
+    }
+
+    /// Running → Exiting. False when an exit is already under way.
+    pub fn begin_exit(&self) -> bool {
+        self.exit.send_if_modified(|s| {
+            let first = *s == Exit::Running;
+            if first {
+                *s = Exit::Exiting;
+            }
+            first
+        })
+    }
+
+    fn set_exit(&self, e: Exit) {
+        self.exit.send_replace(e);
+    }
+
+    /// Wait (bounded) until the exit under way is through or called off.
+    pub async fn exit_settled(&self, bound: Duration) {
+        let mut rx = self.exit.subscribe();
+        let _ = tokio::time::timeout(bound, rx.wait_for(|s| *s != Exit::Exiting)).await;
+    }
+
+    /// "Restart to update": pauses (the queue and position come back after
+    /// the restart), settles history, downloads and the helpers, installs,
+    /// and starts the new version. Returns only if the install failed, and
+    /// then Encore carries on.
+    pub async fn restart_to_update(self: &Arc<Self>) -> Result<()> {
+        if !self.begin_exit() {
+            return Err(AppError::invalid("Encore is already closing."));
+        }
+        match self.install(true).await {
+            Ok(()) => {
+                // Windows exited inside `install`; here the new bundle is in place.
+                self.set_exit(Exit::Released);
+                self.app.restart();
+            }
+            Err(e) => {
+                self.core.abort_exit().await;
+                self.set_exit(Exit::Running);
+                Err(e)
+            }
+        }
+    }
+
+    /// The one exit (D24), for a quit or a closed window: settle
+    /// everything, install a ready update without relaunching (a failure
+    /// doesn't stop the quit), then let the exit through. The caller took
+    /// `begin_exit`.
+    pub async fn finish_exit(self: &Arc<Self>) {
+        self.core.prepare_exit().await;
+        if self.m.lock().at_quit() {
+            let _ = self.install(false).await;
+            // A failed install resumed nothing: this is still an exit.
+            self.core.prepare_exit().await;
+        }
+        self.set_exit(Exit::Released);
+    }
+
+    /// Install the staged package. The package and its instance are taken
+    /// together with the phase change, so no check finishing meanwhile can
+    /// take them away. A `.handed` marker is written before the installer
+    /// starts: if this Encore is still the old version next time (a
+    /// declined Windows prompt), the package waits for Restart to update.
+    async fn install(self: &Arc<Self>, relaunch: bool) -> Result<()> {
         // Looked at again now: the app may have moved since launch.
         let (_, refusal) = classify();
         if let Some(why) = refusal {
@@ -1024,71 +1228,55 @@ impl Updates {
             self.emit();
             return Err(AppError::new(ErrorCode::Unsupported, why));
         }
-        if !self.m.lock().begin_install() {
-            return Err(AppError::invalid("No update is ready to install. Check for updates first."));
-        }
-        self.emit();
-        self.quitting.store(true, Ordering::SeqCst);
-        let (Some(update), Some(package)) = (self.update.lock().clone(), self.package.lock().clone()) else {
-            return self.install_failed("the downloaded update is missing".into()).await;
+        let taken = {
+            let mut m = self.m.lock();
+            let pair = (self.update.lock().clone(), self.package.lock().clone());
+            match pair {
+                (Some(u), Some((v, p))) if u.version == v && m.begin_install() => Some((u, p)),
+                _ => None,
+            }
         };
+        let Some((update, package)) = taken else {
+            return Err(AppError::invalid("No update is ready to install. Check for updates first."));
+        };
+        self.emit();
         self.core.prepare_exit().await;
         let version = update.version.clone();
         tracing::info!(%version, install = ?self.kind, relaunch, "updates: installing");
+        let handed = self.dir.join(format!("{version}.handed"));
         // Windows: the installer starts and this process exits inside
         // `install`, which is why everything above came first.
         let r = tokio::task::spawn_blocking(move || {
             let bytes = std::fs::read(&package).map_err(|e| format!("the downloaded update couldn't be read ({})", e.kind()))?;
-            update.restart_after_install(relaunch).install(&bytes).map_err(|e| reason(&e))
+            let _ = std::fs::write(&handed, b"");
+            let r = update.restart_after_install(relaunch).install(&bytes).map_err(|e| reason(&e));
+            if r.is_err() {
+                let _ = std::fs::remove_file(&handed);
+            }
+            r
         })
         .await
         .unwrap_or_else(|_| Err("the installer stopped".into()));
         match r {
             Ok(()) => {
                 tracing::info!(%version, "updates: installed");
-                if relaunch {
-                    self.app.restart();
-                }
                 Ok(())
             }
-            Err(e) => self.install_failed(e).await,
+            Err(e) => {
+                tracing::warn!(error = %e, "updates: install failed");
+                let text = format!("Encore couldn't install the update: {e}. Try again, or download Encore from the releases page.");
+                self.m.lock().install_failed(text.clone());
+                self.emit();
+                Err(AppError::internal(text))
+            }
         }
-    }
-
-    async fn install_failed(&self, e: String) -> Result<()> {
-        tracing::warn!(error = %e, "updates: install failed");
-        self.quitting.store(false, Ordering::SeqCst);
-        self.core.abort_exit().await;
-        let text = format!("Encore couldn't install the update: {e}. Try again, or download Encore from the releases page.");
-        self.m.lock().install_failed(text.clone());
-        self.emit();
-        Err(AppError::internal(text))
-    }
-
-    /// Quitting (macOS: Quit or the Dock; Windows and Linux: after the
-    /// window closed). True the first time: the caller holds the exit,
-    /// runs `quit` and exits after it.
-    pub fn begin_quit(&self) -> bool {
-        !self.quitting.swap(true, Ordering::SeqCst)
-    }
-
-    /// The shared exit (D24): settle everything, then install a ready
-    /// update without relaunching. A failed install doesn't stop the quit.
-    pub async fn quit(self: &Arc<Self>) {
-        self.core.prepare_exit().await;
-        if self.m.lock().at_quit() {
-            let _ = self.install(false).await;
-        }
-        // Even after a failed install: this exit goes through, once.
-        self.quitting.store(true, Ordering::SeqCst);
-        self.core.prepare_exit().await;
     }
 
     /// Windows and Linux: the window is closing with an update to install,
     /// so it stays up for the moment that takes ("Installing the update…").
     #[cfg(not(target_os = "macos"))]
     pub fn install_on_close(&self) -> bool {
-        self.m.lock().at_quit() && !self.quitting.load(Ordering::SeqCst)
+        self.m.lock().at_quit()
     }
 }
 
@@ -1281,11 +1469,92 @@ mod tests {
         assert_eq!(app_refusal(&exe("/private/var/folders/x/AppTranslocation/1234/d"), ok).as_deref(), Some(TRANSLOCATED));
         let ro = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem));
         assert_eq!(app_refusal(&exe("/Volumes/Encore"), ro).as_deref(), Some(DISK_IMAGE));
-        let denied = |p: &Path| if p == Path::new("/Applications") { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) } else { Ok(()) };
-        assert!(app_refusal(&exe("/Applications"), denied).unwrap().contains("/Applications"));
+        // EACCES in /Applications: another admin's copy, or a standard user.
+        let denied = |p: &Path| if p == Path::new("/Applications") { Err(std::io::Error::from_raw_os_error(13)) } else { Ok(()) };
+        let why = app_refusal(&exe("/Applications"), denied).unwrap();
+        assert!(why.contains("administrator") && !why.contains("Move Encore to your Applications folder"), "{why}");
+        // EPERM: macOS's privacy controls (Downloads, Desktop, Documents).
+        let tcc = |_: &Path| Err(std::io::Error::from_raw_os_error(1));
+        assert!(app_refusal(&exe("/Users/u/Downloads"), tcc).unwrap().starts_with("macOS doesn't let Encore change files in /Users/u/Downloads"));
+        let denied = |_: &Path| Err(std::io::Error::from_raw_os_error(13));
+        assert!(app_refusal(&exe("/Users/u/Apps"), denied).unwrap().contains("isn't writable for you"));
         assert_eq!(app_refusal(Path::new("/usr/local/bin/encore"), ok).as_deref(), Some(OTHER));
-        assert_eq!(appimage_refusal(Path::new("/home/u/Apps/Encore.AppImage"), ok), None);
-        assert!(appimage_refusal(Path::new("/opt/Encore.AppImage"), |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))).is_some());
+        assert_eq!(appimage_refusal(Path::new("/home/u/Apps/Encore.AppImage"), ok, ok), None);
+        let no = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(appimage_refusal(Path::new("/opt/Encore.AppImage"), no, ok).is_some());
+        assert!(appimage_refusal(Path::new("/home/u/Encore.AppImage"), ok, no).is_some());
+    }
+
+    #[test]
+    fn the_probe_creates_and_renames_for_real() {
+        let dir = std::env::temp_dir().join(format!("encore-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        probe(&dir).expect("writable");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "leaves nothing behind");
+        assert!(probe(&dir.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_an_installer_already_got_waits_for_restart() {
+        let mut m = machine(true);
+        m.restore_ready(found("0.5.1"), false, true);
+        assert_eq!(m.phase(), UpdatePhase::Ready);
+        assert!(!m.at_quit(), "a declined installer isn't started again at every quit");
+        assert!(m.status(InstallKind::Msi, None, None).error.unwrap().contains("Restart to update"));
+        assert!(m.begin_install(), "Restart to update still installs it");
+        // Something newer comes: that one installs at quit as usual.
+        let mut m = machine(true);
+        m.restore_ready(found("0.5.1"), false, true);
+        let g = m.begin_check(false).unwrap();
+        assert!(m.check_done(g, false, Ok(Some(found("0.5.2"))), 1).download);
+        let d = m.begin_download(false).unwrap();
+        m.download_done(d, Ok(()));
+        assert!(m.at_quit());
+    }
+
+    #[test]
+    fn an_install_outdates_the_check_in_flight() {
+        let mut m = machine(true);
+        let g = m.begin_check(false).unwrap();
+        m.check_done(g, false, Ok(Some(found("0.5.1"))), 1);
+        let d = m.begin_download(false).unwrap();
+        m.download_done(d, Ok(()));
+        let late = m.begin_check(false).unwrap();
+        assert!(m.begin_install());
+        assert_eq!(m.check_done(late, false, Ok(Some(found("0.5.2"))), 2), Next::default(), "can't discard the package being installed");
+        assert_eq!(m.phase(), UpdatePhase::Installing);
+        assert!(m.begin_check(true).is_none());
+    }
+
+    #[test]
+    fn a_failed_quiet_check_while_ready_says_nothing() {
+        let mut m = machine(true);
+        let g = m.begin_check(false).unwrap();
+        m.check_done(g, false, Ok(Some(found("0.5.1"))), 1);
+        let d = m.begin_download(false).unwrap();
+        m.download_done(d, Ok(()));
+        let g = m.begin_check(false).unwrap();
+        m.check_done(g, false, Err("GitHub didn't answer".into()), 2);
+        assert_eq!(m.status(InstallKind::App, None, None).error, None);
+        assert_eq!(m.phase(), UpdatePhase::Ready);
+    }
+
+    #[test]
+    fn download_failures_back_off_even_when_checks_work() {
+        let mut m = machine(true);
+        for i in 0..3 {
+            let g = m.begin_check(false).unwrap();
+            assert!(m.check_done(g, false, Ok(Some(found("0.5.1"))), i).download);
+            let d = m.begin_download(false).unwrap();
+            m.download_done(d, Err("the download stalled".into()));
+            assert_eq!(m.next_wait(), BACKOFF[i as usize], "after {} failed downloads", i + 1);
+        }
+        let g = m.begin_check(false).unwrap();
+        m.check_done(g, false, Ok(Some(found("0.5.1"))), 9);
+        let d = m.begin_download(false).unwrap();
+        m.download_done(d, Ok(()));
+        assert_eq!(m.next_wait(), CHECK_EVERY);
     }
 
     #[test]
@@ -1318,15 +1587,18 @@ mod tests {
         w("0.5.2.json", br#"{"version":"0.5.2"}"#);
         w("0.5.2.app.tar.gz", b"two");
         w("0.5.2.requested", b"");
+        w("0.5.2.handed", b"");
         w("0.5.3.app.tar.gz.part", b"partial");
         let (s, installed) = read_staged(&dir, "0.5.0");
         let s = s.unwrap();
         assert_eq!(s.version, "0.5.2");
         assert!(s.requested);
+        assert!(s.handed_off);
+        assert_eq!(s.package.file_name().unwrap(), "0.5.2.app.tar.gz");
         assert_eq!(installed.unwrap()["notes"], "- Hi");
         let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         left.sort();
-        assert_eq!(left, vec!["0.5.2.app.tar.gz", "0.5.2.json", "0.5.2.requested"]);
+        assert_eq!(left, vec!["0.5.2.app.tar.gz", "0.5.2.handed", "0.5.2.json", "0.5.2.requested"]);
         // Once that version runs, it all goes.
         let (s, _) = read_staged(&dir, "0.5.2");
         assert!(s.is_none());
