@@ -11,12 +11,11 @@
   import { commands } from "./backend/bindings";
   import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
-  import { account, connect, downloads, nav, player, setup, ui, updates } from "./state.svelte";
+  import { account, connect, downloads, nav, player, ui, updates } from "./state.svelte";
   import Deck from "./components/Deck.svelte";
   import Overlays from "./components/Overlays.svelte";
   import Palette from "./components/Palette.svelte";
   import PlaylistDialog from "./components/PlaylistDialog.svelte";
-  import Setup from "./components/Setup.svelte";
   import UpdateSheet from "./components/UpdateSheet.svelte";
   import Icon from "./components/Icon.svelte";
   import Sidebar from "./components/Sidebar.svelte";
@@ -162,7 +161,7 @@
       else if (ui.theater) ui.theater = false;
       return;
     }
-    if (typing || ui.palette || ui.menu || ui.sheet || ui.confirm || setup.open || updates.sheet || updates.installing) return;
+    if (typing || ui.palette || ui.menu || ui.sheet || ui.confirm || updates.sheet || updates.installing) return;
 
     if (mod) {
       if (e.key === "ArrowLeft") player.prev();
@@ -294,7 +293,6 @@
 {#if ui.theater && player.current}<Theater />{/if}
 {#if ui.palette}<Palette />{/if}
 {#if ui.sheet}{#key ui.sheet}<PlaylistDialog sheet={ui.sheet} />{/key}{/if}
-{#if setup.open}<Setup />{/if}
 {#if updates.sheet}<UpdateSheet />{/if}
 {#if updates.installing}
   <!-- Pausing, then handing over to the installer (D24). -->
@@ -302,19 +300,6 @@
     <span class="ring" aria-hidden="true"></span>
     Installing the update…
   </div>
-{/if}
-{#if setup.installing && !setup.open}
-  <!-- Setup or an update running in the background (D22). -->
-  <button class="setup-pill" onclick={() => setup.show()} aria-label="Show setup progress">
-    <span class="ring" aria-hidden="true"></span>
-    {setup.updating ? "Updating player components" : "Setting up playback"}
-    <span class="pct">{Math.floor((setup.progress?.fraction ?? 0) * 100)}%</span>
-  </button>
-{:else if setup.needed && !setup.open}
-  <button class="setup-pill" onclick={() => setup.show()}>
-    <Icon name="download" size={15} />
-    Set up playback
-  </button>
 {/if}
 <FeatureOverlays />
 <Overlays />
@@ -373,38 +358,13 @@
   .banner.offline :global(svg) {
     color: var(--mute);
   }
-  .setup-pill {
-    position: fixed;
-    left: calc(var(--sidebar-w) + 16px);
-    bottom: calc(var(--deck-h) + 14px);
-    z-index: 50;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    height: 36px;
-    padding: 0 14px 0 12px;
-    border-radius: 99px;
-    background: var(--raise);
-    box-shadow: var(--shadow);
-    font-size: 13px;
-    font-weight: 600;
-    animation: in 0.28s var(--ease);
-  }
-  .setup-pill:hover {
-    background: color-mix(in srgb, var(--raise) 85%, var(--text));
-  }
-  .installing .ring,
-  .setup-pill .ring {
+  .installing .ring {
     width: 14px;
     height: 14px;
     border-radius: 50%;
     border: 2px solid var(--accent);
     border-right-color: transparent;
     animation: spin 0.9s linear infinite;
-  }
-  .setup-pill .pct {
-    color: var(--mute);
-    font-variant-numeric: tabular-nums;
   }
   .installing {
     position: fixed;

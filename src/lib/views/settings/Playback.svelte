@@ -1,9 +1,27 @@
 <script lang="ts">
-  import { call } from "$lib/backend";
+  import { onMount } from "svelte";
+  import { call, type EngineStatus } from "$lib/backend";
   import { account, autoplayCopy, openExternal, player, taste, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import { settings } from "./shared.svelte";
   // The blocked songs and artists (D36), listed on request.
   let showBlocked = $state(false);
+
+  // The built-in player engine (D37): versions folded away, one reset.
+  let engine = $state<EngineStatus | null>(null);
+  let showEngine = $state(false);
+  onMount(() => {
+    call((a) => a.playerEngine())
+      .then((e) => (engine = e))
+      .catch(() => {});
+  });
+  async function resetEngine() {
+    const e = await settings.run("engine", () => call((a) => a.playerEngineReset()));
+    if (e) {
+      engine = e;
+      ui.say("Player cache reset");
+    }
+  }
 
   function setReport(on: boolean) {
     ui.reportHistory = on;
@@ -46,6 +64,23 @@
       <button class="pill" aria-expanded={showBlocked} onclick={() => (showBlocked = !showBlocked)}>{showBlocked ? "Hide" : "Show"}</button>
     {/if}
   </div>
+  <div class="row">
+    <div>
+      <b>Player engine</b>
+      <p class:warn={!!engine?.notice}>{engine?.notice ?? "Built into Encore. Nothing to download or set up."}</p>
+    </div>
+    <button class="pill more" aria-expanded={showEngine} onclick={() => (showEngine = !showEngine)}>Details<Icon name={showEngine ? "up" : "down"} size={14} /></button>
+  </div>
+  {#if showEngine && engine}
+    <ul class="blocked engine" aria-label="Player engine">
+      <li><span><b>Extractor</b><small>{" · "}{engine.extractor}</small></span></li>
+      <li><span><b>Challenge solver</b><small>{" · "}{engine.solver} on {engine.engine}</small></span></li>
+      <li>
+        <span><b>Player script</b><small>{" · "}{engine.player ?? "not fetched yet"}</small></span>
+        <button class="pill" disabled={!!settings.busy} onclick={resetEngine}>Reset player cache</button>
+      </li>
+    </ul>
+  {/if}
   {#if showBlocked && taste.count}
     <ul class="blocked" aria-label="Blocked songs and artists">
       {#each taste.blocked as b (b.kind + b.target)}
@@ -60,6 +95,16 @@
 </section>
 
 <style>
+  .pill.more {
+    gap: 6px;
+  }
+  .warn {
+    color: var(--text);
+    font-weight: 550;
+  }
+  .engine li {
+    min-height: 36px;
+  }
   .blocked {
     display: grid;
     gap: 2px;

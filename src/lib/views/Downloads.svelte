@@ -2,7 +2,7 @@
   import { call, type KeptCollection, type Track } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, kindLabel, sizeText } from "$lib/data";
-  import { downloads, keptNote, nav, player, setup, ui, type MenuItem } from "$lib/state.svelte";
+  import { downloads, keptNote, nav, player, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Status from "$lib/components/Status.svelte";
@@ -100,8 +100,6 @@
         <div class="btns">
           {#if s?.wait === "stopped" || s?.wait === "diskFull"}
             <button class="pill" onclick={() => downloads.retry()}>Try again</button>
-          {:else if s?.wait === "setupNeeded"}
-            <button class="pill primary" onclick={() => setup.show()}>Set up playback</button>
           {/if}
           {#if s?.waiting || s?.paused}
             <button class="pill" onclick={() => downloads.pause(!s?.paused)}>
