@@ -1,12 +1,13 @@
 <script lang="ts">
-  // The Autoplay switch under the queue (lane A: D33's rule and copy).
-  import { player, ui } from "$lib/state.svelte";
+  // The Autoplay switch under the queue (lane A: D33's rule and copy). Off,
+  // nothing joins the queue that the user didn't choose.
+  import { autoplayCopy, player, ui } from "$lib/state.svelte";
 </script>
 
 <label class="autoplay">
   <span>
     <b>Autoplay</b>
-    <small>{ui.online ? "Keep playing similar songs when the queue ends" : "Waits until you're back online"}</small>
+    <small>{player.autoplay || !ui.online ? autoplayCopy(player.autoplay, ui.online) : "Off: only what you choose plays"}</small>
   </span>
   <input type="checkbox" role="switch" checked={player.autoplay} disabled={!ui.online} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
 </label>

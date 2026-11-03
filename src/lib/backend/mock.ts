@@ -188,8 +188,10 @@ function go(i: number, at = 0) {
     i = j;
   }
   P.error = null;
+  if (P.index !== i) endLoop();
   P.index = i;
   P.position = at;
+  noteCycle();
   // Downloaded songs need no player components (D22, D23).
   if (!isLocal(P.entries[i]?.track.id) && !needsSetupBeforePlay()) return;
   P.playing = true;
@@ -218,13 +220,32 @@ function extendRadio() {
 }
 function ended() {
   if (P.index == null) return;
+  const sl = mockPlayer.sleepState.mode;
+  const last = P.index >= P.entries.length - 1;
+  if (sl === "endOfSong" || (sl === "endOfQueue" && last)) {
+    // The sleep timer waited for this song: the next one waits, paused (D26).
+    mockPlayer.sleepState.mode = null;
+    P.playing = false;
+    endLoop();
+    if (sl === "endOfSong" && !last) {
+      P.index++;
+      P.position = 0;
+      P.phase = "paused";
+      tgen++;
+      sendLyrics();
+    } else P.phase = "ended";
+    publish(true);
+    anchor();
+    h?.notice({ text: "Paused by the sleep timer.", level: "info", action: null });
+    return;
+  }
   if (P.repeat === "one") {
     P.position = 0;
     sgen++;
     anchor();
   } else if (P.index < P.entries.length - 1) go(P.index + 1);
   else if (P.repeat === "all") go(0);
-  else if (P.autoplay && extendRadio()) go(P.index + 1);
+  else if (P.autoplay && mockPlayer.sleepState.mode !== "endOfQueue" && extendRadio()) go(P.index + 1);
   else {
     P.playing = false;
     P.phase = "ended";
@@ -237,11 +258,110 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
   const cur = P.index != null ? P.entries[P.index] : null;
+  const sl = mockPlayer.sleepState;
+  if (sl.mode === "timer" && Date.now() >= sl.deadline) {
+    // The Rust engine fades out over the last 10 s first.
+    sl.mode = null;
+    if (P.playing) {
+      P.playing = false;
+      P.phase = "paused";
+      h?.notice({ text: "Paused by the sleep timer.", level: "info", action: null });
+    }
+    publish();
+    anchor();
+  }
   if (!P.playing || !cur) return;
   P.position += dt;
+  const l = mockPlayer.loop;
+  if (l?.a != null && l.b != null && P.position >= l.b) {
+    // Wraps at B, like the engine (D26).
+    P.position = l.a + (P.position - l.b);
+    anchor();
+  }
   if (P.position >= (cur.track.duration ?? 0)) ended();
 }, 100);
 setInterval(() => P.playing && anchor(), 500);
+
+const refuse = (message: string) => ({ code: "invalid", message, retryable: false, action: null });
+
+/** End the loop on a song change, putting repeat-one back. */
+function endLoop() {
+  if (!mockPlayer.loop) return;
+  mockPlayer.loop = null;
+  if (mockPlayer.loopRepeat) P.repeat = mockPlayer.loopRepeat;
+  mockPlayer.loopRepeat = null;
+}
+
+export function simLoop(a: number, b: number) {
+  const cur = P.index != null ? P.entries[P.index] : null;
+  const dur = cur?.track.duration;
+  if (!cur || P.phase === "idle") throw refuse("Play the song to loop part of it.");
+  if (!dur) throw refuse("This song's length isn't known yet. Try again in a moment.");
+  [a, b] = a <= b ? [a, b] : [b, a];
+  a = Math.max(0, Math.min(a, dur));
+  b = Math.max(0, Math.min(b, dur));
+  if (b - a < 1) throw refuse("A loop needs to be at least a second long.");
+  if (!mockPlayer.loop && P.repeat === "one") {
+    mockPlayer.loopRepeat = "one";
+    P.repeat = "off";
+  }
+  mockPlayer.loop = { a, b };
+  if (P.position < a - 0.05 || P.position >= b) {
+    P.position = a;
+    sgen++;
+  }
+  publish();
+  anchor();
+}
+
+export function simClearLoop() {
+  endLoop();
+  publish();
+  anchor();
+}
+
+export function simSleep(mode: T.SleepMode, minutes: number | null) {
+  if (mode === "endOfSong" && mockPlayer.loop) throw refuse("Clear the loop to stop at the end of this song.");
+  if (mode === "timer" && !(minutes && minutes > 0)) throw refuse("Choose how long until Encore pauses.");
+  mockPlayer.sleepState.mode = mode;
+  mockPlayer.sleepState.deadline = Date.now() + (minutes ?? 0) * 60_000;
+  publish();
+}
+
+export function simCancelSleep() {
+  mockPlayer.sleepState.mode = null;
+  publish();
+}
+
+/** Shuffle cycles (D33), per collection for this session: the songs
+ *  played in the current cycle. */
+const cycles = new Map<string, Set<string>>();
+function noteCycle() {
+  const id = P.source?.collectionId;
+  const e = P.index != null ? P.entries[P.index] : null;
+  if (!P.shuffle || !id || !e || e.origin !== "collection") return;
+  const c = cycles.get(id) ?? new Set();
+  c.add(e.track.id);
+  const members = new Set(P.entries.filter((x) => x.origin === "collection").map((x) => x.track.id));
+  cycles.set(id, c.size >= members.size ? new Set() : c);
+}
+
+/** A collection shuffled in its cycle: each song once, the ones not yet
+ *  played in the cycle first. */
+function replaceCycle(tracks: T.Track[], source: T.QueueSource) {
+  const seen = new Set<string>();
+  tracks = tracks.filter((t) => !seen.has(t.id) && seen.add(t.id));
+  const played = cycles.get(source.collectionId!) ?? new Set();
+  const fresh = shuffled(tracks.filter((t) => !played.has(t.id)));
+  const stale = shuffled(tracks.filter((t) => played.has(t.id)));
+  const es = [...fresh, ...stale].map((t) => ({ uid: uid(), track: t, origin: "collection" as const }));
+  const rank = new Map(tracks.map((t, i) => [t.id, i]));
+  P.canon = [...es].sort((x, y) => rank.get(x.track.id)! - rank.get(y.track.id)!).map((e) => e.uid);
+  P.entries = es;
+  P.shuffle = true;
+  P.source = source;
+  go(0);
+}
 
 function replace(tracks: T.Track[], start: number, source: T.QueueSource | null, shuffle: boolean) {
   let es = tracks.map((t) => ({ uid: uid(), track: t, origin: "collection" as const }));
@@ -266,6 +386,11 @@ if (!new URLSearchParams(location.search).has("empty")) {
   P.index = 0;
   P.phase = "paused";
   P.source = { label: c.title, collectionId: mid(c.id), radioPlaylist: null };
+  // `?loop`, `?sleep`, `?autoplayoff` (mock/playback.ts).
+  const q = new URLSearchParams(location.search);
+  if (q.has("loop")) mockPlayer.loop = { a: 41, b: 63 };
+  if (q.has("sleep")) Object.assign(mockPlayer.sleepState, { mode: "timer", deadline: Date.now() + 23 * 60_000 + 12_000 });
+  if (q.has("autoplayoff")) P.autoplay = false;
 }
 
 // ---------- player components (D22) ----------
@@ -637,8 +762,9 @@ export const mockApi: Api = {
       if (!local.length) throw { code: "network", message: "None of these songs are downloaded yet. Connect to the internet to play them.", retryable: true, action: null };
       return replace(local, shuffle ? Math.floor(Math.random() * local.length) : 0, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
     }
-    const s = shuffle ? Math.floor(Math.random() * c.entries.length) : start;
-    replace(c.entries.map((e) => e.track), s, { label: c.title, collectionId: id, radioPlaylist: null }, shuffle);
+    const src = { label: c.title, collectionId: id, radioPlaylist: null };
+    if (shuffle) return replaceCycle(c.entries.map((e) => e.track), src);
+    replace(c.entries.map((e) => e.track), start, src, false);
   },
   async playTrack(t) {
     replace([t], 0, { label: `${t.title} radio`, collectionId: null, radioPlaylist: null }, false);
@@ -676,6 +802,8 @@ export const mockApi: Api = {
     const cur = P.index != null ? P.entries[P.index] : null;
     if (!cur) return;
     P.position = Math.min(Math.max(0, t), (cur.track.duration ?? 0) - 0.1);
+    const l = mockPlayer.loop;
+    if (l?.a != null && l.b != null && (P.position < l.a - 0.05 || P.position > l.b + 0.05)) endLoop();
     sgen++;
     if (P.phase === "ended") P.phase = "paused";
     publish();
@@ -740,10 +868,20 @@ export const mockApi: Api = {
   },
   async setRepeat(m) {
     P.repeat = m;
+    mockPlayer.loopRepeat = null;
     publish();
   },
   async setAutoplay(on) {
     P.autoplay = on;
+    if (!on && P.index != null) {
+      const keep = P.entries.filter((e, i) => i <= P.index! || e.origin !== "radio");
+      if (keep.length !== P.entries.length) {
+        const gone = new Set(P.entries.filter((e) => !keep.includes(e)).map((e) => e.uid));
+        P.entries = keep;
+        P.canon = P.canon.filter((u) => !gone.has(u));
+        return publish(true);
+      }
+    }
     publish();
   },
   async setVolume(v) {
