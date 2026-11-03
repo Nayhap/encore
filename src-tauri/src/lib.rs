@@ -487,6 +487,17 @@ pub fn run() {
                     app.exit(code.unwrap_or(0));
                 });
             }
+            // macOS Quit (the menu, Cmd+Q, the Dock, logout) skips
+            // ExitRequested: AppKit is already terminating and the process
+            // ends when this returns, so the same work runs here, blocking.
+            // Every step has its bound.
+            RunEvent::Exit => {
+                if let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) {
+                    if u.begin_quit() {
+                        tauri::async_runtime::block_on(u.quit());
+                    }
+                }
+            }
             _ => {}
         });
 }

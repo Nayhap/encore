@@ -19,7 +19,7 @@ use encore_core::error::{AppError, ErrorCode, Result};
 use parking_lot::Mutex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
 use tauri_specta::Event;
 use tokio::sync::Notify;
@@ -680,7 +680,10 @@ pub struct Updates {
 
 impl Updates {
     pub fn new(app: AppHandle, core: Arc<Core>) -> Arc<Self> {
-        let current = env!("CARGO_PKG_VERSION");
+        // The version the updater compares with (tauri.conf.json's; the
+        // release checks that it is Cargo's too).
+        let current = app.package_info().version.to_string();
+        let current = current.as_str();
         let (kind, reason) = classify();
         let store = &core.store;
         let auto = store.get::<bool>(SETTINGS, AUTO_UPDATE).ok().flatten().unwrap_or(true);
