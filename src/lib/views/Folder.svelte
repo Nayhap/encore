@@ -28,7 +28,7 @@
       <div class="art"><FolderCover folder={f} radius={12} size={544} /></div>
       <div class="info">
         <p class="kind">Folder</p>
-        <h1 class:long={f.name.length > 22}><button class="name" title="Rename" onclick={() => renameFolder(f)}>{f.name}</button></h1>
+        <h1 class:long={f.name.length > 22} title={f.name.length > 60 ? f.name : undefined}><button class="name" title="Rename" onclick={() => renameFolder(f)}>{f.name}</button></h1>
         <p class="meta">
           {#if lists}<span>{count(lists, "playlist", "playlists")}</span>{/if}
           {#if albums}<span>{count(albums, "album", "albums")}</span>{/if}
@@ -99,6 +99,12 @@
     font-variation-settings: "wdth" 88;
     text-wrap: balance;
     padding-bottom: 4px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
   h1 .name {
     font: inherit;

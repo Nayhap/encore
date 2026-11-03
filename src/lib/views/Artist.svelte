@@ -1,4 +1,5 @@
 <script lang="ts">
+  import LongText from "$lib/components/LongText.svelte";
   import { call, type Artist, type Shelf } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
@@ -134,13 +135,13 @@
         <div class="actions">{@render actions()}</div>
       </header>
       {#if about}
-        <div class="bio">{#if a.description}<p class="blurb">{a.description}</p>{:else}<WikiBlurb {id} name={a.name} />{/if}</div>
+        <div class="bio">{#if a.description}<div class="blurb"><LongText text={a.description} /></div>{:else}<WikiBlurb {id} name={a.name} />{/if}</div>
       {/if}
     {:else}
       <header class="hero">
         <p class="kind">Artist{a.subscribers ? ` · ${a.subscribers}` : ""}</p>
         <h1>{a.name}</h1>
-        {#if a.description}<p class="blurb">{a.description}</p>{:else}<WikiBlurb {id} name={a.name} />{/if}
+        {#if a.description}<div class="blurb"><LongText text={a.description} /></div>{:else}<WikiBlurb {id} name={a.name} />{/if}
         <div class="actions">{@render actions()}</div>
       </header>
     {/if}
@@ -215,7 +216,6 @@
   }
   .blurb {
     max-width: 56ch;
-    color: var(--mute);
   }
   .actions {
     display: flex;
