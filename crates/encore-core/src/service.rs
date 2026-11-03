@@ -341,6 +341,18 @@ pub struct ResolvedStream {
     /// false = deep ranges failed the probe: play sequentially (D4).
     pub range_safe: bool,
     pub authenticated: bool,
+    /// The URL answers only from this moment (a preroll ad on TV clients,
+    /// D37), and isn't probed yet: callers wait for it without holding the
+    /// `PlaybackGate`, then call `StreamResolver::ready`.
+    pub available_at: Option<std::time::Instant>,
+}
+
+impl ResolvedStream {
+    /// Whole seconds until the URL answers, if it doesn't yet.
+    pub fn wait_secs(&self) -> Option<u64> {
+        let left = self.available_at?.saturating_duration_since(std::time::Instant::now());
+        (!left.is_zero()).then(|| left.as_secs_f64().ceil() as u64)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -400,6 +412,12 @@ pub trait StreamResolver: Send + Sync {
     async fn resolve(&self, video_id: &str, auth: Option<&ResolveAuth>) -> std::result::Result<ResolvedStream, PlayFailure>;
     /// Drop any cached URL for this video (expired / refused).
     fn forget(&self, _video_id: &str) {}
+    /// Wait for `s.available_at`, if set, and check the URL then (D4),
+    /// resolving once more if it is refused. A no-op for a stream that is
+    /// ready already.
+    async fn ready(&self, s: ResolvedStream, _auth: Option<&ResolveAuth>) -> std::result::Result<ResolvedStream, PlayFailure> {
+        Ok(s)
+    }
 }
 
 #[cfg(test)]

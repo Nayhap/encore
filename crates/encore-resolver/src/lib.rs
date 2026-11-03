@@ -18,6 +18,7 @@
 
 pub mod base;
 pub mod cleanup;
+pub mod http;
 pub mod jsc;
 pub mod video;
 
@@ -50,11 +51,16 @@ pub use jsc::quickjs::ENGINE;
 
 /// A preroll wait Encore accepts without looking at other clients.
 const SHORT_WAIT: u64 = 15;
-/// The longest preroll wait Encore sits out at all.
-const LONGEST_WAIT: u64 = 60;
+/// The longest one resolve may take before the preroll (a cold solve is
+/// up to 30 s on a slow machine).
+const RESOLVE_DEADLINE: Duration = Duration::from_secs(90);
 
 /// What a song that needs a newer Encore says (D4: `Unknown`).
 pub const NEEDS_UPDATE: &str = "YouTube changed how its songs play, and Encore needs an update to follow. Check for updates in Settings.";
+/// The same, as Settings → Playback shows it (Updates is further down).
+pub const NEEDS_UPDATE_NOTICE: &str = "YouTube changed how its songs play, and this version of Encore can't follow yet. Check for a newer one under Updates, below.";
+/// A solve that didn't finish (out of time or memory): worth another try.
+pub const SOLVER_DIDNT_FINISH: &str = "Encore couldn't finish preparing this song. Try again.";
 
 #[derive(Clone, Debug)]
 pub struct ResolverConfig {
@@ -147,14 +153,20 @@ enum Cause {
     Restricted(Restriction),
     Drm,
     AgeGated,
-    LoginRequired,
+    /// `sign_in`: the reason asked to sign in, in so many words.
+    LoginRequired { sign_in: bool },
     ClientRefused,
     /// Formats only over SABR.
     Sabr,
     /// Only formats that need a GVS PO token (Encore has no source).
     PoTokenRequired,
     NoAudio,
+    /// The solver couldn't read the player or gave a wrong answer: only an
+    /// update fixes that.
     Solver(String),
+    /// The solver ran out of time or memory, or its thread failed: another
+    /// try may work.
+    SolverTransient(String),
     PlayerJs(String),
     Refused(u16),
     Unreadable,
@@ -171,12 +183,13 @@ impl Cause {
             Cause::Restricted(r) => format!("restricted: {r:?}"),
             Cause::Drm => "DRM only".into(),
             Cause::AgeGated => "age-gated".into(),
-            Cause::LoginRequired => "login required".into(),
+            Cause::LoginRequired { sign_in } => if *sign_in { "sign-in required".into() } else { "login required".into() },
             Cause::ClientRefused => "unplayable on this client".into(),
             Cause::Sabr => "SABR only".into(),
             Cause::PoTokenRequired => "skipped: needs a PO token".into(),
             Cause::NoAudio => "no audio formats".into(),
             Cause::Solver(m) => format!("solver: {m}"),
+            Cause::SolverTransient(m) => format!("solver didn't finish: {m}"),
             Cause::PlayerJs(m) => format!("player JS: {m}"),
             Cause::Refused(s) => format!("refused ({s})"),
             Cause::Unreadable => "unreadable answer".into(),
@@ -184,10 +197,18 @@ impl Cause {
         }
     }
 
-    /// Stop asking other clients: their answer would be the same, or
-    /// asking again is how an account gets flagged (D23).
+    /// Stop asking other clients: asking again is how an account gets
+    /// flagged (D23), the connection is gone, or Encore is closing. A
+    /// restriction is not final: one client's refusal can be another's
+    /// stream (yt-dlp asks them all).
     fn final_now(&self) -> bool {
-        matches!(self, Cause::Network(_) | Cause::Challenged(_) | Cause::Unauthorized | Cause::Restricted(_) | Cause::Closed)
+        matches!(self, Cause::Network(_) | Cause::Challenged(_) | Cause::Unauthorized | Cause::Closed)
+    }
+
+    /// Evidence that wins over a stream another client gave: a bot check
+    /// or a refused session must reach the caller (D23's breaker, sign-in).
+    fn overrides_streams(&self) -> bool {
+        matches!(self, Cause::Challenged(_) | Cause::Unauthorized)
     }
 }
 
@@ -195,7 +216,11 @@ fn fail(kind: PlayFailureKind, m: impl Into<String>) -> PlayFailure {
     PlayFailure::new(kind, m)
 }
 
-/// The D4 kind and sentence for what the clients said, most telling first.
+/// The D4 kind and sentence for what the clients said, most telling first:
+/// a bot check or a refused session; then a route that offered audio
+/// Encore couldn't open (only an update fixes that, so it must not hide
+/// behind another client's refusal); then the content's own restrictions;
+/// then the connection and the rest.
 fn failure(causes: &[Cause], signed_in: bool) -> PlayFailure {
     use PlayFailureKind as K;
     let has = |f: &dyn Fn(&Cause) -> bool| causes.iter().any(f);
@@ -212,8 +237,11 @@ fn failure(causes: &[Cause], signed_in: bool) -> PlayFailure {
     if has(&|c| *c == Cause::Unauthorized) {
         return fail(K::SessionExpired, "Your YouTube Music session expired. Sign in again from Settings.");
     }
-    if has(&|c| matches!(c, Cause::Network(_))) {
-        return fail(K::Network, "Couldn't reach YouTube. Check your internet connection.");
+    if has(&|c| matches!(c, Cause::Solver(_) | Cause::PlayerJs(_) | Cause::Sabr | Cause::Unreadable)) {
+        return fail(K::Unknown, NEEDS_UPDATE);
+    }
+    if has(&|c| matches!(c, Cause::SolverTransient(_))) {
+        return fail(K::Unknown, SOLVER_DIDNT_FINISH);
     }
     if let Some(Cause::Restricted(r)) = causes.iter().find(|c| matches!(c, Cause::Restricted(_))) {
         return fail(
@@ -230,20 +258,28 @@ fn failure(causes: &[Cause], signed_in: bool) -> PlayFailure {
     if has(&|c| *c == Cause::AgeGated) {
         return fail(K::Unavailable, if signed_in { "YouTube won't play this age-restricted song for this account. It may want the account to verify its age." } else { "This song is age-restricted. Sign in from Settings to play it." });
     }
-    if has(&|c| *c == Cause::LoginRequired) {
-        return if signed_in { fail(K::SessionExpired, "Your YouTube Music session expired. Sign in again from Settings.") } else { fail(K::Unavailable, "YouTube wants you signed in to play this song. Sign in from Settings.") };
-    }
     if has(&|c| *c == Cause::Drm) {
         return fail(K::Unavailable, "This song is protected (DRM) and Encore can't play it.");
+    }
+    if has(&|c| matches!(c, Cause::Network(_))) {
+        return fail(K::Network, "Couldn't reach YouTube. Check your internet connection.");
+    }
+    // Only an explicit "sign in" while signed in can mean the session went;
+    // anything else is about the song (D4).
+    if has(&|c| matches!(c, Cause::LoginRequired { sign_in: true })) && signed_in {
+        return fail(K::SessionExpired, "Your YouTube Music session expired. Sign in again from Settings.");
+    }
+    if has(&|c| matches!(c, Cause::LoginRequired { .. })) {
+        return fail(K::Unavailable, if signed_in { "YouTube won't play this song for this account." } else { "YouTube wants you signed in to play this song. Sign in from Settings." });
     }
     if has(&|c| *c == Cause::OtherVideo) && causes.iter().all(|c| matches!(c, Cause::OtherVideo | Cause::PoTokenRequired)) {
         return fail(K::Challenged, "YouTube is blocking this connection. Wait a few minutes and try again.");
     }
-    if has(&|c| matches!(c, Cause::Solver(_) | Cause::PlayerJs(_) | Cause::Sabr | Cause::PoTokenRequired | Cause::Unreadable)) {
-        return fail(K::Unknown, NEEDS_UPDATE);
-    }
     if has(&|c| *c == Cause::Closed) {
         return fail(K::Unknown, "Encore is closing.");
+    }
+    if has(&|c| *c == Cause::PoTokenRequired) && causes.iter().all(|c| *c == Cause::PoTokenRequired) {
+        return fail(K::Unknown, NEEDS_UPDATE);
     }
     if has(&|c| *c == Cause::NoAudio || *c == Cause::ClientRefused) {
         return fail(K::Unavailable, "YouTube offered no audio for this song.");
@@ -251,10 +287,48 @@ fn failure(causes: &[Cause], signed_in: bool) -> PlayFailure {
     fail(K::Unknown, "YouTube refused to play this song. Try again later.")
 }
 
+/// The search through clients: the best stream so far and every refusal.
+#[derive(Default)]
+struct Search {
+    causes: Vec<Cause>,
+    best: Option<Ready>,
+}
+
+impl Search {
+    /// A client gave a stream. Returns whether to stop asking.
+    fn found(&mut self, r: Ready) -> bool {
+        let done = r.acceptable && r.wait <= SHORT_WAIT;
+        let key = |r: &Ready| (r.wait > SHORT_WAIT, r.rank);
+        if self.best.as_ref().is_none_or(|b| key(&r) < key(b)) {
+            self.best = Some(r);
+        }
+        done
+    }
+
+    /// A client gave nothing. Returns whether to stop asking.
+    fn refused(&mut self, c: Cause) -> bool {
+        let stop = c.final_now();
+        self.causes.push(c);
+        stop
+    }
+
+    /// The stream to play, unless a bot check or a refused session came
+    /// up: then that is the answer, whatever another client gave (D23).
+    fn finish(self, signed_in: bool) -> Result<Ready, PlayFailure> {
+        match self.best {
+            Some(b) if !self.causes.iter().any(Cause::overrides_streams) => Ok(b),
+            _ => Err(failure(&self.causes, signed_in)),
+        }
+    }
+}
+
 /// A URL ready to probe, with the client it came from.
 struct Ready {
     stream: ResolvedStream,
-    rank: (usize, i64),
+    rank: (bool, i32, usize, i64),
+    /// D5's AAC in the right track: no need to ask further.
+    acceptable: bool,
+    /// Seconds from the answer until the URL works (the preroll).
     wait: u64,
     client: String,
 }
@@ -298,8 +372,12 @@ pub struct NativeResolver {
     /// none: encore-ytm's (D37).
     visitor_source: Mutex<Option<VisitorSource>>,
     notice: Mutex<Option<String>>,
+    /// Counts the signed-out sessions (part of the cache key).
+    anon_generation: std::sync::atomic::AtomicU64,
     /// Encore is quitting or installing an update (D24).
     closed: AtomicBool,
+    /// Wakes a resolve waiting out a preroll when Encore quits.
+    closing: tokio::sync::Notify,
 }
 
 impl NativeResolver {
@@ -322,7 +400,9 @@ impl NativeResolver {
             anon: tokio::sync::Mutex::new(None),
             visitor_source: Mutex::new(None),
             notice: Mutex::new(None),
+            anon_generation: std::sync::atomic::AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            closing: tokio::sync::Notify::new(),
         })
     }
 
@@ -340,7 +420,26 @@ impl NativeResolver {
     /// and a running solve is interrupted.
     pub async fn shut_down(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.closing.notify_waiters();
         self.solver.close();
+    }
+
+    fn closing_error() -> PlayFailure {
+        fail(PlayFailureKind::Unknown, "Encore is closing.")
+    }
+
+    /// Sleep until `at`, unless Encore quits first.
+    async fn wait_until(&self, at: Instant) -> Result<(), PlayFailure> {
+        let woken = self.closing.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Self::closing_error());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(at.into()) => Ok(()),
+            _ = woken => Err(Self::closing_error()),
+        }
     }
 
     /// Quitting didn't happen after all.
@@ -388,38 +487,61 @@ impl NativeResolver {
         if !(video_id.len() == 11 && video_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')) {
             return Err(fail(PlayFailureKind::Unavailable, "This isn't a YouTube song Encore can play."));
         }
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Self::closing_error());
+        }
         // The identity is frozen here, for every request of this resolve.
         let mut id = Identity::from_auth(auth, None);
         diag.signed_in = id.is_authenticated();
         if !id.is_authenticated() {
-            diag.session = Some(self.anonymous(&mut id, video_id).await);
+            match self.anonymous(&mut id, video_id).await {
+                Ok(d) => diag.session = Some(d),
+                Err(f) => return Err(f),
+            }
         }
         let key = Self::cache_key(video_id, &id, opts);
         let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
         let _g = lock.lock().await;
         if let Some(c) = self.cache.lock().get(&key)
-            && c.until > Instant::now() {
-                diag.cached = true;
-                return Ok(c.stream.clone());
-            }
+            && c.until > Instant::now()
+        {
+            diag.cached = true;
+            return Ok(c.stream.clone());
+        }
+        let r = match tokio::time::timeout(RESOLVE_DEADLINE, self.resolve_fresh(video_id, &mut id, opts, diag)).await {
+            Ok(r) => r,
+            Err(_) => Err(fail(PlayFailureKind::Network, "Getting the song from YouTube took too long. Check your internet connection and try again.")),
+        };
+        if let Ok(s) = &r {
+            self.cache_stream(&key, s);
+            *self.notice.lock() = None;
+        }
+        self.inflight.lock().remove(&key);
+        r
+    }
+
+    fn cache_stream(&self, key: &str, s: &ResolvedStream) {
+        let now = encore_core::store::now();
+        let ttl = s.expires_at.map(|e| (e - now - 300).clamp(0, 3600)).unwrap_or(1800) as u64;
+        self.cache.lock().insert(key.to_string(), Cached { stream: s.clone(), until: Instant::now() + Duration::from_secs(ttl) });
+    }
+
+    /// Extract, then probe; a URL that must wait for its preroll comes
+    /// back unprobed, with `available_at`, for `ready` (no lock is held
+    /// while it waits).
+    async fn resolve_fresh(&self, video_id: &str, id: &mut Identity, opts: &ResolveOptions, diag: &mut Diagnostics) -> Result<ResolvedStream, PlayFailure> {
         let mut last = None;
         for _ in 0..2 {
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(fail(PlayFailureKind::Unknown, "Encore is closing."));
-            }
-            let ready = match self.extract(video_id, &mut id, opts, diag).await {
-                Ok(r) => r,
-                Err(e) => {
-                    self.inflight.lock().remove(&key);
-                    return Err(e);
-                }
-            };
-            if ready.wait > 0 {
-                tracing::info!(video = video_id, secs = ready.wait, client = %ready.client, "waiting out a preroll before the URL answers");
-                diag.waited_secs += ready.wait;
-                tokio::time::sleep(Duration::from_secs(ready.wait) + Duration::from_millis(250)).await;
-            }
+            let ready = self.extract(video_id, id, opts, diag).await?;
             let mut s = ready.stream;
+            if s.wait_secs().is_some() {
+                tracing::info!(video = video_id, secs = ready.wait, client = %ready.client, "the URL answers after a preroll");
+                diag.waited_secs += ready.wait;
+                return Ok(s);
+            }
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(Self::closing_error());
+            }
             diag.probes += 1;
             match self.probe_checked(&s).await {
                 Ok((len, range_ok)) => {
@@ -427,11 +549,7 @@ impl NativeResolver {
                         s.content_length = Some(len);
                     }
                     s.range_safe = range_ok;
-                    let now = encore_core::store::now();
-                    let ttl = s.expires_at.map(|e| (e - now - 300).clamp(0, 3600)).unwrap_or(1800) as u64;
-                    self.cache.lock().insert(key.clone(), Cached { stream: s.clone(), until: Instant::now() + Duration::from_secs(ttl) });
-                    self.inflight.lock().remove(&key);
-                    *self.notice.lock() = None;
+                    s.available_at = None;
                     return Ok(s);
                 }
                 // Resolve once more for a fresh URL; refused twice, it is a
@@ -441,77 +559,54 @@ impl NativeResolver {
                     self.forget(video_id);
                     last = Some(fail(PlayFailureKind::Unknown, "YouTube's media server refused this song. Try again later."));
                 }
-                Err(Probe::Failed(e)) => {
-                    last = Some(e);
-                    break;
-                }
+                Err(Probe::Failed(e)) => return Err(e),
             }
         }
-        self.inflight.lock().remove(&key);
         Err(last.unwrap_or_else(|| fail(PlayFailureKind::Unknown, "could not resolve the stream")))
     }
 
     /// Ask the clients in turn for a playable URL.
     async fn extract(&self, video_id: &str, id: &mut Identity, opts: &ResolveOptions, diag: &mut Diagnostics) -> Result<Ready, PlayFailure> {
         let mut plan = video::plan::Plan::new(id.is_authenticated(), opts.client.as_deref());
-        let mut causes: Vec<Cause> = Vec::new();
-        let mut best: Option<Ready> = None;
+        let mut search = Search::default();
         while let Some(key) = plan.pop_next() {
             let t0 = Instant::now();
             let Some(c) = base::client(&key) else {
-                causes.push(Cause::Refused(0));
+                search.refused(Cause::Refused(0));
                 continue;
             };
             let mut attempt = Attempt { client: key.clone(), outcome: String::new(), status: None, reason: None, itag: None, formats: 0, skipped: Skipped::default(), ms: 0 };
             let r = self.ask(video_id, c, id, &mut plan, &mut attempt, diag).await;
             attempt.ms = t0.elapsed().as_millis() as u64;
-            match r {
+            let stop = match r {
                 Ok(ready) => {
                     attempt.outcome = if ready.wait > SHORT_WAIT { format!("itag {} after a {} s preroll", ready.stream.itag, ready.wait) } else { format!("itag {}", ready.stream.itag) };
-                    diag.attempts.push(attempt);
-                    let done = formats::preferred(ready.stream.itag) && ready.wait <= SHORT_WAIT;
-                    if best.as_ref().is_none_or(|b| (ready.wait > SHORT_WAIT, ready.rank) < (b.wait > SHORT_WAIT, b.rank)) {
-                        best = Some(ready);
-                    }
-                    if done {
-                        break;
-                    }
+                    search.found(ready)
                 }
                 Err(cause) => {
                     attempt.outcome = cause.label();
-                    diag.attempts.push(attempt);
-                    let stop = cause.final_now();
-                    causes.push(cause);
-                    if stop {
-                        break;
-                    }
+                    tracing::info!(video = video_id, client = %key, cause = %attempt.outcome, "a client gave no stream");
+                    search.refused(cause)
                 }
+            };
+            diag.attempts.push(attempt);
+            if stop {
+                break;
             }
         }
-        let chosen = match best {
-            Some(b) if b.wait <= LONGEST_WAIT => Some(b),
-            Some(_) => {
-                causes.push(Cause::Refused(0));
-                None
-            }
-            None => None,
-        };
-        for c in &causes {
-            tracing::info!(video = video_id, cause = %c.label(), "a client gave no stream");
-        }
-        match chosen {
-            Some(r) => {
+        let signed_in = id.is_authenticated();
+        match search.finish(signed_in) {
+            Ok(r) => {
                 diag.chosen = Some(format!("{} itag {} {}", r.client, r.stream.itag, r.stream.codec));
                 Ok(r)
             }
-            None => {
-                let f = failure(&causes, id.is_authenticated());
+            Err(f) => {
                 // A bot check signed out: the next resolve starts a new session.
-                if f.kind == PlayFailureKind::Challenged && !id.is_authenticated() {
+                if f.kind == PlayFailureKind::Challenged && !signed_in {
                     *self.anon.lock().await = None;
                 }
                 if f.message == NEEDS_UPDATE {
-                    *self.notice.lock() = Some(NEEDS_UPDATE.into());
+                    *self.notice.lock() = Some(NEEDS_UPDATE_NOTICE.into());
                 }
                 Err(f)
             }
@@ -519,15 +614,24 @@ impl NativeResolver {
     }
 
     /// Signed out: the session the watch page starts (`video::webpage`),
-    /// kept for a while; encore-ytm's visitor if the page gave none.
-    async fn anonymous(&self, id: &mut Identity, video_id: &str) -> String {
+    /// kept for a while; encore-ytm's visitor if the page gave none. A rate
+    /// limit on the page ends the resolve as a bot check (D23).
+    async fn anonymous(&self, id: &mut Identity, video_id: &str) -> Result<String, PlayFailure> {
         let mut g = self.anon.lock().await;
         if !g.as_ref().is_some_and(|s| s.fresh()) {
-            *g = webpage::load(&self.http, video_id).await;
+            let generation = self.anon_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            *g = match webpage::load(&self.http, video_id, generation).await {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::info!("the watch page answered with a rate limit");
+                    return Err(failure(&[Cause::Challenged(Challenge::RateLimit)], false));
+                }
+            };
             tracing::info!(ok = g.is_some(), visitor = g.as_ref().is_some_and(|s| s.visitor.is_some()), "signed-out session from the watch page");
         }
+        id.key = format!("anonymous:{}", g.as_ref().map(|s| s.generation).unwrap_or(0));
+        id.anon_jar = Some(g.as_ref().map(|s| s.jar.clone()).unwrap_or_else(webpage::consent_jar));
         if let Some(s) = g.as_ref() {
-            id.anon_cookies = Some(s.cookie_header());
             id.visitor_data = s.visitor.clone();
         }
         let from_page = id.visitor_data.is_some();
@@ -535,7 +639,7 @@ impl NativeResolver {
             id.visitor_data = self.visitor_source.lock().as_ref().and_then(|f| f());
         }
         let names: Vec<&str> = g.as_ref().map(|s| s.jar.records().iter().map(|c| c.name.as_str()).collect()).unwrap_or_default();
-        format!("cookies [{}], visitor {}", names.join(", "), if from_page { "from the watch page" } else if id.visitor_data.is_some() { "from encore-ytm" } else { "none" })
+        Ok(format!("cookies [{}], visitor {}", names.join(", "), if from_page { "from the watch page" } else if id.visitor_data.is_some() { "from encore-ytm" } else { "none" }))
     }
 
     async fn player(&self, diag: &mut Diagnostics) -> Result<Player, Cause> {
@@ -546,6 +650,7 @@ impl NativeResolver {
             }
             Err(PlayerJsError::Network(m)) => Err(Cause::Network(m)),
             Err(PlayerJsError::Missing(m)) => Err(Cause::PlayerJs(m)),
+            Err(PlayerJsError::RateLimited) => Err(Cause::Challenged(Challenge::RateLimit)),
         }
     }
 
@@ -557,11 +662,11 @@ impl NativeResolver {
             return Err(Cause::PoTokenRequired);
         }
         if c.require_auth && !id.is_authenticated() {
-            return Err(Cause::LoginRequired);
+            return Err(Cause::LoginRequired { sign_in: false });
         }
         let player = if c.require_js_player { Some(self.player(diag).await?) } else { None };
         // `_download_ytcfg`, for the clients that need their page's config.
-        let ytcfg = base::ytcfg::download(&self.http, c, id, video_id).await;
+        let ytcfg = base::ytcfg::download(&self.http, c, id, video_id).await.map_err(|_| Cause::Challenged(Challenge::RateLimit))?;
         if id.visitor_data.is_none() {
             id.visitor_data = ytcfg.as_ref().and_then(|y| y["VISITOR_DATA"].as_str()).map(str::to_string);
         }
@@ -596,7 +701,7 @@ impl NativeResolver {
             // Embedded errors ("Error code: 152") are the embed's, too.
             Playability::Restricted(Restriction::Removed) if c.key == "visionos" || c.is_embedded() => return Err(Cause::ClientRefused),
             Playability::Restricted(r) => return Err(Cause::Restricted(r)),
-            Playability::LoginRequired => return Err(Cause::LoginRequired),
+            Playability::LoginRequired { sign_in } => return Err(Cause::LoginRequired { sign_in }),
             Playability::ClientRefused => return Err(Cause::ClientRefused),
         }
         let (cands, skipped) = formats::candidates(&pr, c, false);
@@ -629,9 +734,12 @@ impl NativeResolver {
         if let Some(ua) = c.user_agent() {
             headers.push(("User-Agent".to_string(), ua.to_string()));
         }
+        // `_get_available_at_timestamp`: counted from this answer.
+        let wait = formats::preroll_seconds(&pr);
         Ok(Ready {
             rank: cand.rank(),
-            wait: formats::preroll_seconds(&pr),
+            acceptable: cand.acceptable(),
+            wait,
             client: c.key.clone(),
             stream: ResolvedStream {
                 video_id: video_id.into(),
@@ -647,6 +755,7 @@ impl NativeResolver {
                 loudness_db: loudness,
                 range_safe: true,
                 authenticated: id.is_authenticated() && c.supports_cookies,
+                available_at: (wait > 0).then(|| Instant::now() + Duration::from_secs(wait) + Duration::from_millis(250)),
             },
         })
     }
@@ -668,7 +777,13 @@ impl NativeResolver {
             let t = Instant::now();
             let out = self.solver.solve(&player.script, reqs.clone()).await.map_err(|e| match e {
                 SolveError::Closed => Cause::Closed,
-                e => Cause::Solver(e.to_string()),
+                SolveError::Engine(m) => Cause::SolverTransient(m),
+                // ejs can't read this player: a newer one may be out, so the
+                // next resolve asks the iframe API again.
+                SolveError::Player(m) => {
+                    self.player_js.forget(false);
+                    Cause::Solver(m)
+                }
             })?;
             diag.solves.push(SolveTime { ms: t.elapsed().as_millis() as u64, preprocessed: self.solver.last_timing().preprocessed_hit, n: n.is_none() && cand.n.is_some(), sig: perm.is_none() && slen.is_some() });
             for (req, res) in reqs.iter().zip(out) {
@@ -767,6 +882,41 @@ impl StreamResolver for NativeResolver {
     fn forget(&self, video_id: &str) {
         self.cache.lock().retain(|k, _| !k.starts_with(&format!("{video_id}|")));
     }
+
+    /// After the preroll: probe (D4), and resolve once more if the media
+    /// server refuses the URL.
+    async fn ready(&self, s: ResolvedStream, auth: Option<&ResolveAuth>) -> Result<ResolvedStream, PlayFailure> {
+        let mut s = s;
+        for round in 0..2 {
+            let Some(at) = s.available_at else { return Ok(s) };
+            self.wait_until(at).await?;
+            match self.probe_checked(&s).await {
+                Ok((len, range_ok)) => {
+                    if len > 0 {
+                        s.content_length = Some(len);
+                    }
+                    s.range_safe = range_ok;
+                    s.available_at = None;
+                    // The cached copy is ready too now.
+                    let url = s.url.expose().clone();
+                    for c in self.cache.lock().values_mut() {
+                        if c.stream.url.expose() == &url {
+                            c.stream = s.clone();
+                        }
+                    }
+                    return Ok(s);
+                }
+                Err(Probe::Refused(st)) if round == 0 => {
+                    tracing::info!(video = %s.video_id, status = st, "the media server refused the URL after its preroll");
+                    self.forget(&s.video_id);
+                    s = self.resolve(&s.video_id, auth).await?;
+                }
+                Err(Probe::Refused(_)) => break,
+                Err(Probe::Failed(e)) => return Err(e),
+            }
+        }
+        Err(fail(PlayFailureKind::Unknown, "YouTube's media server refused this song. Try again later."))
+    }
 }
 
 /// Run the embedded solver on the synthetic player (no network): the
@@ -806,8 +956,20 @@ mod tests {
         assert_eq!(k(&[Cause::Unauthorized], true), K::SessionExpired);
         assert_eq!(k(&[Cause::Restricted(Restriction::Geo)], false), K::Unavailable);
         assert_eq!(k(&[Cause::AgeGated, Cause::PoTokenRequired], true), K::Unavailable);
-        assert_eq!(k(&[Cause::LoginRequired], true), K::SessionExpired);
-        assert_eq!(k(&[Cause::LoginRequired], false), K::Unavailable);
+        assert_eq!(k(&[Cause::LoginRequired { sign_in: true }], true), K::SessionExpired);
+        assert_eq!(k(&[Cause::LoginRequired { sign_in: false }], true), K::Unavailable, "a LOGIN_REQUIRED without 'sign in' is about the song");
+        assert_eq!(k(&[Cause::LoginRequired { sign_in: true }], false), K::Unavailable);
+        // Signed in, a private video: embedded refuses, the TV clients say private.
+        let private = failure(&[Cause::ClientRefused, Cause::Restricted(Restriction::Private), Cause::Restricted(Restriction::Private)], true);
+        assert_eq!((private.kind, private.message.as_str()), (K::Unavailable, "This song is private on YouTube."));
+        // An extractor failure isn't hidden behind another client's refusal.
+        assert_eq!(failure(&[Cause::AgeGated, Cause::Solver("x".into()), Cause::ClientRefused], false).message, NEEDS_UPDATE);
+        assert_eq!(failure(&[Cause::LoginRequired { sign_in: true }, Cause::Sabr], true).message, NEEDS_UPDATE);
+        // A solve out of time is worth another try, not an update.
+        let t = failure(&[Cause::SolverTransient("out of time".into())], false);
+        assert_eq!((t.kind, t.message.as_str()), (K::Unknown, SOLVER_DIDNT_FINISH));
+        assert_eq!(k(&[Cause::PoTokenRequired, Cause::NoAudio], false), K::Unavailable);
+        assert_eq!(failure(&[Cause::PoTokenRequired], true).message, NEEDS_UPDATE);
         assert_eq!(k(&[Cause::OtherVideo, Cause::OtherVideo], false), K::Challenged);
         assert_eq!(k(&[Cause::Sabr, Cause::ClientRefused], false), K::Unknown);
         assert_eq!(failure(&[Cause::Solver("x".into())], false).message, NEEDS_UPDATE);
@@ -819,10 +981,46 @@ mod tests {
         assert_ne!(k(&[Cause::Refused(403), Cause::Refused(403)], true), K::Challenged);
     }
 
+    fn ready(itag: u32, rank_lang: i32, acceptable: bool) -> Ready {
+        Ready {
+            stream: ResolvedStream { video_id: "x".into(), url: Secret::new(String::new()), headers: vec![], itag, codec: "aac".into(), mime: "audio/mp4".into(), bitrate_kbps: None, content_length: None, duration: None, loudness_db: None, expires_at: None, range_safe: true, authenticated: false, available_at: None },
+            rank: (false, -rank_lang, formats::PREFERENCE.iter().position(|&i| i == itag).unwrap_or(9), 0),
+            acceptable,
+            wait: 0,
+            client: "c".into(),
+        }
+    }
+
+    #[test]
+    fn a_bot_check_after_a_fallback_wins() {
+        let mut s = Search::default();
+        assert!(!s.found(ready(251, -1, false)), "Opus doesn't end the search");
+        assert!(s.refused(Cause::Challenged(Challenge::BotCheck)));
+        assert_eq!(s.finish(false).err().map(|f| f.kind), Some(PlayFailureKind::Challenged));
+        let mut s = Search::default();
+        s.found(ready(251, -1, false));
+        s.refused(Cause::Unauthorized);
+        assert_eq!(s.finish(true).err().map(|f| f.kind), Some(PlayFailureKind::SessionExpired));
+        // An ordinary refusal after a fallback keeps the fallback.
+        let mut s = Search::default();
+        s.found(ready(251, -1, false));
+        assert!(!s.refused(Cause::Restricted(Restriction::Removed)), "a restriction doesn't end the search");
+        s.refused(Cause::ClientRefused);
+        assert_eq!(s.finish(false).ok().map(|r| r.stream.itag), Some(251));
+    }
+
+    #[test]
+    fn the_original_track_beats_a_dubbed_aac_across_clients() {
+        let mut s = Search::default();
+        s.found(ready(251, 10, false));
+        assert!(!s.found(ready(140, -1, false)), "a dubbed AAC doesn't end the search");
+        assert_eq!(s.finish(false).ok().map(|r| r.stream.itag), Some(251));
+    }
+
     #[test]
     fn what_ends_the_search() {
         assert!(Cause::Challenged(Challenge::RateLimit).final_now());
-        assert!(Cause::Restricted(Restriction::Private).final_now());
+        assert!(!Cause::Restricted(Restriction::Private).final_now());
         assert!(!Cause::AgeGated.final_now());
         assert!(!Cause::Sabr.final_now());
         assert!(!Cause::Solver("x".into()).final_now());
@@ -839,6 +1037,9 @@ mod tests {
         let anon = Identity::anonymous(None);
         let opts = ResolveOptions::default();
         assert_eq!(NativeResolver::cache_key("4D7u5KF7SP8", &anon, &opts), "4D7u5KF7SP8|anonymous|");
+        let mut next = Identity::anonymous(None);
+        next.key = "anonymous:2".into();
+        assert_ne!(NativeResolver::cache_key("4D7u5KF7SP8", &next, &opts), NativeResolver::cache_key("4D7u5KF7SP8", &anon, &opts), "a new signed-out session never gets the old one's URLs");
         let c = |n: &str| encore_core::service::CookieRecord { name: n.into(), value: "v".into(), domain: ".youtube.com".into(), path: "/".into(), secure: true, http_only: false, expires: None };
         let a = ResolveAuth { cookies: vec![c("SAPISID"), c("LOGIN_INFO")], key: "acct:2:page".into(), ..Default::default() };
         let id = Identity::from_auth(Some(&a), Some("anon visitor".into()));

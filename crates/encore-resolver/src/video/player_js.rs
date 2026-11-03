@@ -60,6 +60,8 @@ pub struct Player {
 pub enum PlayerJsError {
     Network(String),
     Missing(String),
+    /// 429 or YouTube's "Sorry" page: a bot check, not a connection problem.
+    RateLimited,
 }
 
 pub struct PlayerJs {
@@ -102,19 +104,18 @@ impl PlayerJs {
     }
 
     async fn get_text(&self, url: &str) -> Result<String, PlayerJsError> {
-        let r = self.http.get(url).header("User-Agent", crate::base::BROWSER_UA).send().await.map_err(|e| PlayerJsError::Network(if e.is_timeout() { "timed out".into() } else { "unreachable".into() }))?;
-        let st = r.status().as_u16();
-        if st >= 500 || st == 429 {
-            return Err(PlayerJsError::Network(format!("answered {st}")));
-        }
+        use crate::http::{self, Fetch};
+        let rb = self.http.get(url).header("User-Agent", crate::base::BROWSER_UA);
+        let (st, _, body) = http::get(rb, MAX_PLAYER_BYTES).await.map_err(|e| match e {
+            Fetch::Network(m) => PlayerJsError::Network(m),
+            Fetch::RateLimited => PlayerJsError::RateLimited,
+            Fetch::Status(s) => PlayerJsError::Missing(format!("answered {s}")),
+            Fetch::TooLarge => PlayerJsError::Missing("too large".into()),
+        })?;
         if st != 200 {
             return Err(PlayerJsError::Missing(format!("answered {st}")));
         }
-        let body = r.bytes().await.map_err(|_| PlayerJsError::Network("interrupted".into()))?;
-        if body.len() > MAX_PLAYER_BYTES {
-            return Err(PlayerJsError::Missing("too large".into()));
-        }
-        String::from_utf8(body.to_vec()).map_err(|_| PlayerJsError::Missing("not text".into()))
+        String::from_utf8(body).map_err(|_| PlayerJsError::Missing("not text".into()))
     }
 
     async fn player_id(&self) -> Result<String, PlayerJsError> {
@@ -136,8 +137,10 @@ impl PlayerJs {
             return Ok(p);
         }
         let file = self.dir.join(format!("{id}-{}.js", MAIN_VARIANT.0));
-        let code = match std::fs::read_to_string(&file) {
-            Ok(c) if signature_timestamp(&c).is_some() => c,
+        // A cached file larger than a player is never read in.
+        let cached = std::fs::metadata(&file).ok().filter(|m| m.len() as usize <= MAX_PLAYER_BYTES).and_then(|_| std::fs::read_to_string(&file).ok());
+        let code = match cached {
+            Some(c) if signature_timestamp(&c).is_some() => c,
             _ => {
                 let c = self.get_text(&player_url(&id)).await?;
                 if signature_timestamp(&c).is_none() {

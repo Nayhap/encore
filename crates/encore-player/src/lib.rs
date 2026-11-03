@@ -467,6 +467,7 @@ impl Player {
                 expires_at: None,
                 range_safe: true,
                 authenticated: false,
+                available_at: None,
             };
             return Some((s, f.path));
         }
@@ -485,6 +486,7 @@ impl Player {
             expires_at: None,
             range_safe: true,
             authenticated: false,
+            available_at: None,
         };
         Some((s, path))
     }
@@ -1049,8 +1051,26 @@ impl Player {
             let (res, path) = match local {
                 Some((s, p)) => (Ok(s), Some(p)),
                 None => {
-                    let _busy = me.gate.enter();
-                    (me.resolve_as_now(&vid).await, None)
+                    let res = {
+                        let _busy = me.gate.enter();
+                        me.resolve_as_now(&vid).await
+                    };
+                    // A preroll (D37): said, and waited out without holding
+                    // the gate, so downloads and paging go on meanwhile.
+                    let res = match res {
+                        Ok(s) if s.available_at.is_some() => {
+                            if let Some(secs) = s.wait_secs().filter(|&w| w >= 3) {
+                                let _ = me.tx.send(PlayerEvent::Notice(format!("This song starts in {secs} seconds: YouTube holds it back for the length of an ad.")));
+                            }
+                            let r = me.resolver.ready(s, (me.auth)().as_ref()).await;
+                            if me.st.lock().track_gen != my_gen {
+                                return;
+                            }
+                            r
+                        }
+                        r => r,
+                    };
+                    (res, None)
                 }
             };
             match &res {
@@ -1342,8 +1362,16 @@ impl Player {
             Some((s, p)) => (Ok(s), Some(p)),
             None if !self.online() => (Err(PlayFailure::new(PlayFailureKind::Network, "offline")), None),
             None => {
-                let _busy = self.gate.enter();
-                (self.resolve_as_now(&vid).await, None)
+                let res = {
+                    let _busy = self.gate.enter();
+                    self.resolve_as_now(&vid).await
+                };
+                // The preroll is waited out here, without the gate (D37).
+                let res = match res {
+                    Ok(s) => self.resolver.ready(s, (self.auth)().as_ref()).await,
+                    e => e,
+                };
+                (res, None)
             }
         };
         let ok = self.avail();

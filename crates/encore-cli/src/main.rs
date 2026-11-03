@@ -1115,6 +1115,14 @@ async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::
     let r = cli_resolver(svc);
     let t1 = Instant::now();
     let (res, d) = r.resolve_with(video_id, auth, &encore_resolver::ResolveOptions { client }).await;
+    // The preroll, waited out and the URL probed after it (D37).
+    let res = match res {
+        Ok(s) => {
+            use encore_core::service::StreamResolver;
+            r.ready(s, auth).await
+        }
+        e => e,
+    };
     let secs = t1.elapsed().as_secs_f64();
     if json {
         let v = serde_json::json!({

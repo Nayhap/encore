@@ -52,20 +52,30 @@ pub enum CallError {
     Unreadable,
 }
 
-/// POST `/youtubei/v1/player` as `id` with client `c`. Returns the player
-/// response and the HTTP status.
-pub async fn call(http: &reqwest::Client, c: &InnertubeClient, id: &Identity, video_id: &str, sts: Option<u32>, ytcfg: Option<&Value>) -> Result<Value, CallError> {
+/// A player response is never this large.
+const MAX_RESPONSE_BYTES: usize = 8 << 20;
+
+/// POST `/youtubei/v1/player` as `id` with client `c`. The answer's
+/// `Set-Cookie`s join this resolve's cookies, as in yt-dlp's jar.
+pub async fn call(http: &reqwest::Client, c: &InnertubeClient, id: &mut Identity, video_id: &str, sts: Option<u32>, ytcfg: Option<&Value>) -> Result<Value, CallError> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let url = format!("https://{}/youtubei/v1/player?prettyPrint=false", c.innertube_host);
-    let mut rb = http.post(url).timeout(Duration::from_secs(15)).json(&body(c, video_id, sts, ytcfg));
+    let mut rb = http.post(&url).timeout(Duration::from_secs(15)).json(&body(c, video_id, sts, ytcfg));
     for (k, v) in base::api_headers(c, id, now, ytcfg) {
         rb = rb.header(k, v);
     }
     let r = rb.send().await.map_err(|e| CallError::Network(if e.is_timeout() { "timed out".into() } else { "unreachable".into() }))?;
     let status = r.status().as_u16();
-    let text = r.text().await.map_err(|_| CallError::Network("interrupted".into()))?;
+    if let Ok(u) = url::Url::parse(&url) {
+        id.absorb(&u, &crate::http::set_cookies(r.headers()));
+    }
+    let bytes = crate::http::read_capped(r, MAX_RESPONSE_BYTES).await.map_err(|e| match e {
+        crate::http::Fetch::TooLarge => CallError::Unreadable,
+        _ => CallError::Network("interrupted".into()),
+    })?;
+    let text = String::from_utf8_lossy(&bytes);
     if text.trim_start().starts_with('<') {
-        return Err(if status == 429 || text.contains("<title>Sorry") { CallError::RateLimited } else if status >= 500 { CallError::Network(format!("answered {status}")) } else { CallError::Refused(status) });
+        return Err(if status == 429 || crate::http::sorry_page(&bytes) { CallError::RateLimited } else if status >= 500 { CallError::Network(format!("answered {status}")) } else { CallError::Refused(status) });
     }
     match status {
         200 => {}

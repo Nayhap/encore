@@ -37,7 +37,7 @@ pub struct Identity {
     pub visitor_data: Option<String>,
     /// Signed out: the watch page's cookies (`video::webpage`), with the
     /// consent ones.
-    pub anon_cookies: Option<String>,
+    pub anon_jar: Option<CookieJar>,
 }
 
 impl std::fmt::Debug for Identity {
@@ -48,13 +48,13 @@ impl std::fmt::Debug for Identity {
 
 impl Identity {
     pub fn anonymous(visitor_data: Option<String>) -> Self {
-        Identity { key: "anonymous".into(), jar: None, auth_user: 0, page_id: None, user_session_id: None, visitor_data, anon_cookies: None }
+        Identity { key: "anonymous".into(), jar: None, auth_user: 0, page_id: None, user_session_id: None, visitor_data, anon_jar: None }
     }
 
     pub fn from_auth(auth: Option<&ResolveAuth>, anonymous_visitor: Option<String>) -> Self {
         let Some(a) = auth else { return Self::anonymous(anonymous_visitor) };
         let jar = CookieJar::new(a.cookies.clone());
-        if !jar.has_login() {
+        if !has_auth_cookies(&jar) {
             return Self::anonymous(anonymous_visitor);
         }
         Identity {
@@ -64,14 +64,43 @@ impl Identity {
             page_id: a.page_id.clone(),
             user_session_id: a.user_session_id.clone(),
             visitor_data: a.visitor_data.clone(),
-            anon_cookies: None,
+            anon_jar: None,
         }
     }
 
     /// `is_authenticated` / `_has_auth_cookies`: LOGIN_INFO and a SAPISID.
     pub fn is_authenticated(&self) -> bool {
-        self.jar.as_ref().is_some_and(|j| j.has_login())
+        self.jar.as_ref().is_some_and(has_auth_cookies)
     }
+
+    /// The `Cookie` header this identity sends to `url`: signed in, the
+    /// session's (only to clients that take cookies, with `PREF` as
+    /// `_initialize_pref` sets it); signed out, the consent and page ones.
+    pub fn cookie_header(&self, url: &url::Url, supports_cookies: bool) -> String {
+        match self.jar.as_ref().filter(|j| has_auth_cookies(j) && supports_cookies) {
+            Some(j) => with_pref(&j.header_for(url)),
+            None => self.anon_jar.as_ref().map(|j| j.header_for(url)).unwrap_or_else(|| "SOCS=CAI; PREF=hl=en&tz=UTC".into()),
+        }
+    }
+
+    /// Take the cookies an answer set, as yt-dlp's shared jar does, so the
+    /// next request of this resolve carries them. Only this resolve's copy
+    /// changes: the session itself is encore-ytm's to update.
+    pub fn absorb(&mut self, url: &url::Url, set_cookies: &[String]) {
+        let jar = if self.is_authenticated() { self.jar.as_mut() } else { self.anon_jar.as_mut() };
+        if let Some(j) = jar {
+            for h in set_cookies {
+                j.apply_set_cookie(url, h);
+            }
+        }
+    }
+}
+
+/// `_has_auth_cookies`: a SAPISID (or its 1P/3P form) and `LOGIN_INFO`.
+/// YouTube keeps the 3P SAPISID when it signs a browser out, but clears
+/// `LOGIN_INFO`.
+pub fn has_auth_cookies(j: &CookieJar) -> bool {
+    j.has_login() && j.get("LOGIN_INFO", "www.youtube.com").is_some()
 }
 
 /// `_extract_context`: the client's context (from its downloaded ytcfg if
@@ -107,8 +136,9 @@ pub fn api_headers(c: &InnertubeClient, id: &Identity, now: u64, ytcfg: Option<&
         h.push(("X-Goog-Visitor-Id".into(), v.clone()));
     }
     let url = url::Url::parse(&format!("{origin}/youtubei/v1/player")).expect("api url");
-    match id.jar.as_ref().filter(|j| j.has_login() && c.supports_cookies) {
-        Some(jar) => {
+    h.push(("Cookie".into(), id.cookie_header(&url, c.supports_cookies)));
+    if let Some(jar) = id.jar.as_ref().filter(|j| has_auth_cookies(j) && c.supports_cookies) {
+        {
             if let Some(p) = &id.page_id {
                 h.push(("X-Goog-PageId".into(), p.clone()));
             }
@@ -118,9 +148,11 @@ pub fn api_headers(c: &InnertubeClient, id: &Identity, now: u64, ytcfg: Option<&
                 h.push(("Authorization".into(), a));
                 h.push(("X-Origin".into(), origin.clone()));
             }
-            h.push(("Cookie".into(), with_pref(&jar.header_for(&url))));
+            // `_generate_cookie_auth_headers`: the page said it is signed in.
+            if y["LOGGED_IN"].as_bool() == Some(true) {
+                h.push(("X-Youtube-Bootstrap-Logged-In".into(), "true".into()));
+            }
         }
-        None => h.push(("Cookie".into(), id.anon_cookies.clone().unwrap_or_else(|| "SOCS=CAI; PREF=hl=en&tz=UTC".into()))),
     }
     h
 }
@@ -200,6 +232,25 @@ mod tests {
         assert_eq!(get(&api_headers(client("tv").unwrap(), &id, 1, Some(&serde_json::json!({ "INNERTUBE_CLIENT_VERSION": "7.9" }))), "X-YouTube-Client-Version"), Some("7.9"));
         assert!(get(&h, "Authorization").is_none());
         assert_eq!(get(&h, "Cookie"), Some("SOCS=CAI; PREF=hl=en&tz=UTC"));
+    }
+
+    #[test]
+    fn sapisid_without_login_info_is_signed_out() {
+        let c = |n: &str| CookieRecord { name: n.into(), value: "v".into(), domain: ".youtube.com".into(), path: "/".into(), secure: true, http_only: false, expires: None };
+        let a = ResolveAuth { cookies: vec![c("SAPISID"), c("__Secure-3PAPISID")], key: "k".into(), ..Default::default() };
+        assert!(!Identity::from_auth(Some(&a), None).is_authenticated());
+    }
+
+    #[test]
+    fn a_logged_in_page_adds_the_bootstrap_header_and_answers_set_cookies() {
+        let mut id = signed_in(None);
+        let y = serde_json::json!({ "LOGGED_IN": true });
+        let h = api_headers(client("web_embedded").unwrap(), &id, 1, Some(&y));
+        assert_eq!(get(&h, "X-Youtube-Bootstrap-Logged-In"), Some("true"));
+        assert!(get(&api_headers(client("web_embedded").unwrap(), &id, 1, None), "X-Youtube-Bootstrap-Logged-In").is_none());
+        let u = url::Url::parse("https://www.youtube.com/youtubei/v1/player").unwrap();
+        id.absorb(&u, &["SIDCC=rotated; Domain=.youtube.com; Path=/; Secure".to_string()]);
+        assert!(id.cookie_header(&u, true).contains("SIDCC=rotated"));
     }
 
     #[test]

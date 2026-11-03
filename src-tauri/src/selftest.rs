@@ -137,7 +137,11 @@ async fn check(video: Option<String>, strict: bool) -> Value {
 
 async fn stream(resolver: &Arc<NativeResolver>, engine: Option<&Engine>, id: &str) -> Value {
     let t0 = Instant::now();
-    let s = match resolver.resolve(id, None).await {
+    let ready = match resolver.resolve(id, None).await {
+        Ok(s) => resolver.ready(s, None).await,
+        e => e,
+    };
+    let s = match ready {
         Ok(s) => s,
         Err(f) => {
             let kind = match f.kind {

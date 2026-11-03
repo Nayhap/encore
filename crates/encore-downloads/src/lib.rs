@@ -1257,9 +1257,18 @@ impl DownloadManager {
     }
 
     async fn resolve(&self, vid: &str, cancel: &AtomicBool) -> std::result::Result<Option<ResolvedStream>, JobError> {
-        let Some(_turn) = self.before_request(cancel).await else { return Ok(None) };
         let auth = (self.d.auth)();
-        match self.d.resolver.resolve(vid, auth.as_ref()).await {
+        let res = {
+            let Some(_turn) = self.before_request(cancel).await else { return Ok(None) };
+            self.d.resolver.resolve(vid, auth.as_ref()).await
+        };
+        // A preroll is waited out after the turn ends, so playback isn't
+        // held up meanwhile (D37).
+        let res = match res {
+            Ok(s) => self.d.resolver.ready(s, auth.as_ref()).await,
+            e => e,
+        };
+        match res {
             Ok(s) => Ok(Some(s)),
             Err(f) => Err(match f.kind {
                 // Only the extractor's bot check counts here (D23): a refused
@@ -1640,6 +1649,7 @@ mod tests {
                 expires_at: None,
                 range_safe: true,
                 authenticated: false,
+                available_at: None,
             })
         }
     }

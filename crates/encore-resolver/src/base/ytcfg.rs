@@ -14,6 +14,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::{Identity, InnertubeClient};
+use crate::http::Fetch;
 
 const MAX_PAGE_BYTES: usize = 8 << 20;
 static YTCFG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ytcfg\.set\s*\(\s*(\{.+?\})\s*\)\s*;").unwrap());
@@ -49,30 +50,34 @@ pub fn encrypted_host_flags(ytcfg: &Value) -> Option<String> {
     ytcfg["WEB_PLAYER_CONTEXT_CONFIGS"]["WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER"]["encryptedHostFlags"].as_str().map(str::to_string)
 }
 
-/// Load and fix a client's ytcfg. `None` when the client has no page or
-/// it gave none (the table's defaults are used then, as upstream).
-pub async fn download(http: &reqwest::Client, c: &InnertubeClient, id: &Identity, video_id: &str) -> Option<Value> {
-    let url = page_url(&c.key, video_id)?;
+/// Load and fix a client's ytcfg. `Ok(None)` when the client has no page
+/// or it gave none (the table's defaults are used then, as upstream); a
+/// rate limit is an error, so the resolve stops before asking `/player`.
+/// The page's `Set-Cookie`s join this resolve's cookies.
+pub async fn download(http: &reqwest::Client, c: &InnertubeClient, id: &mut Identity, video_id: &str) -> Result<Option<Value>, Fetch> {
+    let Some(url) = page_url(&c.key, video_id) else { return Ok(None) };
     if c.require_auth && !id.is_authenticated() {
-        return None;
+        return Ok(None);
     }
-    let u = url::Url::parse(&url).ok()?;
+    let Ok(u) = url::Url::parse(&url) else { return Ok(None) };
     let mut rb = http.get(u.clone()).header("User-Agent", c.user_agent().unwrap_or(super::BROWSER_UA));
     if let Some(r) = c.innertube_context["thirdParty"]["embedUrl"].as_str() {
         rb = rb.header("Referer", r);
     }
-    let cookie = match id.jar.as_ref().filter(|j| j.has_login() && c.supports_cookies) {
-        Some(j) => j.header_for(&u),
-        None => id.anon_cookies.clone().unwrap_or_else(|| "SOCS=CAI; PREF=hl=en&tz=UTC".into()),
+    let rb = rb.header("Cookie", id.cookie_header(&u, c.supports_cookies));
+    let (status, headers, body) = match crate::http::get(rb, MAX_PAGE_BYTES).await {
+        Ok(x) => x,
+        Err(Fetch::RateLimited) => return Err(Fetch::RateLimited),
+        // No config: the table's defaults, as upstream when the page fails.
+        Err(_) => return Ok(None),
     };
-    let r = rb.header("Cookie", cookie).send().await.ok()?;
-    if !r.status().is_success() {
-        return None;
+    id.absorb(&u, &crate::http::set_cookies(&headers));
+    if !(200..300).contains(&status) {
+        return Ok(None);
     }
-    let body = r.bytes().await.ok()?;
-    let mut cfg = extract(&String::from_utf8_lossy(&body[..body.len().min(MAX_PAGE_BYTES)]))?;
+    let Some(mut cfg) = extract(&String::from_utf8_lossy(&body)) else { return Ok(None) };
     fix(c, &mut cfg, id.is_authenticated());
-    Some(cfg)
+    Ok(Some(cfg))
 }
 
 #[cfg(test)]

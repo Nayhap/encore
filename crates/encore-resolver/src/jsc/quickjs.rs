@@ -38,13 +38,16 @@ pub struct Limits {
     pub memory: usize,
     /// JS stack limit (the thread's own stack is larger).
     pub stack: usize,
-    /// One solve, preprocessing included.
+    /// A solve from the preprocessed player.
     pub deadline: Duration,
+    /// A cold solve: parsing and preprocessing a 2.5 MB player takes about
+    /// 2 s on an M4 and several times that on a slow laptop.
+    pub cold_deadline: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { memory: 256 << 20, stack: 4 << 20, deadline: Duration::from_secs(10) }
+        Limits { memory: 256 << 20, stack: 4 << 20, deadline: Duration::from_secs(10), cold_deadline: Duration::from_secs(30) }
     }
 }
 
@@ -57,6 +60,8 @@ const PREPROCESSED_KEPT: usize = 3;
 struct Job {
     input: String,
     limits: Limits,
+    /// Cold (`Limits::cold_deadline`) or from the preprocessed player.
+    cold: bool,
     cancel: Arc<AtomicBool>,
     reply: tokio::sync::oneshot::Sender<Result<Output, SolveError>>,
 }
@@ -104,11 +109,16 @@ impl QuickJsSolver {
         *self.last.lock()
     }
 
-    fn sender(&self) -> Result<std::sync::mpsc::Sender<Job>, SolveError> {
+    /// The solver thread's queue, starting the thread when there is none
+    /// or the last one ended (`fresh`: it did, so start another).
+    fn sender(&self, fresh: bool) -> Result<std::sync::mpsc::Sender<Job>, SolveError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(SolveError::Closed);
         }
         let mut g = self.jobs.lock();
+        if fresh {
+            g.take();
+        }
         if let Some(tx) = g.as_ref() {
             return Ok(tx.clone());
         }
@@ -118,7 +128,11 @@ impl QuickJsSolver {
             .stack_size(THREAD_STACK)
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    let out = run(&job.input, job.limits, &job.cancel);
+                    // A panic is this solve's failure, not the thread's
+                    // (release builds abort on panic: there the process ends,
+                    // as it would on a crash inside the engine).
+                    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job.input, job.limits, job.cold, &job.cancel)))
+                        .unwrap_or_else(|_| Err(SolveError::Engine("the solver failed".into())));
                     let _ = job.reply.send(out);
                 }
             })
@@ -127,8 +141,7 @@ impl QuickJsSolver {
         Ok(tx)
     }
 
-    async fn run_job(&self, input: String) -> Result<Output, SolveError> {
-        let tx = self.sender()?;
+    async fn run_job(&self, input: String, cold: bool) -> Result<Output, SolveError> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         // The job's own flag follows `closed`; a dropped future cancels it too.
         let cancel = Arc::new(AtomicBool::new(false));
@@ -141,7 +154,11 @@ impl QuickJsSolver {
         let _guard = CancelOnDrop(cancel.clone());
         let closed = self.closed.clone();
         let watch = cancel.clone();
-        tx.send(Job { input, limits: self.limits, cancel: watch, reply }).map_err(|_| SolveError::Closed)?;
+        let job = Job { input, limits: self.limits, cold, cancel: watch, reply };
+        // A thread that ended (it panicked) takes no job: start another.
+        if let Err(std::sync::mpsc::SendError(job)) = self.sender(false)?.send(job) {
+            self.sender(true)?.send(job).map_err(|_| SolveError::Engine("the solver didn't start".into()))?;
+        }
         let poll = async {
             loop {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -173,7 +190,7 @@ impl Solver for QuickJsSolver {
             None => Input::Player { player: &player.code, requests: &requests, output_preprocessed: true },
         };
         let input = serde_json::to_string(&input).map_err(|e| SolveError::Engine(e.to_string()))?;
-        let out = self.run_job(input).await?;
+        let out = self.run_job(input, !hit).await?;
         *self.last.lock() = SolveTiming { millis: started.elapsed().as_millis() as u64, preprocessed_hit: hit };
         match out {
             Output::Error { error } => Err(SolveError::Player(first_line(&error))),
@@ -200,11 +217,11 @@ fn first_line(s: &str) -> String {
 }
 
 /// One solve on a fresh engine. Runs on the solver thread.
-fn run(input: &str, limits: Limits, cancel: &Arc<AtomicBool>) -> Result<Output, SolveError> {
+fn run(input: &str, limits: Limits, cold: bool, cancel: &Arc<AtomicBool>) -> Result<Output, SolveError> {
     let rt = Runtime::new().map_err(|e| SolveError::Engine(e.to_string()))?;
     rt.set_memory_limit(limits.memory);
     rt.set_max_stack_size(limits.stack);
-    let deadline = Instant::now() + limits.deadline;
+    let deadline = Instant::now() + if cold { limits.cold_deadline } else { limits.deadline };
     let stop = cancel.clone();
     let interrupted = Arc::new(AtomicBool::new(false));
     let flag = interrupted.clone();
@@ -296,7 +313,7 @@ mod tests {
     /// and the solver goes on working afterwards.
     #[tokio::test]
     async fn runaway_players_are_stopped() {
-        let s = QuickJsSolver::new(Limits { deadline: Duration::from_millis(800), ..Limits::default() });
+        let s = QuickJsSolver::new(Limits { deadline: Duration::from_millis(800), cold_deadline: Duration::from_millis(800), ..Limits::default() });
         let looping = crate::jsc::synthetic_with_n_body("for(;;){}");
         let started = Instant::now();
         let e = s.solve(&script(&looping), n("abcdef")).await.unwrap_err();
@@ -327,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_solver_refuses_and_interrupts() {
-        let s = QuickJsSolver::new(Limits { deadline: Duration::from_secs(30), ..Limits::default() });
+        let s = QuickJsSolver::new(Limits { deadline: Duration::from_secs(30), cold_deadline: Duration::from_secs(30), ..Limits::default() });
         let looping = script(&crate::jsc::synthetic_with_n_body("for(;;){}"));
         let s2 = s.clone();
         let running = tokio::spawn(async move { s2.solve(&looping, n("abcdef")).await });

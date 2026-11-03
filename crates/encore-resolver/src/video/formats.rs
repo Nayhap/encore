@@ -38,6 +38,9 @@ pub struct Candidate {
     pub n: Option<String>,
     pub is_drc: bool,
     pub language_preference: i32,
+    /// The format names an audio track (`audioTrack`): the video has
+    /// several, so which one matters.
+    pub has_track: bool,
 }
 
 impl Candidate {
@@ -45,10 +48,18 @@ impl Candidate {
         (self.mime == "audio/mp4" && self.codec == "aac") || (self.mime == "audio/webm" && self.codec == "opus")
     }
 
-    /// Lower is better: the D5 order, then anything else decodable.
-    pub fn rank(&self) -> (usize, i64) {
+    /// Lower is better, across clients as within one (D5): plain before
+    /// dynamic-range-compressed, the original then the default track before
+    /// others, then the itag order, then the bitrate.
+    pub fn rank(&self) -> (bool, i32, usize, i64) {
         let pos = PREFERENCE.iter().position(|&i| i == self.itag).unwrap_or(PREFERENCE.len());
-        (pos, -(self.bitrate.unwrap_or(0) as i64))
+        (self.is_drc, -self.language_preference, pos, -(self.bitrate.unwrap_or(0) as i64))
+    }
+
+    /// Good enough to stop asking other clients: D5's AAC, not compressed,
+    /// in the original or default track when the video has several.
+    pub fn acceptable(&self) -> bool {
+        preferred(self.itag) && !self.is_drc && (!self.has_track || self.language_preference >= 5)
     }
 }
 
@@ -123,7 +134,8 @@ pub fn candidates(pr: &Value, client: &InnertubeClient, is_premium_subscriber: b
             None => {
                 let sc = f["signatureCipher"].as_str().unwrap_or("");
                 let q: Vec<(String, String)> = url::form_urlencoded::parse(sc.as_bytes()).into_owned().collect();
-                let get = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+                // `traverse_obj(sc, ('sp', -1))`: the last one counts.
+                let get = |k: &str| q.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
                 match (get("url"), get("s")) {
                     (Some(u), Some(s)) => (u, Some(s), get("sp").unwrap_or_else(|| "signature".into())),
                     _ => {
@@ -148,6 +160,7 @@ pub fn candidates(pr: &Value, client: &InnertubeClient, is_premium_subscriber: b
             n,
             is_drc: f["isDrc"].as_bool() == Some(true),
             language_preference: language_preference(f),
+            has_track: f["audioTrack"].is_object(),
         });
     }
     (out, skipped)
@@ -280,6 +293,19 @@ mod tests {
         ]);
         let (c, _) = candidates(&r, crate::base::client("tv_samsung").unwrap(), false);
         assert_eq!(pick(&c).unwrap().itag, 251);
+    }
+
+    #[test]
+    fn the_track_and_compression_count_across_clients() {
+        let one = |extra: Value, itag: u32, mime: &str| candidates(&pr(vec![fmt(itag, mime, extra)]), crate::base::client("tv_samsung").unwrap(), false).0.remove(0);
+        let orig_opus = one(json!({ "audioTrack": { "id": "en.4", "displayName": "English original" } }), 251, OPUS);
+        let dub_aac = one(json!({ "audioTrack": { "id": "de.3", "displayName": "German" } }), 140, AAC);
+        let drc_aac = one(json!({ "isDrc": true }), 140, AAC);
+        let plain_aac = one(json!({}), 140, AAC);
+        assert!(orig_opus.rank() < dub_aac.rank(), "the original track beats a dubbed AAC");
+        assert!(!dub_aac.acceptable(), "a dub doesn't end the search");
+        assert!(!drc_aac.acceptable() && plain_aac.acceptable());
+        assert!(plain_aac.rank() < drc_aac.rank());
     }
 
     #[test]

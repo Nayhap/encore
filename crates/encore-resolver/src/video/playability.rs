@@ -18,10 +18,14 @@ pub enum Playability {
     AgeGated,
     /// A bot check, a captcha or the hour-long rate limit.
     Challenged(Challenge),
-    /// The same for every client: never worth asking another one.
+    /// A restriction of the content. Usually the same for every client,
+    /// but not always (a TV client may refuse what another plays), so the
+    /// search goes on and this only shapes the message.
     Restricted(Restriction),
-    /// Sign-in required for some other reason.
-    LoginRequired,
+    /// `LOGIN_REQUIRED` for another reason; `sign_in` when the reason says
+    /// so explicitly ("Sign in to …"), the only case that can mean an
+    /// expired session.
+    LoginRequired { sign_in: bool },
     /// This client can't play it (made for kids, embedding disabled, …);
     /// another client may.
     ClientRefused,
@@ -122,7 +126,7 @@ pub fn classify(pr: &Value) -> Playability {
     if st == "LIVE_STREAM_OFFLINE" || r.contains("premieres in") || r.contains("live event will begin") || r.contains("live stream recording is not available") {
         return Playability::Restricted(Restriction::Live);
     }
-    if r.contains("private video") {
+    if r.contains("private video") || r.contains("is private") {
         return Playability::Restricted(Restriction::Private);
     }
     if r.contains("music premium") || r.contains("youtube premium") || r.contains("premium members") {
@@ -134,7 +138,7 @@ pub fn classify(pr: &Value) -> Playability {
     match st {
         // "Video unavailable", removed, terminated, copyright.
         "ERROR" if !r.contains("made for kids") => Playability::Restricted(Restriction::Removed),
-        "LOGIN_REQUIRED" => Playability::LoginRequired,
+        "LOGIN_REQUIRED" => Playability::LoginRequired { sign_in: r.contains("sign in") },
         _ => Playability::ClientRefused,
     }
 }
@@ -156,7 +160,9 @@ mod tests {
         assert_eq!(classify(&pr("AGE_VERIFICATION_REQUIRED", "")), Playability::AgeGated);
         assert_eq!(classify(&pr("UNPLAYABLE", "This content isn't available, try again later.")), Playability::Challenged(Challenge::RateLimit));
         assert_eq!(classify(&pr("ERROR", "Video unavailable")), Playability::Restricted(Restriction::Removed));
-        assert_eq!(classify(&pr("LOGIN_REQUIRED", "This video is private")), Playability::LoginRequired);
+        assert_eq!(classify(&pr("LOGIN_REQUIRED", "This video is private")), Playability::Restricted(Restriction::Private));
+        assert_eq!(classify(&pr("LOGIN_REQUIRED", "Sign in to view this video")), Playability::LoginRequired { sign_in: true });
+        assert_eq!(classify(&pr("LOGIN_REQUIRED", "This video requires payment to watch")), Playability::LoginRequired { sign_in: false });
         assert_eq!(classify(&pr("LOGIN_REQUIRED", "Private video")), Playability::Restricted(Restriction::Private));
         assert_eq!(classify(&pr("UNPLAYABLE", "Playback on other websites has been disabled by the video owner")), Playability::ClientRefused);
         assert_eq!(classify(&pr("LIVE_STREAM_OFFLINE", "Premieres in 3 hours")), Playability::Restricted(Restriction::Live));
