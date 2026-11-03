@@ -76,6 +76,11 @@ const item = {
 const shelf = (title: string, items: T.ShelfItem[], layout: "carousel" | "list" | "grid" = "carousel", subtitle: string | null = null): T.Shelf => ({ title, subtitle, layout, items, more: null });
 
 // ---------- the catalogue for library tools (lane B, D34, D35) ----------
+// A long description ending in YouTube's own Wikipedia credit, as many
+// album descriptions do, to show the folded description and its credit line.
+const LONG_DESC =
+  "The long way round is a running mix of everything in this library, kept in no particular order. It started as a single afternoon of shuffling and grew a song at a time: a night drive here, a rainy commute there, the odd record found in a friend's car. There is no theme, no tempo arc and no rule beyond keeping what still sounds right the next morning. It is long on purpose, to be left playing while you do something else, and to turn up a song you had forgotten you liked. Some entries are albums played in full, some are single tracks pulled from compilations, and a few are live takes that never made it onto a record. From Wikipedia (https://en.wikipedia.org/wiki/Shuffle_play) under Creative Commons Attribution CC-BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/legalcode)";
+
 // "Everything twice" (yours) has exact copies and songs next to their music
 // videos, for Duplicates; "The long way round" has 1,340 rows that arrive
 // 100 at a time, for "Searching 500 of 1,340 · Load all".
@@ -88,7 +93,8 @@ const shelf = (title: string, items: T.ShelfItem[], layout: "carousel" | "list" 
   twice.push(ids[4], ids[14] + MV, ids[2]);
   M.collections.push(
     { id: "pl-twice", kind: "playlist", title: "Everything twice", by: "You", art: { seed: 230, h1: 160, h2: 280, motif: "stripes" }, trackIds: twice, desc: "Some songs are in here more than once." },
-    { id: "pl-long", kind: "playlist", title: "The long way round", by: "Encore Radio", art: { seed: 231, h1: 25, h2: 200, motif: "wave" }, trackIds: pick(1340, 7, 3), desc: "Everything, in no particular order." },
+    { id: "pl-long", kind: "playlist", title: "The long way round", by: "Encore Radio", art: { seed: 231, h1: 25, h2: 200, motif: "wave" }, trackIds: pick(1340, 7, 3), desc: LONG_DESC },
+    { id: "pl-wordy", kind: "playlist", title: "songs for the night bus home when the windows fog up and the city lights go soft and everyone on board is half asleep except you", by: "You", art: { seed: 232, h1: 250, h2: 320, motif: "orbit" }, trackIds: pick(9, 5, 1), desc: "Started this on a winter tour.\n\nRules: nothing over five minutes, nothing with a drop, nothing I would skip at 2 am. Add yours, but keep it quiet.\n\nLast tidied in March. If a song vanished, YouTube took it down, not me." },
   );
 }
 // Rows per page of a long mock playlist.

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import LongText from "$lib/components/LongText.svelte";
   import { call, type Collection, type Entry } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { kindLabel, totalDuration } from "$lib/data";
@@ -275,7 +276,7 @@
       <div class="art"><Cover art={c.art} radius={12} label={c.title} /></div>
       <div class="info">
         <p class="kind">{kindLabel[c.kind]}</p>
-        <h1 class:long={c.title.length > 22}>{c.title}</h1>
+        <h1 class:long={c.title.length > 22} title={c.title.length > 60 ? c.title : undefined}>{c.title}</h1>
         <p class="meta">
           {#if artist?.id}
             <button class="by" onclick={() => nav.go({ name: "artist", id: artist.id! })}>{c.artists.map((a) => a.name).join(", ")}</button>
@@ -287,7 +288,7 @@
           {#if tracks.length}<span>{totalDuration(tracks)}</span>{/if}
           {#if mine && c.privacy}<span class="priv"><Icon name={privacyIcon[c.privacy]} size={13} />{privacyLabel[c.privacy]}</span>{/if}
         </p>
-        {#if c.description}<p class="desc">{c.description}</p>{/if}
+        {#if c.description}<div class="desc"><LongText text={c.description} /></div>{/if}
         <div class="actions">
           <button class="pill primary" disabled={!tracks.length || (partial && !here)} onclick={() => (cur ? player.toggle() : playHere(false))}>
             <Icon name={cur && player.playing ? "pause" : "play"} size={16} />
@@ -396,6 +397,12 @@
     font-variation-settings: "wdth" 88;
     text-wrap: balance;
     padding-bottom: 4px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
   h1.long {
     font-size: clamp(28px, 3.2vw, 44px);
@@ -425,9 +432,7 @@
     gap: 4px;
   }
   .desc {
-    color: var(--mute);
     font-size: 13.5px;
-    max-width: 60ch;
   }
   .actions {
     display: flex;
