@@ -492,10 +492,10 @@ pub fn run() {
             // ends when this returns, so the same work runs here, blocking.
             // Every step has its bound.
             RunEvent::Exit => {
-                if let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) {
-                    if u.begin_quit() {
-                        tauri::async_runtime::block_on(u.quit());
-                    }
+                if let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone())
+                    && u.begin_quit()
+                {
+                    tauri::async_runtime::block_on(u.quit());
                 }
             }
             _ => {}

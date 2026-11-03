@@ -19,7 +19,7 @@ use encore_core::error::{AppError, ErrorCode, Result};
 use parking_lot::Mutex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
 use tauri_specta::Event;
 use tokio::sync::Notify;
