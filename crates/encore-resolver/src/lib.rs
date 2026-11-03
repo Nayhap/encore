@@ -103,6 +103,8 @@ pub struct Attempt {
     pub client: String,
     pub outcome: String,
     pub status: Option<String>,
+    /// YouTube's reason and subreason, shortened.
+    pub reason: Option<String>,
     pub itag: Option<u32>,
     pub formats: usize,
     pub skipped: Skipped,
@@ -461,7 +463,7 @@ impl NativeResolver {
                 causes.push(Cause::Refused(0));
                 continue;
             };
-            let mut attempt = Attempt { client: key.clone(), outcome: String::new(), status: None, itag: None, formats: 0, skipped: Skipped::default(), ms: 0 };
+            let mut attempt = Attempt { client: key.clone(), outcome: String::new(), status: None, reason: None, itag: None, formats: 0, skipped: Skipped::default(), ms: 0 };
             let r = self.ask(video_id, c, id, &mut plan, &mut attempt, diag).await;
             attempt.ms = t0.elapsed().as_millis() as u64;
             match r {
@@ -559,7 +561,12 @@ impl NativeResolver {
             return Err(Cause::LoginRequired);
         }
         let player = if c.require_js_player { Some(self.player(diag).await?) } else { None };
-        let pr = match player::call(&self.http, c, id, video_id, player.as_ref().and_then(|p| p.sts)).await {
+        // `_download_ytcfg`, for the clients that need their page's config.
+        let ytcfg = base::ytcfg::download(&self.http, c, id, video_id).await;
+        if id.visitor_data.is_none() {
+            id.visitor_data = ytcfg.as_ref().and_then(|y| y["VISITOR_DATA"].as_str()).map(str::to_string);
+        }
+        let pr = match player::call(&self.http, c, id, video_id, player.as_ref().and_then(|p| p.sts), ytcfg.as_ref()).await {
             Ok(v) => v,
             Err(CallError::Network(m)) => return Err(Cause::Network(m)),
             Err(CallError::Unauthorized) => return Err(Cause::Unauthorized),
@@ -571,6 +578,11 @@ impl NativeResolver {
             return Err(Cause::Closed);
         }
         attempt.status = Some(playability::status(&pr).to_string());
+        let (reason, sub) = playability::reasons(&pr);
+        let reason = [reason, sub.unwrap_or_default()].iter().filter(|r| !r.is_empty()).cloned().collect::<Vec<_>>().join(". ");
+        if !reason.is_empty() {
+            attempt.reason = Some(encore_core::redact::redact(&reason).chars().take(160).collect());
+        }
         if playability::other_video(&pr, video_id).is_some() {
             return Err(Cause::OtherVideo);
         }
@@ -582,7 +594,8 @@ impl NativeResolver {
             Playability::Challenged(ch) => return Err(Cause::Challenged(ch)),
             // An ERROR from visionOS may be "made for kids": another client
             // may play it, so it is no reason to stop (`_video.py:3144`).
-            Playability::Restricted(Restriction::Removed) if c.key == "visionos" => return Err(Cause::ClientRefused),
+            // Embedded errors ("Error code: 152") are the embed's, too.
+            Playability::Restricted(Restriction::Removed) if c.key == "visionos" || c.is_embedded() => return Err(Cause::ClientRefused),
             Playability::Restricted(r) => return Err(Cause::Restricted(r)),
             Playability::LoginRequired => return Err(Cause::LoginRequired),
             Playability::ClientRefused => return Err(Cause::ClientRefused),

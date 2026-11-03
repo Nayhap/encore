@@ -1138,6 +1138,9 @@ async fn resolve(svc: &Arc<YtMusic>, video_id: &str, auth: Option<&encore_core::
                 if a.skipped == Default::default() { String::new() } else { format!(" skipped(sabr={} drm={} pot={} live={})", a.skipped.sabr, a.skipped.drm, a.skipped.po_token, a.skipped.live) },
                 a.outcome
             );
+            if let Some(r) = &a.reason {
+                println!("                 reason: {r}");
+            }
         }
         if let Some(x) = &d.session {
             println!("  session: {x}");

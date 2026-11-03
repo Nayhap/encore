@@ -8,6 +8,7 @@
 //! The client table is [`clients`].
 
 pub mod clients;
+pub mod ytcfg;
 
 use encore_auth::CookieJar;
 use encore_core::service::ResolveAuth;
@@ -73,10 +74,10 @@ impl Identity {
     }
 }
 
-/// `_extract_context`: the client's context with language and time zone
-/// forced for extraction.
-pub fn context(c: &InnertubeClient) -> Value {
-    let mut ctx = c.innertube_context.clone();
+/// `_extract_context`: the client's context (from its downloaded ytcfg if
+/// there is one) with language and time zone forced for extraction.
+pub fn context(c: &InnertubeClient, ytcfg: Option<&Value>) -> Value {
+    let mut ctx = ytcfg.map(|y| &y["INNERTUBE_CONTEXT"]).filter(|v| v.is_object()).unwrap_or(&c.innertube_context).clone();
     let client = &mut ctx["client"];
     client["hl"] = json!("en");
     client["timeZone"] = json!("UTC");
@@ -88,13 +89,18 @@ pub fn context(c: &InnertubeClient) -> Value {
 /// call by client `c` as `id`. `Cookie` included: signed in, the session's
 /// cookies for the host (with `PREF` as `_initialize_pref` sets it);
 /// signed out, the consent and `PREF` cookies yt-dlp sets.
-pub fn api_headers(c: &InnertubeClient, id: &Identity, now: u64) -> Vec<(String, String)> {
+pub fn api_headers(c: &InnertubeClient, id: &Identity, now: u64, ytcfg: Option<&Value>) -> Vec<(String, String)> {
     let origin = format!("https://{}", c.innertube_host);
+    // `_ytcfg_get_safe`: the downloaded ytcfg first, then the table.
+    let y = ytcfg.unwrap_or(&Value::Null);
+    let name = y["INNERTUBE_CONTEXT_CLIENT_NAME"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| c.innertube_context_client_name.to_string());
+    let version = y["INNERTUBE_CLIENT_VERSION"].as_str().or_else(|| y["INNERTUBE_CONTEXT"]["client"]["clientVersion"].as_str()).unwrap_or(c.client_version());
+    let ua = y["INNERTUBE_CONTEXT"]["client"]["userAgent"].as_str().or(c.user_agent()).unwrap_or(BROWSER_UA);
     let mut h: Vec<(String, String)> = vec![
-        ("X-YouTube-Client-Name".into(), c.innertube_context_client_name.to_string()),
-        ("X-YouTube-Client-Version".into(), c.client_version().into()),
+        ("X-YouTube-Client-Name".into(), name),
+        ("X-YouTube-Client-Version".into(), version.into()),
         ("Origin".into(), origin.clone()),
-        ("User-Agent".into(), c.user_agent().unwrap_or(BROWSER_UA).into()),
+        ("User-Agent".into(), ua.into()),
         ("Content-Type".into(), "application/json".into()),
     ];
     if let Some(v) = &id.visitor_data {
@@ -161,7 +167,7 @@ mod tests {
 
     #[test]
     fn signed_out_requests_carry_consent_and_no_auth() {
-        let h = api_headers(client("tv_samsung").unwrap(), &Identity::anonymous(None), 1_700_000_000);
+        let h = api_headers(client("tv_samsung").unwrap(), &Identity::anonymous(None), 1_700_000_000, None);
         assert_eq!(get(&h, "X-YouTube-Client-Name"), Some("7"));
         assert_eq!(get(&h, "X-YouTube-Client-Version"), Some("5.20260707"));
         assert_eq!(get(&h, "Origin"), Some("https://www.youtube.com"));
@@ -174,7 +180,7 @@ mod tests {
     fn signed_in_requests_hash_for_the_api_origin() {
         let id = signed_in(None);
         assert_eq!(id.key, "acct:1");
-        let h = api_headers(client("web_embedded").unwrap(), &id, 1_700_000_000);
+        let h = api_headers(client("web_embedded").unwrap(), &id, 1_700_000_000, None);
         let auth = get(&h, "Authorization").unwrap();
         assert!(auth.starts_with("SAPISIDHASH 1700000000_") && !auth.ends_with("_u"), "{auth}");
         assert_eq!(get(&h, "X-Origin"), Some("https://www.youtube.com"));
@@ -185,19 +191,20 @@ mod tests {
         assert!(cookie.contains("SAPISID=sapi") && cookie.ends_with("PREF=f6=40000000&hl=en&tz=UTC"), "{cookie}");
 
         // A brand channel: the page id and the manager's `_u` hash.
-        let h = api_headers(client("tv_samsung").unwrap(), &signed_in(Some("page")), 1_700_000_000);
+        let h = api_headers(client("tv_samsung").unwrap(), &signed_in(Some("page")), 1_700_000_000, None);
         assert_eq!(get(&h, "X-Goog-PageId"), Some("page"));
         assert!(get(&h, "Authorization").unwrap().ends_with("_u"));
 
         // A client without cookie support never gets the session.
-        let h = api_headers(client("visionos").unwrap(), &id, 1_700_000_000);
+        let h = api_headers(client("visionos").unwrap(), &id, 1_700_000_000, None);
+        assert_eq!(get(&api_headers(client("tv").unwrap(), &id, 1, Some(&serde_json::json!({ "INNERTUBE_CLIENT_VERSION": "7.9" }))), "X-YouTube-Client-Version"), Some("7.9"));
         assert!(get(&h, "Authorization").is_none());
         assert_eq!(get(&h, "Cookie"), Some("SOCS=CAI; PREF=hl=en&tz=UTC"));
     }
 
     #[test]
     fn the_context_forces_language_and_time_zone() {
-        let c = context(client("web_embedded").unwrap());
+        let c = context(client("web_embedded").unwrap(), None);
         assert_eq!(c["client"]["clientName"], "WEB_EMBEDDED_PLAYER");
         assert_eq!(c["client"]["timeZone"], "UTC");
         assert_eq!(c["client"]["utcOffsetMinutes"], 0);

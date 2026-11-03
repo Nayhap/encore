@@ -119,7 +119,7 @@ pub fn classify(pr: &Value) -> Playability {
     if sub.as_deref().is_some_and(|s| s.starts_with("The uploader has not made this video available in your country")) || r.contains("not available in your country") {
         return Playability::Restricted(Restriction::Geo);
     }
-    if st == "LIVE_STREAM_OFFLINE" || r.contains("premieres in") || r.contains("live event will begin") {
+    if st == "LIVE_STREAM_OFFLINE" || r.contains("premieres in") || r.contains("live event will begin") || r.contains("live stream recording is not available") {
         return Playability::Restricted(Restriction::Live);
     }
     if r.contains("private video") {
@@ -160,6 +160,8 @@ mod tests {
         assert_eq!(classify(&pr("LOGIN_REQUIRED", "Private video")), Playability::Restricted(Restriction::Private));
         assert_eq!(classify(&pr("UNPLAYABLE", "Playback on other websites has been disabled by the video owner")), Playability::ClientRefused);
         assert_eq!(classify(&pr("LIVE_STREAM_OFFLINE", "Premieres in 3 hours")), Playability::Restricted(Restriction::Live));
+        assert_eq!(classify(&pr("UNPLAYABLE", "This live stream recording is not available.")), Playability::Restricted(Restriction::Live));
+        assert_eq!(classify(&pr("UNPLAYABLE", "The page needs to be reloaded.")), Playability::ClientRefused);
         assert_eq!(classify(&pr("UNPLAYABLE", "This video is only available to Music Premium members")), Playability::Restricted(Restriction::Premium));
         assert_eq!(classify(&pr("UNPLAYABLE", "Join this channel to get access to members-only content")), Playability::Restricted(Restriction::Members));
         let live = json!({ "playabilityStatus": { "status": "OK" }, "videoDetails": { "isLive": true } });
