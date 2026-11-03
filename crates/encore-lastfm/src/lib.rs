@@ -330,31 +330,14 @@ impl Client {
     }
 }
 
-/// A title or artist reduced for matching: lower case, without bracketed
-/// parts ("(Remastered 2011)", "[Official Video]"), featured artists, or a
-/// " - Remastered" tail, punctuation as spaces.
+/// A title or artist reduced for matching: case, spacing and the
+/// punctuation around words don't matter ("Daft Punk" = "daft  punk").
+/// These are the keys lane B's "Last.fm plays" sort asks `lastfm_plays`
+/// with: a copy of `encore_core::local::library::match_key` (branch
+/// features-b), which this branch doesn't have yet. Keep the two identical.
 pub fn normalise(s: &str) -> String {
-    let lower = s.to_lowercase();
-    let mut out = String::with_capacity(lower.len());
-    let mut depth = 0i32;
-    for c in lower.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    let mut s = out.as_str();
-    if let Some(i) = s.find(" - ").filter(|i| s[*i..].contains("remaster")) {
-        s = &s[..i];
-    }
-    for f in [" feat. ", " feat ", " ft. ", " featuring "] {
-        if let Some(i) = s.find(f) {
-            s = &s[..i];
-        }
-    }
-    s.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+    let s: String = s.to_lowercase().chars().filter(|c| !matches!(c, '’' | '\'')).map(|c| if matches!(c, '"' | '.' | ',' | '!' | '?') { ' ' } else { c }).collect();
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Rows for `lastfm_plays` from a read of the top tracks.
@@ -521,17 +504,15 @@ mod tests {
         assert_eq!(pages, 3);
         assert_eq!(top[0], TopTrack { artist: "Lumen Drive".into(), title: "Daybreak Signal".into(), plays: 42 });
         let rows = play_rows(&top);
-        assert_eq!((rows[1].artist_key.as_str(), rows[1].title_key.as_str(), rows[1].plays), ("pale harbor", "glass weather", 7));
+        assert_eq!((rows[1].artist_key.as_str(), rows[1].title_key.as_str(), rows[1].plays), ("pale harbor", "glass weather (remastered)", 7));
         assert!(get(&fake.sent.lock()[0], "api_sig").is_none(), "a public read isn't signed");
     }
 
     #[test]
     fn normalises_for_matching() {
-        assert_eq!(normalise("Glass Weather (Remastered 2011)"), "glass weather");
-        assert_eq!(normalise("Daybreak Signal - 2019 Remaster"), "daybreak signal");
-        assert_eq!(normalise("Night Train [Official Video]"), "night train");
-        assert_eq!(normalise("Run Away feat. Mirei"), "run away");
-        assert_eq!(normalise("  AC/DC "), "ac dc");
+        assert_eq!(normalise("  Daft  Punk "), "daft punk");
+        assert_eq!(normalise("Don’t Stop Me Now!"), "dont stop me now");
+        assert_eq!(normalise("Glass Weather (Remastered)"), "glass weather (remastered)", "brackets stay, as the sort's keys keep them");
         assert_eq!(normalise("夜行列車"), "夜行列車");
         assert!(scrobblable(None) && scrobblable(Some(31.0)) && !scrobblable(Some(30.0)));
     }
