@@ -18,3 +18,5 @@ hex.workspace = true
 url.workspace = true
 regex = "1"
 tracing.workspace = true
+# The paced background lane (paging.rs) waits for its turn.
+tokio.workspace = true

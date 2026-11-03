@@ -46,6 +46,15 @@ pub trait MusicService: Send + Sync {
     async fn search_more(&self, ctx: &RequestContext, cursor: &str) -> Result<SearchResults>;
     async fn suggestions(&self, ctx: &RequestContext, query: &str) -> Result<Vec<String>>;
     async fn collection(&self, ctx: &RequestContext, id: &ItemId) -> Result<Collection>;
+    /// A collection reached by a link that carries `params` (an artist's
+    /// "All songs"): the link is followed as given, never rebuilt. Without
+    /// `params` it is `collection`.
+    async fn collection_at(&self, ctx: &RequestContext, id: &ItemId, params: Option<&str>) -> Result<Collection> {
+        match params {
+            None => self.collection(ctx, id).await,
+            Some(_) => Err(unsupported()),
+        }
+    }
     async fn collection_more(&self, ctx: &RequestContext, cursor: &str) -> Result<(Vec<Entry>, Option<String>)>;
     /// Like `collection_more`, but tells a real end of the list from one
     /// that stopped making progress (D23: removals are only applied after a
@@ -116,6 +125,15 @@ pub enum More {
     /// The service repeated its continuation or sent an empty page that
     /// still had one: the list may be longer than what arrived.
     Stalled,
+}
+
+/// What the queue lets in (D36 block list, D27 hidden podcasts). The app
+/// implements it over the block list and its settings (lane D); the player
+/// asks it before admitting songs: radio, autoplay, shuffle and the other
+/// paths D36 names (lane A). Answers come from memory: it is asked inside
+/// the player's lock.
+pub trait Admission: Send + Sync {
+    fn admits(&self, track: &Track) -> bool;
 }
 
 // ---------- downloads (D23) ----------
