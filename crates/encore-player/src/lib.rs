@@ -6,6 +6,9 @@
 //! Downloaded songs play from disk before anything is resolved. Offline,
 //! every step (next, previous, natural end, preload) passes over songs that
 //! aren't downloaded, using one rule (`avail`), and radio waits (D23).
+//!
+//! An A–B loop and a sleep timer (D26) live here too: the engine keeps the
+//! loop to the frame and fades out for the timer; the player decides when.
 
 pub mod history;
 pub mod plays;
@@ -39,6 +42,11 @@ const RADIO_LOW_WATER: usize = 3;
 /// resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
 const NOTHING_OFFLINE: &str = "You're offline, and nothing else in the queue is downloaded.";
+/// The shortest A–B loop (D26).
+pub const MIN_LOOP: f64 = 1.0;
+/// The sleep timer fades out over its last seconds (D26).
+pub const SLEEP_FADE: f64 = 10.0;
+const SLEPT: &str = "Paused by the sleep timer.";
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
 
@@ -89,6 +97,27 @@ struct State {
     radio_gen: u64,
     /// The shuffle cycle of the collection playing, while shuffled (D33).
     cycle: Option<CycleRun>,
+    /// The A–B loop on the song playing (D26).
+    ab_loop: Option<AbLoop>,
+    /// The sleep timer (D26).
+    sleep: Option<Sleep>,
+}
+
+struct AbLoop {
+    range: LoopRange,
+    /// The track generation it was set in: a loop ends with its song.
+    track_gen: u64,
+    /// Repeat-one, set aside while the loop runs and put back after.
+    repeat: Option<Repeat>,
+}
+
+enum Sleep {
+    /// Pause at this time, fading out over the last `SLEEP_FADE` seconds.
+    /// `fading`: the track generation the engine's fade was started in (a
+    /// new song loaded plays at full volume, so the fade starts again).
+    At { deadline: Instant, fading: Option<u64> },
+    EndOfSong,
+    EndOfQueue,
 }
 
 /// A shuffle cycle in use: whose it is, the songs that make up the
@@ -176,6 +205,8 @@ impl Player {
                 last_duration: None,
                 radio_gen: 0,
                 cycle: None,
+                ab_loop: None,
+                sleep: None,
             }),
             tx,
             next_load: AtomicU64::new(1),
@@ -530,6 +561,242 @@ impl Player {
         }
     }
 
+    // ---------- the A–B loop (D26) ----------
+
+    /// Loop the song playing between `a` and `b` seconds (in either order).
+    /// The engine wraps at B to the frame; while the loop runs nothing is
+    /// preloaded, repeat-one is set aside, and the song never ends. Playing
+    /// from outside the loop jumps to A.
+    pub fn set_loop(&self, a: f64, b: f64) -> Result<()> {
+        if !a.is_finite() || !b.is_finite() {
+            return Err(AppError::invalid("That isn't a time in this song."));
+        }
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let (range, jump) = {
+            let mut st = self.st.lock();
+            let es = self.engine.status();
+            let Some(l) = st.loaded.as_ref().filter(|l| l.load_id == es.id) else {
+                return Err(AppError::invalid("Play the song to loop part of it."));
+            };
+            if !l.stream.range_safe {
+                return Err(AppError::invalid("This song's stream can't jump back, so it can't loop."));
+            }
+            let Some(dur) = es.duration.or(st.last_duration) else {
+                return Err(AppError::invalid("This song's length isn't known yet. Try again in a moment."));
+            };
+            let range = LoopRange { a: a.clamp(0.0, dur), b: b.clamp(0.0, dur) };
+            if range.b - range.a < MIN_LOOP {
+                return Err(AppError::invalid("A loop needs to be at least a second long."));
+            }
+            let tg = st.track_gen;
+            let repeat = match &st.ab_loop {
+                Some(l) if l.track_gen == tg => l.repeat,
+                _ => (st.queue.repeat == Repeat::One).then_some(Repeat::One),
+            };
+            if st.queue.repeat == Repeat::One {
+                st.queue.set_repeat(Repeat::Off);
+            }
+            st.ab_loop = Some(AbLoop { range, track_gen: tg, repeat });
+            st.preload = None;
+            let pos = self.position_locked(&st);
+            (range, (pos < range.a - 0.05 || pos >= range.b).then_some(range.a))
+        };
+        self.engine.clear_preload();
+        self.engine.set_loop(Some((range.a, range.b)));
+        if let Some(t) = jump {
+            self.seek(t);
+        } else {
+            self.publish(false);
+            self.send_anchor();
+        }
+        Ok(())
+    }
+
+    /// End the loop: the song plays on from where it is, and repeat-one
+    /// comes back if the loop set it aside.
+    pub fn clear_loop(&self) {
+        let had = {
+            let mut st = self.st.lock();
+            let tg = st.track_gen;
+            match st.ab_loop.take() {
+                Some(l) => {
+                    if let Some(r) = l.repeat {
+                        st.queue.set_repeat(r);
+                    }
+                    l.track_gen == tg
+                }
+                None => false,
+            }
+        };
+        if had {
+            self.engine.set_loop(None);
+            self.publish(false);
+            self.send_anchor();
+        }
+    }
+
+    fn snapshot_loop(&self) -> Option<LoopRange> {
+        let st = self.st.lock();
+        st.ab_loop.as_ref().filter(|l| l.track_gen == st.track_gen).map(|l| l.range)
+    }
+
+    /// A loop ends with its song: once the track generation moved on, put
+    /// repeat-one back and forget it (the new deck never had it).
+    fn end_stale_loop(st: &mut State) {
+        if st.ab_loop.as_ref().is_some_and(|l| l.track_gen != st.track_gen)
+            && let Some(r) = st.ab_loop.take().and_then(|l| l.repeat)
+        {
+            st.queue.set_repeat(r);
+        }
+    }
+
+    // ---------- the sleep timer (D26) ----------
+
+    /// Start the sleep timer: after `minutes` (`SleepMode::Timer`), at the
+    /// end of the song playing, or at the end of the queue (no radio is
+    /// added meanwhile). Replaces a timer that runs.
+    pub fn set_sleep(&self, mode: SleepMode, minutes: Option<f64>) -> Result<()> {
+        let sleep = match mode {
+            SleepMode::Timer => {
+                let m = minutes.filter(|m| m.is_finite() && *m > 0.0 && *m <= 24.0 * 60.0).ok_or_else(|| AppError::invalid("Choose how long until Encore pauses."))?;
+                Sleep::At { deadline: Instant::now() + Duration::from_secs_f64(m * 60.0), fading: None }
+            }
+            SleepMode::EndOfSong => {
+                if self.snapshot_loop().is_some() {
+                    return Err(AppError::invalid("Clear the loop to stop at the end of this song."));
+                }
+                Sleep::EndOfSong
+            }
+            SleepMode::EndOfQueue => Sleep::EndOfQueue,
+        };
+        self.st.lock().sleep = Some(sleep);
+        self.engine.cancel_fade();
+        self.sync_hold();
+        self.check_preload();
+        self.publish(false);
+        Ok(())
+    }
+
+    pub fn cancel_sleep(&self) {
+        let had = self.st.lock().sleep.take().is_some();
+        if had {
+            self.engine.cancel_fade();
+            self.sync_hold();
+            self.publish(false);
+        }
+    }
+
+    /// The song playing is the last before the sleep timer stops playback.
+    fn sleep_holds(st: &State) -> bool {
+        match st.sleep {
+            Some(Sleep::EndOfSong) => true,
+            Some(Sleep::EndOfQueue) => st.queue.index().is_none_or(|i| i + 1 >= st.queue.len()),
+            _ => false,
+        }
+    }
+
+    /// Keep the engine from taking up the preloaded deck when this song is
+    /// the sleep timer's last (the engine switches decks on its own, before
+    /// the player could stop it), and drop a preload that won't be used.
+    fn sync_hold(&self) {
+        let hold = Self::sleep_holds(&self.st.lock());
+        self.engine.hold_next(hold);
+        if hold && self.st.lock().preload.take().is_some() {
+            self.engine.clear_preload();
+        }
+    }
+
+    /// Called by the tick: fade out over the timer's last seconds, pause
+    /// when it runs out. Paused, a timer that runs out just ends.
+    fn sleep_tick(&self) {
+        let (fade, fire, ended) = {
+            let mut st = self.st.lock();
+            let playing = matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading);
+            let tg = st.track_gen;
+            match st.sleep.as_mut() {
+                Some(Sleep::At { deadline, fading }) => {
+                    let rem = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+                    if !playing {
+                        if rem <= 0.0 {
+                            st.sleep = None;
+                            (None, false, true)
+                        } else {
+                            (None, false, false)
+                        }
+                    } else if rem <= 0.0 {
+                        (None, true, false)
+                    } else if rem <= SLEEP_FADE && *fading != Some(tg) {
+                        *fading = Some(tg);
+                        (Some(rem), false, false)
+                    } else {
+                        (None, false, false)
+                    }
+                }
+                _ => (None, false, false),
+            }
+        };
+        if let Some(r) = fade {
+            self.engine.fade_out(r);
+        }
+        if fire {
+            self.sleep_fire();
+        } else if ended {
+            self.publish(false);
+        }
+        if matches!(self.st.lock().sleep, Some(Sleep::EndOfQueue)) {
+            self.sync_hold();
+        }
+    }
+
+    /// The timer ran out: pause (the engine has faded to silence; resuming
+    /// brings the volume back).
+    fn sleep_fire(&self) {
+        if self.st.lock().sleep.take().is_none() {
+            return;
+        }
+        self.pause();
+        let _ = self.tx.send(PlayerEvent::Notice(SLEPT.into()));
+    }
+
+    /// The song the sleep timer waited for has ended: the next one waits,
+    /// paused at its start (or the queue has ended).
+    fn sleep_at_end(&self) {
+        let ok = self.avail();
+        let moved = {
+            let mut st = self.st.lock();
+            let to_end = matches!(st.sleep, Some(Sleep::EndOfQueue));
+            st.sleep = None;
+            let step = if to_end { Step::End } else { st.queue.on_ended_where(&ok) };
+            match step {
+                Step::Play(_) | Step::Restart => {
+                    st.track_gen += 1;
+                    st.seek_gen += 1;
+                    st.loaded = None;
+                    st.preload = None;
+                    st.error = None;
+                    st.pending_pos = 0.0;
+                    st.last_duration = st.queue.current().and_then(|c| c.track.duration);
+                    st.phase = Phase::Paused;
+                    true
+                }
+                _ => {
+                    st.phase = Phase::Ended;
+                    st.loaded = None;
+                    st.pending_pos = st.last_duration.unwrap_or(0.0);
+                    false
+                }
+            }
+        };
+        self.engine.hold_next(false);
+        self.engine.stop();
+        self.publish(false);
+        if moved {
+            let cur = self.st.lock().queue.current().cloned();
+            let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
+        }
+        let _ = self.tx.send(PlayerEvent::Notice(SLEPT.into()));
+    }
+
     // ---------- snapshots ----------
 
     fn position_locked(&self, st: &State) -> f64 {
@@ -575,8 +842,12 @@ impl Player {
             skipped_in_a_row: st.skips,
             no_output: es.device == encore_audio::engine::NO_OUTPUT,
             queue_loading: st.queue_loading,
-            ab_loop: None,
-            sleep: None,
+            ab_loop: st.ab_loop.as_ref().filter(|l| l.track_gen == st.track_gen).map(|l| l.range),
+            sleep: st.sleep.as_ref().map(|s| match s {
+                Sleep::At { deadline, .. } => SleepTimer { mode: SleepMode::Timer, remaining: Some(deadline.saturating_duration_since(Instant::now()).as_secs_f64()) },
+                Sleep::EndOfSong => SleepTimer { mode: SleepMode::EndOfSong, remaining: None },
+                Sleep::EndOfQueue => SleepTimer { mode: SleepMode::EndOfQueue, remaining: None },
+            }),
             private: self.private_session(),
         }
     }
@@ -601,6 +872,7 @@ impl Player {
     fn publish(&self, force_queue: bool) {
         let (snap, splice) = {
             let mut st = self.st.lock();
+            Self::end_stale_loop(&mut st);
             st.revision += 1;
             let snap = self.snapshot_locked(&st);
             let qrev = st.queue.revision();
@@ -955,12 +1227,16 @@ impl Player {
 
     async fn tick(self: &Arc<Self>) {
         self.expire_private();
+        self.sleep_tick();
         let (phase, pos, dur, upcoming, need_radio) = {
             let st = self.st.lock();
             let snap = self.snapshot_locked(&st);
             let ok = self.avail();
-            let up = st.queue.upcoming_where(&ok).cloned();
-            let need_radio = st.queue.autoplay && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading && self.online();
+            // Nothing is preloaded while a loop runs or the sleep timer
+            // stops after this song (D26).
+            let up = if snap.ab_loop.is_some() || Self::sleep_holds(&st) { None } else { st.queue.upcoming_where(&ok).cloned() };
+            let until_end = matches!(st.sleep, Some(Sleep::EndOfQueue));
+            let need_radio = st.queue.autoplay && !until_end && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading && self.online();
             (st.phase, snap.position, snap.duration, up, need_radio)
         };
         if matches!(phase, Phase::Playing | Phase::Buffering) {
@@ -1004,6 +1280,10 @@ impl Player {
         st.preloading = false;
         // Still the right entry to come next?
         if st.queue.upcoming_where(&ok).map(|u| u.uid.as_str()) != Some(entry.uid.as_str()) {
+            return;
+        }
+        // A loop started or the sleep timer stops after this song (D26).
+        if st.ab_loop.as_ref().is_some_and(|l| l.track_gen == st.track_gen) || Self::sleep_holds(&st) {
             return;
         }
         // Resolved online, but the connection went meanwhile.
@@ -1147,6 +1427,11 @@ impl Player {
                     if st.loaded.as_ref().map(|l| l.load_id) != Some(id) {
                         return;
                     }
+                    if Self::sleep_holds(&st) {
+                        drop(st);
+                        self.sleep_at_end();
+                        return;
+                    }
                     (st.queue.on_ended_where(&avail), st.queue.passed())
                 };
                 self.note_passed(passed);
@@ -1174,6 +1459,12 @@ impl Player {
                 }
             }
             EngineEvent::DeviceChanged { .. } => self.publish(false),
+            EngineEvent::FadedOut => {
+                let due = matches!(self.st.lock().sleep, Some(Sleep::At { deadline, .. }) if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(1));
+                if due {
+                    self.sleep_fire();
+                }
+            }
             EngineEvent::NoOutput { error } => {
                 tracing::warn!(%error, "no audio output");
                 self.publish(false);
@@ -1451,6 +1742,10 @@ impl Player {
             if st.phase == Phase::Paused {
                 st.phase = Phase::Playing;
             }
+            // Resuming plays at full volume: a sleep fade starts again.
+            if let Some(Sleep::At { fading, .. }) = st.sleep.as_mut() {
+                *fading = None;
+            }
         }
         self.publish(false);
         self.send_anchor();
@@ -1478,9 +1773,14 @@ impl Player {
         self.apply_step(step, false).await;
     }
 
+    /// Seeking outside an A–B loop ends it (D26); inside, it stays.
     pub fn seek(&self, secs: f64) {
         if !secs.is_finite() {
             return;
+        }
+        let outside = self.snapshot_loop().is_some_and(|l| secs < l.a - 0.05 || secs > l.b + 0.05);
+        if outside {
+            self.clear_loop();
         }
         let alive = {
             let mut st = self.st.lock();
@@ -1534,6 +1834,7 @@ impl Player {
         if start.is_some() {
             self.play_current(0.0);
         }
+        self.sync_hold();
         self.check_preload();
         self.publish(false);
         if self.st.lock().phase == Phase::Playing {
@@ -1583,13 +1884,25 @@ impl Player {
     }
 
     pub fn cycle_repeat(self: &Arc<Self>) -> Repeat {
-        let r = self.st.lock().queue.cycle_repeat();
+        let r = {
+            let mut st = self.st.lock();
+            if let Some(l) = st.ab_loop.as_mut() {
+                l.repeat = None; // the user's newer choice stands after the loop
+            }
+            st.queue.cycle_repeat()
+        };
         self.after_edit(None);
         r
     }
 
     pub fn set_repeat(self: &Arc<Self>, r: Repeat) {
-        self.st.lock().queue.set_repeat(r);
+        {
+            let mut st = self.st.lock();
+            if let Some(l) = st.ab_loop.as_mut() {
+                l.repeat = None;
+            }
+            st.queue.set_repeat(r);
+        }
         self.after_edit(None);
     }
 
