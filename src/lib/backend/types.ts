@@ -81,6 +81,14 @@ export type PrivateSession = B.PrivateSession_Serialize;
 // features: saved (lane C)
 
 // features: taste and stats (lane D)
+export type BlockKind = B.BlockKind;
+export type Blocked = B.Blocked_Serialize;
+export type TasteState = B.TasteState_Serialize;
+export type StatsPeriod = B.StatsPeriod_Serialize;
+export type StatsOverview = B.StatsOverview_Serialize;
+export type ListeningStats = B.ListeningStats_Serialize;
+export type TopTrack = B.TopTrack_Serialize;
+export type TopCredit = B.TopCredit_Serialize;
 
 // features: integrations (lane E)
 

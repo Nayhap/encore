@@ -2,7 +2,7 @@
   import { call, type Page, type PageLink } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
-  import { nav } from "$lib/state.svelte";
+  import { nav, taste } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Shelves from "$lib/components/Shelves.svelte";
   import Status from "$lib/components/Status.svelte";
@@ -14,9 +14,11 @@
   });
 
   // The untitled grid of buttons at the top becomes the three doors.
-  const doorShelf = $derived(page.data?.shelves.find((s) => !s.title && s.items.every((i) => i.type === "link")) ?? null);
+  // Blocked songs and artists, and podcasts if hidden, leave at once (D36, D27).
+  const shelves = $derived(taste.filterShelves(page.data?.shelves ?? []));
+  const doorShelf = $derived(shelves.find((s) => !s.title && s.items.every((i) => i.type === "link")) ?? null);
   const doors = $derived((doorShelf?.items ?? []).filter((i) => i.type === "link") as PageLink[]);
-  const rest = $derived(page.data?.shelves.filter((s) => s !== doorShelf) ?? []);
+  const rest = $derived(shelves.filter((s) => s !== doorShelf));
   const icon = (l: PageLink) => (l.browseId.includes("new_releases") ? "sparkle" : l.browseId.includes("charts") ? "list" : l.browseId.includes("moods") ? "compass" : "radio");
   const open = (l: PageLink) => nav.go({ name: "page", browseId: l.browseId, params: l.params, title: l.title });
 </script>

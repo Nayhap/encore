@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { call, type CacheInfo, type DownloadsStorage } from "$lib/backend";
+  import { call, type CacheInfo, type DownloadsStorage, type StatsOverview } from "$lib/backend";
   import { sizeText } from "$lib/data";
-  import { downloads, nav } from "$lib/state.svelte";
+  import { downloads, listening, nav, ui } from "$lib/state.svelte";
   import { mb, settings } from "./shared.svelte";
 
   let cache = $state<CacheInfo | null>(null);
@@ -19,6 +19,34 @@
       .then((x) => (stored = x))
       .catch(() => {});
   });
+
+  // The local play log (D30): how much, and since when.
+  let stats = $state<StatsOverview | null>(null);
+  $effect(() => {
+    listening.rev;
+    call((a) => a.features.stats.overview())
+      .then((x) => (stats = x))
+      .catch(() => {});
+  });
+  const since = $derived(stats?.since ? new Date(Number(stats.since) * 1000).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" }) : null);
+  function openStats() {
+    localStorage.setItem("historyTab", "stats");
+    nav.go({ name: "history" });
+  }
+  function clearStats() {
+    ui.confirm = {
+      title: "Clear listening stats?",
+      text: "Your plays in Encore are forgotten on this computer, for this account. Your YouTube history and downloads stay as they are.",
+      confirm: "Clear stats",
+      danger: true,
+      run: () =>
+        void settings.run("stats", async () => {
+          await call((a) => a.features.stats.clear());
+          listening.rev++;
+          ui.say("Listening stats cleared");
+        }),
+    };
+  }
 
   const clear = (w: "audio" | "art" | "lyrics") =>
     settings.run("cache", async () => {
@@ -40,6 +68,16 @@
     <div class="btns">
       <button class="pill" onclick={() => nav.go({ name: "downloads" })}>Open Downloads</button>
       <button class="pill" disabled={!downloads.available || (!downloads.items.size && !downloads.kept.length && !(stored?.bytes ?? downloads.summary?.bytes))} onclick={() => downloads.removeAll()}>Remove all downloads…</button>
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <b>Listening stats</b>
+      <p>{stats?.plays ? `${stats.plays.toLocaleString()} ${stats.plays === 1 ? "play" : "plays"} since ${since}` : "Nothing counted yet"} · Kept only on this computer, for your stats and sorting by your plays.</p>
+    </div>
+    <div class="btns">
+      <button class="pill" onclick={openStats}>Open stats</button>
+      <button class="pill" disabled={!!busy || !stats?.months.length} onclick={clearStats}>Clear listening stats…</button>
     </div>
   </div>
   <div class="row">
