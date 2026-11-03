@@ -1,5 +1,5 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track, type UpdateStatus } from "./backend";
 import { catalog } from "./catalog.svelte";
 import { sizeText } from "./data";
 
@@ -340,6 +340,12 @@ class Nav {
   }
 }
 
+/** A button on a toast. */
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 export interface MenuItem {
   label: string;
   icon?: string;
@@ -383,7 +389,7 @@ class UI {
   /** Windows and Linux: use the OS title bar instead of Encore's buttons. */
   systemTitlebar = $state(localStorage.getItem("titlebar") === "system");
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  toast = $state<{ text: string; id: number; ms: number; level: "info" | "warn" | "error" } | null>(null);
+  toast = $state<{ text: string; id: number; ms: number; level: "info" | "warn" | "error"; action: ToastAction | null } | null>(null);
   sheet = $state<PlaylistSheet | null>(null);
   confirm = $state<Confirm | null>(null);
   /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
@@ -394,11 +400,12 @@ class UI {
   online = $state(true);
 
   /** A short message above the player bar. Longer messages (errors that
-   *  say what to do) stay up long enough to read. */
-  say(text: string, level: "info" | "warn" | "error" = "info") {
+   *  say what to do) stay up long enough to read, and one with an action
+   *  long enough to use it. */
+  say(text: string, level: "info" | "warn" | "error" = "info", action: ToastAction | null = null) {
     const id = Date.now();
-    const ms = Math.min(14000, Math.max(2400, 1200 + text.length * 55)) + (level === "info" ? 0 : 2000);
-    this.toast = { text, id, ms, level };
+    const ms = Math.min(14000, Math.max(2400, 1200 + text.length * 55)) + (level === "info" ? 0 : 2000) + (action ? 5000 : 0);
+    this.toast = { text, id, ms, level, action };
     setTimeout(() => {
       if (this.toast?.id === id) this.toast = null;
     }, ms + 400);
@@ -544,6 +551,118 @@ class Setup {
     } catch (e: any) {
       ui.say(e?.message ?? String(e));
     }
+  }
+}
+
+/** In-app updates (D24). Rust owns the state; this mirrors it, says once
+ *  per version per session that one is out or ready, and turns actions into
+ *  commands. Nothing here restarts Encore by itself. */
+class Updates {
+  status = $state<UpdateStatus | null>(null);
+  /** The update sheet: the new version, or "What's new" after an update. */
+  sheet = $state<"update" | "whatsNew" | null>(null);
+  #rev = -1n;
+  #told = new Set<string>();
+  /** The version the user asked to download: its failure is said once. */
+  #asked: string | null = null;
+
+  phase = $derived(this.status?.phase ?? "idle");
+  ready = $derived(this.phase === "ready");
+  installing = $derived(this.phase === "installing");
+  version = $derived(this.status?.available?.version ?? null);
+
+  apply(s: UpdateStatus) {
+    const r = big(s.revision);
+    if (r < this.#rev) return;
+    this.#rev = r;
+    this.status = s;
+    this.#tell(s);
+  }
+
+  #once(key: string, f: () => void) {
+    if (this.#told.has(key)) return;
+    this.#told.add(key);
+    f();
+  }
+
+  /** The quiet notices: an update is ready, or out when Encore won't fetch it. */
+  #tell(s: UpdateStatus) {
+    const a = s.available;
+    if (s.updated) {
+      const v = s.updated.version;
+      this.#once(`updated:${v}`, () => ui.say(`Encore is updated to ${v}.`, "info", { label: "What's new", run: () => this.whatsNew() }));
+    }
+    if (!a) return;
+    if (s.phase === "failed" && this.#asked === a.version) {
+      this.#asked = null;
+      ui.say(`Couldn't download Encore ${a.version}: ${s.error ?? "it stopped"}.`, "error", { label: "Try again", run: () => void this.download() });
+    } else if (s.phase !== "downloading") this.#asked = null;
+    if (s.phase === "ready") {
+      this.#once(`ready:${a.version}`, () => ui.say(s.atQuit ? `Encore ${a.version} is ready. It installs when you quit Encore.` : `Encore ${a.version} is ready to install.`, "info", { label: "Restart now", run: () => void this.install() }));
+    } else if (s.phase === "available" && s.skipped !== a.version && !(s.auto && s.canInstall)) {
+      this.#once(`out:${a.version}`, () => this.#out(s));
+    }
+  }
+
+  #out(s: UpdateStatus) {
+    const a = s.available!;
+    if (s.install === "deb") ui.say(`Encore ${a.version} is out. Download it from the releases page.`, "info", { label: "Open page", run: () => openExternal(a.page) });
+    else if (!s.canInstall) ui.say(`Encore ${a.version} is out.`, "info", { label: "What's new", run: () => (this.sheet = "update") });
+    else ui.say(`Encore ${a.version} is out.`, "info", { label: "Download", run: () => void this.download() });
+  }
+
+  whatsNew() {
+    const u = this.status?.updated;
+    if (u && !u.notes.length) openExternal(u.page);
+    else this.sheet = "whatsNew";
+  }
+
+  /** "Check for updates": always says what GitHub answered. */
+  async check() {
+    if (this.status?.install === "dev") return ui.say(this.status.reason ?? "Updates are off in development builds.");
+    const s = await call((a) => a.updateCheck()).catch((e: BackendError) => (ui.say(`Couldn't check for updates: ${e.message}`, "error"), null));
+    if (!s) return;
+    this.apply(s);
+    const a = s.available;
+    if (s.phase === "upToDate") ui.say(`Encore ${s.current} is up to date.`);
+    else if (s.error && s.phase !== "ready") ui.say(`Couldn't check for updates: ${s.error}. Check your connection and try again.`, "error");
+    else if (a && s.phase === "downloading") ui.say(`Encore ${a.version} is out. Downloading it now.`);
+    else if (a && s.phase === "ready") ui.say(`Encore ${a.version} is ready to install.`, "info", { label: "Restart now", run: () => void this.install() });
+    else if (a) {
+      this.#told.add(`out:${a.version}`);
+      this.#out(s);
+    }
+  }
+
+  async download() {
+    this.#asked = this.status?.available?.version ?? null;
+    const s = await call((a) => a.updateDownload()).catch((e: BackendError) => (ui.say(`Couldn't download the update: ${e.message}`, "error"), null));
+    if (s) this.apply(s);
+  }
+
+  /** Pause, install and restart into the new version (Rust saves the queue
+   *  and position first). Only comes back if the install failed. */
+  async install() {
+    this.sheet = null;
+    await call((a) => a.updateInstall()).catch((e: BackendError) => ui.say(e.message, "error"));
+  }
+
+  async skip(version: string) {
+    this.sheet = null;
+    const s = await call((a) => a.updateSkip(version)).catch((e: BackendError) => (ui.say(`Could not skip it: ${e.message}`, "error"), null));
+    if (!s) return;
+    this.apply(s);
+    ui.say(`Skipped Encore ${version}. Encore tells you when a newer version is out.`);
+  }
+
+  async unskip() {
+    const s = await call((a) => a.updateUnskip()).catch((e: BackendError) => (ui.say(`Could not change that: ${e.message}`, "error"), null));
+    if (s) this.apply(s);
+  }
+
+  async setAuto(on: boolean) {
+    const s = await call((a) => a.setAutoUpdate(on)).catch((e: BackendError) => (ui.say(`Could not change that: ${e.message}`, "error"), null));
+    if (s) this.apply(s);
   }
 }
 
@@ -810,6 +929,7 @@ export const account = new Account();
 export const playlists = new Playlists();
 export const setup = new Setup();
 export const downloads = new Downloads();
+export const updates = new Updates();
 
 /** Why a collection can't be downloaded offline: it has to be read first. */
 export const KEEP_OFFLINE = "You're offline. Encore needs to read the list first, so try again when you're back online.";
@@ -1054,6 +1174,7 @@ export async function connect() {
       downloads: (s) => downloads.onSummary(s),
       downloadItem: (e) => downloads.onItem(e),
       connectivity: (on) => (ui.online = on),
+      update: (s) => updates.apply(s),
     }),
   );
   const b = await call((a) => a.bootstrap());
@@ -1063,6 +1184,7 @@ export async function connect() {
   if (b.notice) ui.say(b.notice, "error");
   await downloads.refresh();
   setup.launch(b.runtimes);
+  updates.apply(b.update);
   player.setQueue(b.queue.entries, b.queue.revision, b.queue.index);
   player.applySnapshot(b.player);
   // Lyrics for a restored track.

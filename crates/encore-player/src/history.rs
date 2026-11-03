@@ -11,7 +11,9 @@
 //! The [`HistoryReporter`] task feeds it from the player's own events and
 //! sends the pings through a [`PlayReporter`], one at a time. Failures are
 //! logged once and never touch playback. Offline nothing is opened or sent,
-//! and a play that started offline is never reported later (D23).
+//! and a play that started offline is never reported later (D23). Before
+//! Encore quits or installs an update, [`Settle`] ends the play in progress
+//! and waits a bounded time for its last ping (D24).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,7 +21,7 @@ use std::time::Instant;
 
 use encore_core::model::ItemId;
 use encore_core::service::{FlushSchedule, Ping, PlayReport, PlayReporter};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::{Phase, PlayerEvent};
 
@@ -187,6 +189,29 @@ enum ReportState {
 type Opened = (String, String, Option<Arc<dyn PlayReport>>);
 type Queued = (Arc<dyn PlayReport>, Ping, Option<u32>, ItemId, u64);
 
+/// What the sending task gets, in order: a ping, or a marker answered once
+/// everything before it was sent.
+enum Outgoing {
+    Ping(Queued),
+    Drained(oneshot::Sender<()>),
+}
+
+/// Ends the play in progress now and waits for its last ping (D24).
+#[derive(Clone)]
+pub struct Settle(mpsc::UnboundedSender<oneshot::Sender<()>>);
+
+impl Settle {
+    /// The play in progress gets its last ping, and everything queued is
+    /// sent, within `bound`. Returns whether it all went out in time.
+    pub async fn settle(&self, bound: std::time::Duration) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self.0.send(tx).is_err() {
+            return true;
+        }
+        matches!(tokio::time::timeout(bound, rx).await, Ok(Ok(())))
+    }
+}
+
 pub struct HistoryReporter;
 
 impl HistoryReporter {
@@ -196,13 +221,21 @@ impl HistoryReporter {
     /// connection they started on; once it changes they are dropped, even if
     /// the connection is back by then (D23). `on_registered` runs after a
     /// play's first ping was accepted.
-    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
-        let (send_tx, mut send_rx) = mpsc::channel::<Queued>(SEND_QUEUE);
+    pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) -> Settle {
+        let (send_tx, mut send_rx) = mpsc::channel::<Outgoing>(SEND_QUEUE);
+        let (settle_tx, settle_rx) = mpsc::unbounded_channel();
         let link2 = link.clone();
         // One ping at a time, in order.
         tokio::spawn(async move {
             let mut failed_for: Option<ItemId> = None;
-            while let Some((r, ping, itag, id, at)) = send_rx.recv().await {
+            while let Some(out) = send_rx.recv().await {
+                let (r, ping, itag, id, at) = match out {
+                    Outgoing::Ping(q) => q,
+                    Outgoing::Drained(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
                 // Pings are not kept for later: a play replayed hours after
                 // the fact would be wrong history (D23).
                 if link2.load(Ordering::SeqCst) != at {
@@ -224,7 +257,8 @@ impl HistoryReporter {
                 }
             }
         });
-        tokio::spawn(run(events, reporter, enabled, link, send_tx));
+        tokio::spawn(run(events, reporter, enabled, link, send_tx, settle_rx));
+        Settle(settle_tx)
     }
 }
 
@@ -233,7 +267,8 @@ async fn run(
     reporter: Arc<dyn PlayReporter>,
     enabled: Arc<AtomicBool>,
     link: Arc<AtomicU64>,
-    send: mpsc::Sender<Queued>,
+    send: mpsc::Sender<Outgoing>,
+    mut settle: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
 ) {
     let t0 = Instant::now();
     let clock = move || t0.elapsed().as_secs_f64();
@@ -242,7 +277,7 @@ async fn run(
     let ship = |a: &Active, pings: Vec<Ping>| {
         if let ReportState::Open(r) = &a.report {
             for p in pings {
-                let _ = send.try_send((r.clone(), p, a.itag, a.id.clone(), a.link));
+                let _ = send.try_send(Outgoing::Ping((r.clone(), p, a.itag, a.id.clone(), a.link)));
             }
         }
     };
@@ -323,6 +358,13 @@ async fn run(
                         };
                         let _ = tx.send((tg, uid, res));
                     });
+                }
+            }
+            // Quitting: this play ends here; answer once its last ping is out.
+            Some(done) = settle.recv() => {
+                end(active.take(), clock());
+                if send.send(Outgoing::Drained(done)).await.is_err() {
+                    break;
                 }
             }
             Some((tg, uid, res)) = open_rx.recv() => {
@@ -604,6 +646,23 @@ mod tests {
         settle().await;
         let pings = log.pings.lock().clone();
         assert!(matches!(pings.last(), Some((id, Ping::Watchtime { last: true, .. })) if id == "a"), "{pings:?}");
+    }
+
+    #[tokio::test]
+    async fn settling_sends_the_last_ping_before_it_returns() {
+        let (tx, rx) = broadcast::channel(64);
+        let log = Arc::new(Log::default());
+        let s = HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)), Arc::new(|_: &ItemId| {}));
+        tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=8 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        assert!(s.settle(Duration::from_secs(2)).await, "settled in time");
+        let pings = log.pings.lock().clone();
+        assert!(matches!(pings.last(), Some((id, Ping::Watchtime { last: true, .. })) if id == "a"), "{pings:?}");
+        // Nothing playing: settles at once.
+        assert!(s.settle(Duration::from_millis(200)).await);
     }
 
     #[tokio::test]

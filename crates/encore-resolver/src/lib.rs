@@ -61,8 +61,12 @@ impl ResolverConfig {
     }
 }
 
+/// A helper process, shared with the resolver's list so `shut_down` can
+/// kill it even while a call holds its pool slot.
+type SharedChild = Arc<tokio::sync::Mutex<Child>>;
+
 struct Helper {
-    child: Child,
+    child: SharedChild,
     stdin: ChildStdin,
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
     next_id: u64,
@@ -72,7 +76,9 @@ struct Helper {
 
 impl Drop for Helper {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        if let Ok(mut c) = self.child.try_lock() {
+            let _ = c.start_kill();
+        }
     }
 }
 
@@ -89,6 +95,10 @@ pub struct YtDlpResolver {
     http: reqwest::Client,
     cache: Mutex<HashMap<String, Cached>>,
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Encore is quitting or installing an update: no helper starts (D24).
+    closed: std::sync::atomic::AtomicBool,
+    /// Every helper started, for `shut_down`.
+    children: Mutex<Vec<std::sync::Weak<tokio::sync::Mutex<Child>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +205,8 @@ impl YtDlpResolver {
             http: reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(20)).build().expect("http"),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            children: Mutex::new(Vec::new()),
         })
     }
 
@@ -210,6 +222,39 @@ impl YtDlpResolver {
         }
     }
 
+    /// Before Encore quits or installs an update (D24): no new helper
+    /// starts, and the running ones are killed and waited for. Dropping a
+    /// helper only sends the kill, and the Windows installer path ends in
+    /// `process::exit`, which runs no destructors: a helper left running
+    /// would keep files of the old install open. Each helper is killed
+    /// and reaped through the resolver's own list, without waiting for a
+    /// call that holds its slot: that call sees the helper's output end and
+    /// fails. The caller bounds the wait.
+    pub async fn shut_down(&self) {
+        use std::sync::atomic::Ordering;
+        let taken = {
+            let mut list = self.children.lock();
+            self.closed.store(true, Ordering::SeqCst);
+            std::mem::take(&mut *list)
+        };
+        let children: Vec<SharedChild> = taken.into_iter().filter_map(|w| w.upgrade()).collect();
+        for c in children {
+            let mut c = c.lock().await;
+            let _ = c.kill().await;
+        }
+        // Idle slots let go of their (now dead) helpers.
+        for m in &self.pool {
+            if let Ok(mut g) = m.try_lock() {
+                *g = None;
+            }
+        }
+    }
+
+    /// Quitting didn't happen after all: helpers may start again.
+    pub fn reopen(&self) {
+        self.closed.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The installed set, with the helper script written next to it.
     fn env(&self) -> Result<Env, PlayFailure> {
         let generation = self.runtimes.generation();
@@ -222,11 +267,30 @@ impl YtDlpResolver {
     }
 
     async fn spawn(&self, env: &Env) -> Result<Helper, PlayFailure> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fail(PlayFailureKind::Unknown, "Encore is closing."));
+        }
         let mut cmd = runtimes::helper_command(&env.python, self.runtimes.deno_dir());
         cmd.arg("-I").arg(&env.helper).arg("--site").arg(&env.site).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| fail(PlayFailureKind::Unknown, format!("could not start the resolver: {}", e.kind())))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+        let child = Arc::new(tokio::sync::Mutex::new(child));
+        // Under the list's lock: either `shut_down` finds this helper, or
+        // this sees that it ran.
+        let refused = {
+            let mut list = self.children.lock();
+            let closed = self.closed.load(std::sync::atomic::Ordering::SeqCst);
+            if !closed {
+                list.retain(|w| w.strong_count() > 0);
+                list.push(Arc::downgrade(&child));
+            }
+            closed
+        };
+        if refused {
+            let _ = child.lock().await.kill().await;
+            return Err(fail(PlayFailureKind::Unknown, "Encore is closing."));
+        }
         let mut h = Helper { child, stdin, stdout, next_id: 1, generation: env.generation };
         let hello = tokio::time::timeout(Duration::from_secs(30), h.stdout.next_line())
             .await

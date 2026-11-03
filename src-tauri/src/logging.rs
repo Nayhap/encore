@@ -29,6 +29,8 @@ pub fn init(dir: &Path) {
     let Ok(f) = OpenOptions::new().create(true).append(true).open(dir.join("encore.log")) else { return };
     let fw: &'static FileWriter = Box::leak(Box::new(FileWriter(Mutex::new(f))));
     let filter = tracing_subscriber::EnvFilter::try_from_env("ENCORE_LOG").unwrap_or_else(|_| "info".into());
+    // The updater plugin logs whole release manifests at debug level.
+    let filter = filter.add_directive("tauri_plugin_updater=info".parse().expect("directive"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(false)

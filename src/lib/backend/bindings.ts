@@ -124,6 +124,23 @@ export const commands = {
 	 *  user asked). Returns whether YouTube answered.
 	 */
 	connectivityCheck: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("connectivity_check")),
+	updateStatus: () => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("update_status")),
+	/**
+	 *  "Check for updates": asks GitHub now, shows a skipped version too, and
+	 *  returns once it has answered.
+	 */
+	updateCheck: () => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("update_check")),
+	/**  Download the update that was found (automatic updates off, or a retry). */
+	updateDownload: () => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("update_download")),
+	/**
+	 *  "Restart to update": pauses, installs and starts the new version. Only
+	 *  returns when the install failed.
+	 */
+	updateInstall: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("update_install")),
+	updateSkip: (version: string) => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("update_skip", { version })),
+	updateUnskip: () => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("update_unskip")),
+	/**  Settings → Updates → "Install updates automatically". */
+	setAutoUpdate: (on: boolean) => typedError<UpdateStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("set_auto_update", { on })),
 	/**
 	 *  Windows 11 snap layouts: the flyout normally appears when the pointer
 	 *  rests on the native maximise button, which Encore doesn't have. Pressing
@@ -160,6 +177,7 @@ export const events = {
 	runtimesEvent: makeEvent<RuntimesEvent_Serialize, RuntimesEvent_Deserialize>("runtimes-event"),
 	setupNeededEvent: makeEvent<SetupNeededEvent_Serialize, SetupNeededEvent_Deserialize>("setup-needed-event"),
 	signinEvent: makeEvent<SigninEvent_Serialize, SigninEvent_Deserialize>("signin-event"),
+	updateEvent: makeEvent<UpdateEvent_Serialize, UpdateEvent_Deserialize>("update-event"),
 };
 
 /* Types */
@@ -342,6 +360,8 @@ export type Bootstrap_Deserialize = {
 	notice?: string | null,
 	/**  Encore can reach YouTube (D23). */
 	online: boolean,
+	/**  In-app updates (D24). */
+	update: UpdateStatus_Deserialize,
 };
 
 export type Bootstrap_Serialize = {
@@ -357,6 +377,8 @@ export type Bootstrap_Serialize = {
 	notice: string | null,
 	/**  Encore can reach YouTube (D23). */
 	online: boolean,
+	/**  In-app updates (D24). */
+	update: UpdateStatus_Serialize,
 };
 
 export type BrowserProfile = {
@@ -858,6 +880,23 @@ export type HistoryRow_Serialize = {
 	track: Track_Serialize,
 	removable: boolean,
 };
+
+/**  How this copy of Encore was installed, which decides how it updates. */
+export type InstallKind = 
+/**  macOS `.app`: the new bundle replaces it. */
+"app" | 
+/**  Windows, per user: the new NSIS installer runs. */
+"nsis" | 
+/**  Windows, per machine: the new MSI runs (Windows may ask for an administrator). */
+"msi" | 
+/**  Linux AppImage: replaced in place. */
+"appImage" | 
+/**  Linux `.deb`: never updated by Encore, which links to the release instead. */
+"deb" | 
+/**  A development build. */
+"dev" | 
+/**  Not from an installer Encore knows. */
+"other";
 
 /**  `ServiceId` + opaque remote id, serialised as `"ytm:<remote>"`. */
 export type ItemId = string;
@@ -1636,6 +1675,106 @@ export type Track_Serialize = {
 	 *  video instead" action (D4).
 	 */
 	counterpart: ItemId | null,
+};
+
+/**
+ *  In-app updates changed: a check, download progress (at most four a
+ *  second), ready, installing (D24). Newer revisions win.
+ */
+export type UpdateEvent = UpdateEvent_Serialize | UpdateEvent_Deserialize;
+
+/**
+ *  In-app updates changed: a check, download progress (at most four a
+ *  second), ready, installing (D24). Newer revisions win.
+ */
+export type UpdateEvent_Deserialize = UpdateStatus_Deserialize;
+
+/**
+ *  In-app updates changed: a check, download progress (at most four a
+ *  second), ready, installing (D24). Newer revisions win.
+ */
+export type UpdateEvent_Serialize = UpdateStatus_Serialize;
+
+export type UpdateInfo = UpdateInfo_Serialize | UpdateInfo_Deserialize;
+
+export type UpdateInfo_Deserialize = {
+	version: string,
+	/**  RFC 3339, as the release says. */
+	date?: string | null,
+	/**  The release notes as plain sentences, one per bullet (never HTML). */
+	notes: string[],
+	/**  The release on GitHub. */
+	page: string,
+};
+
+export type UpdateInfo_Serialize = {
+	version: string,
+	/**  RFC 3339, as the release says. */
+	date: string | null,
+	/**  The release notes as plain sentences, one per bullet (never HTML). */
+	notes: string[],
+	/**  The release on GitHub. */
+	page: string,
+};
+
+export type UpdatePhase = "idle" | "checking" | "upToDate" | "available" | "downloading" | 
+/**  Downloaded and verified: installs on restart or quit. */
+"ready" | "installing" | "failed";
+
+export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
+
+export type UpdateStatus_Deserialize = {
+	/**  Bumps on every change; the UI ignores older ones. */
+	revision: string,
+	current: string,
+	install: InstallKind,
+	/**  Encore can install updates itself here; otherwise `reason` says why. */
+	canInstall: boolean,
+	reason?: string | null,
+	/**  Settings → Updates → "Install updates automatically". */
+	auto: boolean,
+	phase: UpdatePhase,
+	available?: UpdateInfo_Deserialize | null,
+	/**  While downloading: bytes so far, and the size when known. */
+	received?: number | null,
+	total?: number | null,
+	/**  The last check, download or install failed: why. */
+	error?: string | null,
+	/**  When GitHub last answered a check (Unix seconds). */
+	checkedAt?: number | null,
+	/**  The version the user skipped. */
+	skipped?: string | null,
+	/**  The ready update installs when Encore quits. */
+	atQuit: boolean,
+	/**  Encore was updated to this version since it last ran (shown once). */
+	updated?: UpdateInfo_Deserialize | null,
+};
+
+export type UpdateStatus_Serialize = {
+	/**  Bumps on every change; the UI ignores older ones. */
+	revision: string,
+	current: string,
+	install: InstallKind,
+	/**  Encore can install updates itself here; otherwise `reason` says why. */
+	canInstall: boolean,
+	reason: string | null,
+	/**  Settings → Updates → "Install updates automatically". */
+	auto: boolean,
+	phase: UpdatePhase,
+	available: UpdateInfo_Serialize | null,
+	/**  While downloading: bytes so far, and the size when known. */
+	received: number | null,
+	total: number | null,
+	/**  The last check, download or install failed: why. */
+	error: string | null,
+	/**  When GitHub last answered a check (Unix seconds). */
+	checkedAt: number | null,
+	/**  The version the user skipped. */
+	skipped: string | null,
+	/**  The ready update installs when Encore quits. */
+	atQuit: boolean,
+	/**  Encore was updated to this version since it last ran (shown once). */
+	updated: UpdateInfo_Serialize | null,
 };
 
 export type Word = Word_Serialize | Word_Deserialize;

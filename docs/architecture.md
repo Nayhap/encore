@@ -12,7 +12,8 @@ not depend on Tauri, so they can be tested and run from the command line.
                │ commands ↓   events ↑   art:// images
 ┌──────────────┴──── src-tauri/ ────────────────┐
 │ commands, events, art:// protocol,            │
-│ Now Playing and media keys, sign-in window    │
+│ Now Playing and media keys, sign-in window,   │
+│ in-app updates (updates.rs, D24)              │
 └──────────────┬────────────────────────────────┘
                │
    encore-downloads ── downloads index, fetching, kept collections
@@ -77,6 +78,14 @@ the player plays downloaded songs and passes over the others with one rule
 for next, previous, the end of a song and preloading. Radio, likes, playlist
 edits and search wait, history pings are neither sent nor kept for later,
 and lyrics and covers come from what was kept with the downloads.
+
+## Updates
+
+`src-tauri/src/updates.rs` checks the latest published GitHub release and
+installs a newer Encore only when the user restarts from the UI or quits
+(D24). Every exit, with or without an update, goes through
+`Core::prepare_exit`: playback paused and saved, history settled, downloads
+and the yt-dlp helpers stopped.
 
 ## When YouTube changes things
 

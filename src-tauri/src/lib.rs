@@ -9,6 +9,7 @@ mod logging;
 mod media;
 mod selftest;
 mod signin;
+mod updates;
 mod window;
 
 use std::sync::Arc;
@@ -104,6 +105,13 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             downloads_remove_all,
             downloads_storage,
             connectivity_check,
+            update_status,
+            update_check,
+            update_download,
+            update_install,
+            update_skip,
+            update_unskip,
+            set_auto_update,
             window::snap_layouts,
             window::set_system_titlebar,
             window::get_system_titlebar,
@@ -123,7 +131,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             SetupNeededEvent,
             DownloadsEvent,
             DownloadItemEvent,
-            ConnectivityEvent
+            ConnectivityEvent,
+            UpdateEvent
         ])
 }
 
@@ -253,6 +262,8 @@ pub fn run() {
         }
     }));
     app.plugin(tauri_plugin_opener::init())
+        // Updates (D24): used from Rust only; the UI has no updater permission.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
@@ -370,6 +381,10 @@ pub fn run() {
             }));
             media::install(&handle, core.clone());
             keepalive(handle.clone(), core.clone());
+            // Updates (D24): checks start 20 s from now.
+            let updates = updates::Updates::new(handle.clone(), core.clone());
+            app.manage(updates.clone());
+            updates.start();
             // Player components (D22): progress goes to the UI; a finished
             // install starts the song that was waiting for it. Components the
             // user already approved are updated (or finished) on launch
@@ -402,14 +417,29 @@ pub fn run() {
                 window::round_corners(&w);
             }
 
+            // Closing with an update ready installs it first (D24): the
+            // window stays up for that moment, saying so. A second close
+            // while that runs waits for it.
             #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let h = app.handle().clone();
-                w.on_window_event(move |e| {
-                    if let WindowEvent::Destroyed = e {
+                let (h2, u2) = (app.handle().clone(), updates.clone());
+                w.on_window_event(move |e| match e {
+                    WindowEvent::CloseRequested { api, .. } if u2.exit_state() == updates::Exit::Exiting => api.prevent_close(),
+                    WindowEvent::CloseRequested { api, .. } if u2.exit_state() == updates::Exit::Running && u2.install_on_close() && u2.begin_exit() => {
+                        api.prevent_close();
+                        let (h3, u3) = (h2.clone(), u2.clone());
+                        tauri::async_runtime::spawn(async move {
+                            // On Windows a successful install exits in here.
+                            u3.finish_exit().await;
+                            h3.exit(0);
+                        });
+                    }
+                    WindowEvent::Destroyed => {
                         signin::close(&h);
                         h.exit(0);
                     }
+                    _ => {}
                 });
             }
             #[cfg(target_os = "macos")]
@@ -434,10 +464,47 @@ pub fn run() {
                     let _ = w.set_focus();
                 }
             }
-            RunEvent::ExitRequested { .. } => {
-                if let Some(core) = app.try_state::<Arc<Core>>() {
-                    core.player.pause();
+            // One way out (D24): the first exit request settles playback,
+            // history, downloads and the helpers and installs a ready
+            // update; every request until then is held (a second close, the
+            // runtime's own request when the last window goes); after it,
+            // they go through.
+            RunEvent::ExitRequested { api, code, .. } => {
+                let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) else {
+                    if let Some(core) = app.try_state::<Arc<Core>>() {
+                        core.player.pause();
+                    }
+                    return;
+                };
+                if u.exit_state() == updates::Exit::Released {
+                    return;
                 }
+                api.prevent_exit();
+                if !u.begin_exit() {
+                    return;
+                }
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    u.finish_exit().await;
+                    if code == Some(tauri::RESTART_EXIT_CODE) {
+                        app.restart();
+                    }
+                    app.exit(code.unwrap_or(0));
+                });
+            }
+            // macOS Quit (the menu, Cmd+Q, the Dock, logout) skips
+            // ExitRequested: AppKit is already terminating and the process
+            // ends when this returns, so the same work runs here, blocking
+            // and bounded. A quit while Restart to update installs waits for
+            // that install instead of cutting it off.
+            RunEvent::Exit => {
+                let Some(u) = app.try_state::<Arc<updates::Updates>>().map(|u| u.inner().clone()) else { return };
+                tauri::async_runtime::block_on(async {
+                    u.exit_settled(Duration::from_secs(30)).await;
+                    if u.begin_exit() {
+                        let _ = tokio::time::timeout(Duration::from_secs(30), u.finish_exit()).await;
+                    }
+                });
             }
             _ => {}
         });
