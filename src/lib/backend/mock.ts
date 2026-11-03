@@ -73,8 +73,58 @@ const item = {
 };
 const shelf = (title: string, items: T.ShelfItem[], layout: "carousel" | "list" | "grid" = "carousel", subtitle: string | null = null): T.Shelf => ({ title, subtitle, layout, items, more: null });
 
+// ---------- the catalogue for library tools (lane B, D34, D35) ----------
+// "Everything twice" (yours) has exact copies and songs next to their music
+// videos, for Duplicates; "The long way round" has 1,340 rows that arrive
+// 100 at a time, for "Searching 500 of 1,340 · Load all".
+{
+  const ids = M.tracks.map((t) => t.id);
+  const pick = (n: number, step: number, from = 0) => Array.from({ length: n }, (_, i) => ids[(from + i * step) % ids.length]);
+  const twice = [...pick(24, 1)];
+  twice.splice(6, 0, ids[2]);
+  twice.splice(13, 0, ids[0] + MV, ids[9]);
+  twice.push(ids[4], ids[14] + MV, ids[2]);
+  M.collections.push(
+    { id: "pl-twice", kind: "playlist", title: "Everything twice", by: "You", art: { seed: 230, h1: 160, h2: 280, motif: "stripes" }, trackIds: twice, desc: "Some songs are in here more than once." },
+    { id: "pl-long", kind: "playlist", title: "The long way round", by: "Encore Radio", art: { seed: 231, h1: 25, h2: 200, motif: "wave" }, trackIds: pick(1340, 7, 3), desc: "Everything, in no particular order." },
+  );
+}
+// Rows per page of a long mock playlist.
+const PAGE = 100;
+// Each artist's singles and EPs: their album's songs, one or two at a time.
+const singles: M.MCollection[] = M.collections
+  .filter((c) => c.kind === "album")
+  .flatMap((a) =>
+    a.trackIds.slice(0, 3).map((t, i): M.MCollection => ({
+      id: `sg-${t}`, kind: "single", title: `${M.tracks.find((x) => x.id === t)!.title}${i === 2 ? " (Remixes)" : ""}`, by: a.by, artistId: a.artistId,
+      year: (a.year ?? 2024) - i, art: { ...a.art, seed: a.art.seed + 40 + i, h1: (a.art.h1 + 40 * (i + 1)) % 360 }, trackIds: i === 2 ? a.trackIds.slice(0, 2) : [t],
+    })),
+  );
+const anyCollection = (id: string) => M.collections.find((x) => x.id === id) ?? singles.find((x) => x.id === id) ?? community(id);
+// Playlists other listeners made, as the community-playlist search finds them (D35).
+const owners = ["nightbus", "Mara K.", "lofi archive", "Theo", "city lights radio", "june"];
+function communityFor(a: M.MArtist): M.MCollection[] {
+  const songs = M.tracks.filter((t) => t.artistId === a.id).map((t) => t.id);
+  const others = M.tracks.filter((t) => t.artistId !== a.id).map((t) => t.id);
+  return [`${a.name} essentials`, `best of ${a.name}`, `${a.name} + friends`, "late night drive", "songs for the train home", `${a.name.toLowerCase()} deep cuts`].map((title, i) => ({
+    id: `cp-${a.id}-${i}`, kind: "playlist", title, by: owners[i % owners.length], art: { seed: 400 + i * 7 + a.art.seed, h1: (a.art.h1 + i * 50) % 360, h2: (a.art.h2 + i * 30) % 360, motif: (["orbit", "grid", "wave", "sun", "blocks", "stripes"] as const)[i] },
+    trackIds: [...songs, ...others.slice(i * 3, i * 3 + 6)],
+  }));
+}
+function community(id: string) {
+  const m = id.match(/^cp-(.+)-\d+$/);
+  const a = m && M.artists.find((x) => x.id === m[1]);
+  return a ? communityFor(a).find((c) => c.id === id) : undefined;
+}
+/** The mock's catalogue, for ./mock/libraryTools.ts. */
+export const mockCatalogue = {
+  singlesOf: (artistId: string) => singles.filter((s) => s.artistId === artistId).map(card),
+  albumsOf: (artistId: string) => M.collections.filter((c) => c.kind === "album" && c.artistId === artistId).map(card),
+  year: (albumId: string) => anyCollection(raw(albumId))?.year ?? null,
+};
+
 const liked = new Set<string>(M.collections.find((c) => c.id === "pl-liked")!.trackIds.map(mid));
-const delay = <T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
+const delay =<T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 
 // ---------- your playlists and history ----------
 
@@ -560,14 +610,21 @@ export const mockApi: Api = {
       ],
     }),
   browsePage: (b, p) =>
-    delay({
+    b.startsWith("MPAD")
+      ? delay({ title: M.artists.find((a) => `MPAD${a.id}` === b)?.name ?? null, chips: [], cursor: null, shelves: [shelf("", (p === "singles" ? singles.filter((c) => `MPAD${c.artistId}` === b) : M.collections.filter((c) => c.kind === "album" && `MPAD${c.artistId}` === b)).map(item.c), "grid")] })
+      : delay({
       title: p ?? (b === "FEmusic_charts" ? "Charts" : b === "FEmusic_new_releases" ? "New releases" : "Moods & genres"),
       chips: [],
       cursor: null,
       shelves: [shelf("Playlists", M.collections.filter((c) => c.kind !== "album").map(item.c)), shelf("Albums", M.collections.filter((c) => c.kind === "album").map(item.c))],
     }),
   moreShelves: async () => ({ title: null, chips: [], cursor: null, shelves: [] }),
-  async search(q) {
+  async search(q, filter) {
+    // The community-playlist search (D35): listeners' playlists for an artist.
+    if (filter === "communityPlaylists") {
+      const a = M.artists.find((x) => x.name.toLowerCase() === q.trim().toLowerCase());
+      return delay({ query: q, top: null, songs: [], videos: [], albums: [], artists: [], playlists: a ? communityFor(a).map(card) : [], didYouMean: null, cursor: null }, 300);
+    }
     const norm = (s: string) => s.toLowerCase().normalize("NFKC");
     const s = norm(q.trim());
     const hit = (...xs: string[]) => xs.some((x) => norm(x).includes(s));
@@ -589,23 +646,38 @@ export const mockApi: Api = {
       return delay({ ...k.card, description: null, stats: `${k.ids.length} songs`, trackCount: k.ids.length, entries: k.ids.map((t, i) => ({ entryId: `${t}#${i}`, track: track(t), setVideoId: null, videoId: t })), cursor: null, playlistId: null, saved: null, editable: false, privacy: null, related: [] } as T.Collection);
     }
     if (id === "ytm:VLLM" && auth.state !== "signedIn") throw { code: "authRequired", message: "Sign in to YouTube Music to use this.", retryable: false, action: "signIn" };
-    const c = M.collections.find((x) => x.id === raw(id) || (id === "ytm:VLLM" && x.id === "pl-liked"));
+    const c = id === "ytm:VLLM" ? M.collections.find((x) => x.id === "pl-liked") : anyCollection(raw(id));
     if (!c) throw { code: "notFound", message: "That collection does not exist.", retryable: false, action: null };
+    // Long lists arrive a page at a time, as YouTube sends them.
+    const long = c.trackIds.length > 2 * PAGE;
     return delay({
       id: mid(c.id), kind: kindOf(c), title: c.title, subtitle: card(c).subtitle, artists: card(c).artists, year: c.year ?? null, art: art(c.art),
       description: c.desc ?? null, stats: `${c.trackIds.length} songs`, trackCount: c.trackIds.length,
-      entries: c.trackIds.map((t, i) => ({ entryId: c.by === "You" ? setsOf(c)[i] : `${t}#${i}`, track: track(t), setVideoId: c.by === "You" ? setsOf(c)[i] : null, videoId: track(t).id })),
-      cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
+      entries: (long ? c.trackIds.slice(0, PAGE) : c.trackIds).map((t, i) => ({ entryId: c.by === "You" ? setsOf(c)[i] : `${t}#${i}`, track: track(t), setVideoId: c.by === "You" ? setsOf(c)[i] : null, videoId: track(t).id })),
+      cursor: long ? `${c.id}@${PAGE}` : null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
     });
   },
-  collectionMore: async () => ({ entries: [], cursor: null, complete: true }),
+  async collectionMore(cursor) {
+    const [cid, at] = cursor.split("@");
+    const c = anyCollection(cid);
+    const from = Number(at);
+    if (!c || !Number.isFinite(from)) return { entries: [], cursor: null, complete: false };
+    const to = Math.min(c.trackIds.length, from + PAGE);
+    const entries = c.trackIds.slice(from, to).map((t, k) => ({ entryId: `${t}#${from + k}`, track: track(t), setVideoId: null, videoId: track(t).id }));
+    return delay({ entries, cursor: to < c.trackIds.length ? `${c.id}@${to}` : null, complete: to >= c.trackIds.length }, 700);
+  },
   async artist(id) {
     const a = M.artists.find((x) => x.id === raw(id));
     if (!a) throw { code: "notFound", message: "That artist does not exist.", retryable: false, action: null };
     return delay({
       id: mid(a.id), name: a.name, subscribers: `${a.subs} subscribers`, description: a.blurb, art: art(a.art),
       topSongs: M.tracks.filter((t) => t.artistId === a.id).slice(0, 5).map(toTrack), topSongsMore: null,
-      shelves: [shelf("Albums", M.collections.filter((c) => c.artistId === a.id).map(item.c)), shelf("Fans also like", M.artists.filter((x) => x.id !== a.id).slice(0, 6).map(item.a))].filter((s) => s.items.length),
+      // The release shelves link to the artist's discography, each with its own params (D35).
+      shelves: [
+        { ...shelf("Albums", M.collections.filter((c) => c.artistId === a.id).map(item.c)), more: { title: "Albums", browseId: `MPAD${a.id}`, params: "albums", hue: null } },
+        { ...shelf("Singles & EPs", singles.filter((c) => c.artistId === a.id).map(item.c)), more: { title: "Singles & EPs", browseId: `MPAD${a.id}`, params: "singles", hue: null } },
+        shelf("Fans also like", M.artists.filter((x) => x.id !== a.id).slice(0, 6).map(item.a)),
+      ].filter((s) => s.items.length),
       subscribed: false, channelId: a.id, radioPlaylist: `RD${a.id}`, shufflePlaylist: null,
     });
   },

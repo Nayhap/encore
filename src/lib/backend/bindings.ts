@@ -149,6 +149,33 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
+	/**
+	 *  Plays, Last.fm counts and tempos for `rows`, from what Encore keeps
+	 *  locally; nothing is fetched. The owner is the account now (D25 rule 7).
+	 */
+	librarySortFacts: (rows: SortRow_Deserialize[]) => typedError<SortFacts_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_sort_facts", { rows })),
+	/**
+	 *  Release years of albums (`ytm:MPRE…`) for sorting by year: cached years
+	 *  at once, the rest one album page at a time in the background (D34).
+	 */
+	libraryYears: (albumIds: ItemId[]) => typedError<YearsStart, AppError_Serialize>(__TAURI_INVOKE("library_years", { albumIds })),
+	/**  Stop looking up years (the list was left or sorted otherwise). */
+	libraryYearsStop: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_years_stop")),
+	/**
+	 *  Like (or unlike) many songs: one request each, paced through the
+	 *  background lane so YouTube sees a person, not a script (D34). Returns
+	 *  the job; answers arrive as `LibraryLikeEvent`s.
+	 */
+	libraryLike: (trackIds: ItemId[], liked: boolean) => typedError<number, AppError_Serialize>(__TAURI_INVOKE("library_like", { trackIds, liked })),
+	/**  Stop a like job; songs already answered stay as they are. */
+	libraryLikeStop: (job: number) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_like_stop", { job })),
+	/**
+	 *  Read an artist's releases from the links its page gave (the `MPAD…`
+	 *  "Albums" and "Singles and EPs" shelves' `more`, params and all). The
+	 *  first page of each is read in turn like any page someone opened; the
+	 *  rest through the background lane (D10, D35).
+	 */
+	libraryDiscography: (links: PageLink_Deserialize[]) => typedError<Discography_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_discography", { links })),
 };
 
 /** Events */
@@ -159,6 +186,8 @@ export const events = {
 	downloadItemEvent: makeEvent<DownloadItemEvent_Serialize, DownloadItemEvent_Deserialize>("download-item-event"),
 	downloadsEvent: makeEvent<DownloadsEvent_Serialize, DownloadsEvent_Deserialize>("downloads-event"),
 	historyEvent: makeEvent<HistoryEvent, HistoryEvent>("history-event"),
+	libraryLikeEvent: makeEvent<LibraryLikeEvent_Serialize, LibraryLikeEvent_Deserialize>("library-like-event"),
+	libraryYearEvent: makeEvent<LibraryYearEvent_Serialize, LibraryYearEvent_Deserialize>("library-year-event"),
 	lyricsEvent: makeEvent<LyricsEvent_Serialize, LyricsEvent_Deserialize>("lyrics-event"),
 	noticeEvent: makeEvent<NoticeEvent_Serialize, NoticeEvent_Deserialize>("notice-event"),
 	playerPositionEvent: makeEvent<PlayerPositionEvent_Serialize, PlayerPositionEvent_Deserialize>("player-position-event"),
@@ -560,6 +589,33 @@ export type Credit_Serialize = {
 	id: ItemId | null,
 };
 
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography = Discography_Serialize | Discography_Deserialize;
+
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography_Deserialize = {
+	releases: CollectionCard_Deserialize[],
+	complete: boolean,
+};
+
+/**
+ *  Every release behind an artist's release links, newest first.
+ *  `complete`: every link was read to its end; otherwise YouTube stopped
+ *  early (or a limit did) and there may be more.
+ */
+export type Discography_Serialize = {
+	releases: CollectionCard_Serialize[],
+	complete: boolean,
+};
+
 /**  One downloaded, or downloading, song. */
 export type DownloadItem = DownloadItem_Serialize | DownloadItem_Deserialize;
 
@@ -955,6 +1011,33 @@ export type KeptCollection_Serialize = {
 	paused: boolean,
 };
 
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent = LibraryLikeEvent_Serialize | LibraryLikeEvent_Deserialize;
+
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent_Deserialize = {
+	job: number,
+	trackId?: ItemId | null,
+	outcome?: MutationOutcome | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	/**  Why it ended early, for the user. */
+	error?: string | null,
+};
+
+/**  One song of a like job answered, or the job ended. */
+export type LibraryLikeEvent_Serialize = {
+	job: number,
+	trackId: ItemId | null,
+	outcome: MutationOutcome | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	/**  Why it ended early, for the user. */
+	error: string | null,
+};
+
 export type LibraryPage = LibraryPage_Serialize | LibraryPage_Deserialize;
 
 export type LibraryPage_Deserialize = {
@@ -970,6 +1053,40 @@ export type LibraryPage_Serialize = {
 };
 
 export type LibrarySection = "playlists" | "albums" | "artists" | "songs" | "liked" | "subscriptions" | "history";
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent = LibraryYearEvent_Serialize | LibraryYearEvent_Deserialize;
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent_Deserialize = {
+	job: number,
+	albumId?: string | null,
+	year?: number | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	stopped: boolean,
+};
+
+/**
+ *  One album read, or the lookup ending (`finished`, with `stopped` when
+ *  it ended early: offline, another account, a failure, or asked to).
+ */
+export type LibraryYearEvent_Serialize = {
+	job: number,
+	albumId: string | null,
+	year: number | null,
+	done: number,
+	total: number,
+	finished: boolean,
+	stopped: boolean,
+};
 
 /**  An A–B loop, in seconds of the current song. */
 export type LoopRange = {
@@ -1636,6 +1753,57 @@ export type SleepTimer_Serialize = {
 	remaining: number | null,
 };
 
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts = SortFacts_Serialize | SortFacts_Deserialize;
+
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts_Deserialize = {
+	/**  Counted plays in Encore (D30), by track id. */
+	plays: { [key in string]: number },
+	lastfm?: { [key in string]: number } | null,
+	/**  Estimated tempo (D28), by track id. */
+	bpm: { [key in string]: number | null },
+};
+
+/**
+ *  What can sort these rows beyond their own fields. Each map only has the
+ *  songs that have a value; `lastfm` is `None` without Last.fm counts.
+ */
+export type SortFacts_Serialize = {
+	/**  Counted plays in Encore (D30), by track id. */
+	plays: { [key in string]: number },
+	lastfm: { [key in string]: number } | null,
+	/**  Estimated tempo (D28), by track id. */
+	bpm: { [key in string]: number | null },
+};
+
+/**  One row, as far as sorting needs it. */
+export type SortRow = SortRow_Serialize | SortRow_Deserialize;
+
+/**  One row, as far as sorting needs it. */
+export type SortRow_Deserialize = {
+	id: ItemId,
+	/**  The other version of the recording: its plays count too. */
+	counterpart?: ItemId | null,
+	title: string,
+	artist: string,
+};
+
+/**  One row, as far as sorting needs it. */
+export type SortRow_Serialize = {
+	id: ItemId,
+	/**  The other version of the recording: its plays count too. */
+	counterpart: ItemId | null,
+	title: string,
+	artist: string,
+};
+
 export type StreamInfo = StreamInfo_Serialize | StreamInfo_Deserialize;
 
 export type StreamInfo_Deserialize = {
@@ -1718,6 +1886,18 @@ export type Word_Serialize = {
 	t: number | null,
 	end: number | null,
 	text: string,
+};
+
+/**
+ *  A year lookup started: what the cache already knew, and how many albums
+ *  are being read now (at most `YEARS_LIMIT`; `skipped` more were not).
+ */
+export type YearsStart = {
+	job: number,
+	/**  Album id → year; `None`: the album gives no year. */
+	known: { [key in string]: number | null },
+	pending: number,
+	skipped: number,
 };
 
 /* Tauri Specta runtime */

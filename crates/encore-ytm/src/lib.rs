@@ -6,6 +6,7 @@ pub mod history;
 pub mod pages;
 pub mod parse;
 pub mod playlists;
+pub mod releases;
 pub mod scrub;
 pub mod tracking;
 
@@ -37,6 +38,8 @@ enum CursorKind {
     },
     Radio { playlist_id: Option<String> },
     History,
+    /// An artist's release grid (D35).
+    Releases,
 }
 
 #[derive(Clone)]

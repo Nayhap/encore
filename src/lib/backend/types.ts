@@ -77,6 +77,12 @@ export type PrivateSession = B.PrivateSession_Serialize;
 // features: playback (lane A)
 
 // features: library tools (lane B)
+export type SortRow = B.SortRow_Deserialize;
+export type SortFacts = B.SortFacts_Serialize;
+export type YearsStart = B.YearsStart;
+export type LibraryYearEvent = B.LibraryYearEvent_Serialize;
+export type LibraryLikeEvent = B.LibraryLikeEvent_Serialize;
+export type Discography = B.Discography_Serialize;
 
 // features: saved (lane C)
 
