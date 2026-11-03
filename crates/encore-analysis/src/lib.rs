@@ -180,7 +180,7 @@ fn spectra(x: &[f32], n: usize, hop: usize, cancel: &AtomicBool, mut f: impl FnM
     let mut i = 0usize;
     while start + n <= x.len() {
         i += 1;
-        if i % 256 == 0 && cancel.load(Ordering::Relaxed) {
+        if i.is_multiple_of(256) && cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
         for (k, b) in buf.iter_mut().enumerate() {

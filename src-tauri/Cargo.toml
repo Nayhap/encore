@@ -56,6 +56,10 @@ tauri-plugin-single-instance = "2"
 # features: taste and stats (lane D)
 
 # features: integrations (lane E)
+encore-analysis = { path = "../crates/encore-analysis" }
+encore-discord = { path = "../crates/encore-discord" }
+encore-lastfm = { path = "../crates/encore-lastfm" }
+encore-wiki = { path = "../crates/encore-wiki" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

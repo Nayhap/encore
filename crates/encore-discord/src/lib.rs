@@ -175,7 +175,7 @@ fn close_reason(v: &Value) -> String {
 
 #[cfg(unix)]
 fn candidates() -> Vec<std::path::PathBuf> {
-    let mut dirs: Vec<std::path::PathBuf> = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"].iter().filter_map(|k| std::env::var_os(k)).map(Into::into).collect();
+    let mut dirs: Vec<std::path::PathBuf> = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"].iter().filter_map(std::env::var_os).map(Into::into).collect();
     dirs.push("/tmp".into());
     let mut out = vec![];
     for d in dirs {
