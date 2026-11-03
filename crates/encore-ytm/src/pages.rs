@@ -294,6 +294,40 @@ pub fn collection_continuation(resp: &Value, offset: usize) -> Result<Parsed<Vec
     Err("unexpected playlist continuation".into())
 }
 
+// ---------- an artist's releases (D35) ----------
+
+fn cards_of(items: &Value) -> Vec<CollectionCard> {
+    items_of(items).into_iter().filter_map(|i| if let ShelfItem::Collection(c) = i { Some(c) } else { None }).collect()
+}
+
+/// The page an artist's "Albums" or "Singles and EPs" link opens
+/// (`MPAD…` with the shelf's own params): one grid of releases, and a
+/// continuation when YouTube pages it.
+pub fn releases(resp: &Value) -> Result<Parsed<Vec<CollectionCard>>, String> {
+    let sl = section_list(resp).ok_or("no releases in browse response")?;
+    let grid = sl
+        .get("contents")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|s| s.get("gridRenderer").or_else(|| s.get("itemSectionRenderer").and_then(|i| find(i, "gridRenderer"))))
+        .ok_or("no release grid")?;
+    let items = grid.get("items").unwrap_or(&Value::Null);
+    let cont = next_continuation(grid).map(Cont::Query).or_else(|| item_continuation(items).map(Cont::Body));
+    Ok(Parsed { value: cards_of(items), cont, warnings: 0 })
+}
+
+/// The next page of a release grid, old (`gridContinuation`) or new
+/// (appended items) style.
+pub fn releases_continuation(resp: &Value) -> Result<Parsed<Vec<CollectionCard>>, String> {
+    if let Some(items) = appended_items(resp) {
+        return Ok(Parsed { value: cards_of(items), cont: item_continuation(items).map(Cont::Body), warnings: 0 });
+    }
+    let g = resp.get("continuationContents").and_then(|c| c.get("gridContinuation")).ok_or("unexpected releases continuation")?;
+    let items = g.get("items").unwrap_or(&Value::Null);
+    Ok(Parsed { value: cards_of(items), cont: next_continuation(g).map(Cont::Query).or_else(|| item_continuation(items).map(Cont::Body)), warnings: 0 })
+}
+
 // ---------- artist ----------
 
 pub fn artist(resp: &Value, id: &ItemId) -> Result<Parsed<Artist>, String> {

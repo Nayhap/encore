@@ -117,6 +117,12 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             features::playback::sleep_cancel,
 
             // features: library tools (lane B)
+            features::library_tools::library_sort_facts,
+            features::library_tools::library_years,
+            features::library_tools::library_years_stop,
+            features::library_tools::library_like,
+            features::library_tools::library_like_stop,
+            features::library_tools::library_discography,
 
             // features: saved (lane C)
             features::saved::bookmarks_list,
@@ -172,6 +178,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             // features: playback (lane A)
 
             // features: library tools (lane B)
+            features::library_tools::LibraryYearEvent,
+            features::library_tools::LibraryLikeEvent,
 
             // features: saved (lane C)
 

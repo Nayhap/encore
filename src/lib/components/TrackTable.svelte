@@ -18,6 +18,9 @@
     extraMenu,
     endMenu,
     reorder,
+    select,
+    tag,
+    metric,
   }: {
     tracks: Track[];
     label: string;
@@ -34,7 +37,15 @@
     endMenu?: (index: number) => MenuItem[];
     /** Drag rows to reorder: the row at `from` takes the place of `to`. */
     reorder?: (from: number, to: number) => void;
+    /** Select mode (D34): a box per row; a click or Space toggles it,
+     *  Shift-click selects a range. */
+    select?: { has: (i: number) => boolean; toggle: (i: number, range: boolean) => void };
+    /** A short tag after the title ("Copy", "Video"). */
+    tag?: (i: number) => { text: string; strong?: boolean } | null;
+    /** The value a list is sorted by, in the plays column's place. */
+    metric?: { label: string; value: (i: number) => string | null };
   } = $props();
+  const numCol = $derived(showPlays || !!metric);
 
   const menuFor = (i: number) => {
     const items = trackMenu(tracks[i].id);
@@ -61,19 +72,23 @@
   };
 
   function rowKey(e: KeyboardEvent, i: number) {
-    if (e.key === "Enter") {
+    if (select && (e.key === " " || e.key === "Enter") && e.target === e.currentTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      select.toggle(i, e.shiftKey);
+    } else if (e.key === "Enter") {
       e.preventDefault();
       play(i);
     }
   }
 </script>
 
-<div class="table" class:no-album={!showAlbum} class:plays={showPlays} role="table" aria-label="{label} songs">
+<div class="table" class:no-album={!showAlbum} class:plays={numCol} class:selecting={!!select} role="table" aria-label="{label} songs">
   {#if head}<div class="row head" role="row">
     <span role="columnheader">#</span>
     <span role="columnheader">Title</span>
     {#if showAlbum}<span role="columnheader">Album</span>{/if}
-    {#if showPlays}<span role="columnheader" class="r">Plays</span>{/if}
+    {#if numCol}<span role="columnheader" class="r">{metric?.label ?? "Plays"}</span>{/if}
     <span role="columnheader" class="r"><Icon name="clock" size={15} /></span>
     <span></span>
   </div>{/if}
@@ -81,8 +96,12 @@
     {@const id = t.id}
     {@const current = player.current?.id === id}
     {@const artist = t.artists.find((a) => a.id)}
+    {@const picked = !!select?.has(i)}
+    {@const tg = tag?.(i)}
     <div
       class="row"
+      class:picked
+      aria-selected={select ? picked : undefined}
       class:current
       class:unplayable={!downloads.playable(t)}
       class:over={reorder && dragOver === i && dragFrom !== null && dragFrom !== i}
@@ -95,19 +114,24 @@
       ondrop={reorder ? () => drop(i) : undefined}
       role="row"
       tabindex="0"
-      ondblclick={() => play(i)}
+      ondblclick={() => !select && play(i)}
+      onclick={select ? (e) => !(e.target as HTMLElement).closest("button:not(.box)") && select.toggle(i, e.shiftKey) : undefined}
       onkeydown={(e) => rowKey(e, i)}
       oncontextmenu={(e) => ui.openMenu(e, menuFor(i))}
     >
       <span class="n" role="cell">
-        {#if current && player.playing}
+        {#if select}
+          <button class="box" class:on={picked} role="checkbox" aria-checked={picked} aria-label="Select {t.title}" onclick={(e) => (e.stopPropagation(), select.toggle(i, e.shiftKey))}>
+            {#if picked}<Icon name="check" size={13} stroke={2.6} />{/if}
+          </button>
+        {:else if current && player.playing}
           <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
         {:else}
           <span class="mono num">{i + 1}</span>
         {/if}
-        <button class="rowplay" aria-label={current && player.playing ? "Pause" : `Play ${t.title}`} onclick={() => play(i)}>
+        {#if !select}<button class="rowplay" aria-label={current && player.playing ? "Pause" : `Play ${t.title}`} onclick={() => play(i)}>
           <Icon name={current && player.playing ? "pause" : "play"} size={15} />
-        </button>
+        </button>{/if}
       </span>
       <span class="title" role="cell">
         {#if showArt}<span class="thumb"><Cover art={t.art} radius={4} size={120} label={t.title} /></span>{/if}
@@ -115,6 +139,7 @@
           <span class="t">
             <span class="ell">{t.title}</span>
             {#if t.explicit}<span class="e" title="Explicit">E</span>{/if}
+            {#if tg}<span class="tag" class:strong={tg.strong}>{tg.text}</span>{/if}
           </span>
           {#if artist?.id}
             <button class="a ell" onclick={() => nav.go({ name: "artist", id: artist.id! })}>{artistLine(t)}</button>
@@ -132,7 +157,8 @@
           {/if}
         </span>
       {/if}
-      {#if showPlays}<span role="cell" class="r mono dim">{t.plays?.replace(/ plays?$/, "") ?? "—"}</span>{/if}
+      {#if metric}<span role="cell" class="r mono dim">{metric.value(i) ?? "—"}</span>
+      {:else if showPlays}<span role="cell" class="r mono dim">{t.plays?.replace(/ plays?$/, "") ?? "—"}</span>{/if}
       <span role="cell" class="r tail">
         <DownloadMark {id} />
         <button
@@ -176,6 +202,44 @@
   }
   .row.dragging {
     opacity: 0.4;
+  }
+  .selecting .row:not(.head) {
+    cursor: default;
+  }
+  .row.picked,
+  .row.picked:hover {
+    background: var(--accent-soft);
+  }
+  .box {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    box-shadow: inset 0 0 0 1.5px var(--dim);
+    color: var(--accent-ink);
+    transition: background-color 0.12s, box-shadow 0.12s;
+  }
+  .row:hover .box:not(.on) {
+    box-shadow: inset 0 0 0 1.5px var(--mute);
+  }
+  .box.on {
+    background: var(--accent);
+    box-shadow: none;
+  }
+  .tag {
+    flex: none;
+    padding: 1px 7px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 650;
+    color: var(--mute);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .tag.strong {
+    color: var(--accent);
+    box-shadow: none;
+    background: var(--accent-soft);
   }
   .table {
     --cols: 40px minmax(0, 1.6fr) minmax(0, 1fr) 112px 40px;
