@@ -8,6 +8,7 @@
   import { Resource } from "$lib/load.svelte";
   import { listening, minutesText, nav, periodName, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
+  import Icon from "$lib/components/Icon.svelte";
   import Status from "$lib/components/Status.svelte";
 
   const SHORT = 5;
@@ -35,12 +36,25 @@
     void res.reload();
   });
 
-  // This month first, then every month with plays, then the years.
+  // The periods to step through, newest first: this month and every month
+  // with plays, or the years with plays. Previous and Next stop at the ends.
+  const key = (p: StatsPeriod) => p.year * 100 + (p.month ?? 0);
   const months = $derived.by(() => {
     const m = overview.data?.months ?? [];
-    return m.some((x) => same(x, thisMonth)) ? m : [thisMonth, ...m];
+    return (m.some((x) => same(x, thisMonth)) ? m : [thisMonth, ...m]).toSorted((a, b) => key(b) - key(a));
   });
   const years = $derived([...new Set(months.map((m) => m.year))].map((year): StatsPeriod => ({ year, month: null })));
+  const byYear = $derived(period.month == null);
+  const steps = $derived(byYear ? years : months);
+  const at = $derived(steps.findIndex((x) => same(x, period)));
+  const older = $derived(at >= 0 && at < steps.length - 1 ? steps[at + 1] : null);
+  const newer = $derived(at > 0 ? steps[at - 1] : null);
+  /** Month or Year: a year opens on the period's year, a month on that year's latest. */
+  function scale(year: boolean) {
+    if (year === byYear) return;
+    period = year ? { year: period.year, month: null } : (months.find((m) => m.year === period.year) ?? thisMonth);
+  }
+  const title = (p: StatsPeriod) => (p.month == null ? String(p.year) : `${periodName(p)}${p.year === today.getFullYear() ? ` ${p.year}` : ""}`);
   const s = $derived(res.data && same(res.data.period, period) ? res.data : null);
   const none = $derived(overview.data && !overview.data.months.length);
 
@@ -71,14 +85,16 @@
     <p>Encore counts what you play on this computer: a song counts once you've heard half of it, or four minutes. Nothing leaves your computer.</p>
   </div>
 {:else}
-  <div class="periods" role="group" aria-label="Period">
-    {#each months as m (m.year * 100 + (m.month ?? 0))}
-      <button class="chip" aria-pressed={same(m, period)} onclick={() => (period = m)}>{periodName(m)}</button>
-    {/each}
-    <span class="sep" aria-hidden="true"></span>
-    {#each years as y (y.year)}
-      <button class="chip" aria-pressed={same(y, period)} onclick={() => (period = y)}>{y.year}</button>
-    {/each}
+  <div class="periods">
+    <div class="step" role="group" aria-label="Period">
+      <button class="icon-btn" aria-label="Previous {byYear ? 'year' : 'month'}{older ? `: ${title(older)}` : ''}" disabled={!older} onclick={() => older && (period = older)}><Icon name="left" size={18} /></button>
+      <h2 class="now" aria-live="polite">{title(period)}</h2>
+      <button class="icon-btn" aria-label="Next {byYear ? 'year' : 'month'}{newer ? `: ${title(newer)}` : ''}" disabled={!newer} onclick={() => newer && (period = newer)}><Icon name="right" size={18} /></button>
+    </div>
+    <div class="scale" role="radiogroup" aria-label="Show stats by">
+      <button role="radio" aria-checked={!byYear} onclick={() => scale(false)}>Month</button>
+      <button role="radio" aria-checked={byYear} onclick={() => scale(true)}>Year</button>
+    </div>
   </div>
 
   <Status loading={res.loading && !s} error={res.error} onretry={() => res.reload()} />
@@ -87,9 +103,10 @@
     <p class="quiet">Nothing played in {periodName(period)}{same(period, thisMonth) ? " yet" : ""}.</p>
   {:else if s}
     <div class="figures" class:busy={res.loading}>
-      <div><b class="mono">{minutesText(s.minutes)}</b><span>listened</span></div>
-      <div><b class="mono">{s.plays.toLocaleString()}</b><span>{s.plays === 1 ? "play" : "plays"}</span></div>
-      <div><b class="mono">{s.songs.toLocaleString()}</b><span>{s.songs === 1 ? "song" : "songs"}</span></div>
+      <div class="total">
+        <b class="mono">{minutesText(s.minutes)}</b>
+        <span>listened · {plays(s.plays)} of {s.songs === 1 ? "1 song" : `${s.songs.toLocaleString()} songs`}</span>
+      </div>
       <div class="hours">
         <div class="bars" role="img" aria-label={peakHour != null ? `Listening by hour of day, most around ${hourName(peakHour)}` : "Listening by hour of day"}>
           {#each hours as m, h}
@@ -122,10 +139,10 @@
         <ol class="rank">
           {#each top(s.topArtists) as a, i (a.id ?? a.name)}
             <li>
-              <button class="row" disabled={!a.id} onclick={() => a.id && nav.go({ name: "artist", id: a.id })}>
+              <button class="row" disabled={!a.id} title="{a.name} · {minutesText(a.minutes)}" onclick={() => a.id && nav.go({ name: "artist", id: a.id })}>
                 <span class="n mono">{i + 1}</span>
                 <Cover art={artistArt(a)} size={80} round label={a.name} />
-                <span class="t"><b class="clamp1">{a.name}</b><small>{minutesText(a.minutes)}</small></span>
+                <span class="t"><b class="clamp1">{a.name}</b></span>
                 <span class="c">{plays(a.plays)}</span>
               </button>
             </li>
@@ -134,7 +151,7 @@
       </section>
     </div>
     {#if s.topSongs.length > SHORT || s.topArtists.length > SHORT}
-      <button class="pill more" onclick={() => (all = !all)}>{all ? "Show fewer" : "Show top 10"}</button>
+      <div class="more"><button class="pill" aria-expanded={all} onclick={() => (all = !all)}>{all ? "Show top 5" : "Show top 10"}</button></div>
     {/if}
 
     {#if s.topAlbums.length}
@@ -153,16 +170,19 @@
     {/if}
 
     {#if s.newSongs}
-      <section class="new">
-        <h2>New to you</h2>
-        <p>{s.newSongs === 1 ? "1 song" : `${s.newSongs.toLocaleString()} songs`} you played for the first time{period.month == null ? ` in ${period.year}` : same(period, thisMonth) ? " this month" : ` in ${periodName(period)}`}.</p>
-        <div class="fresh">
-          {#each s.newTop as t, i (t.id)}
-            <button onclick={() => playFrom(s.newTop, i, `New to you · ${periodName(period)}`)} oncontextmenu={(e) => ui.openMenu(e, trackMenu(t.id))} title="{t.title} · {artistLine(t)}" aria-label="Play {t.title}">
-              <Cover art={t.art} size={120} radius={6} label={t.title} />
-            </button>
+      <section>
+        <h2>New to you <small>{s.newSongs === 1 ? "1 song" : `${s.newSongs.toLocaleString()} songs`} first played {period.month == null ? `in ${period.year}` : same(period, thisMonth) ? "this month" : `in ${periodName(period)}`}</small></h2>
+        <ol class="rank fresh">
+          {#each s.newTop.slice(0, all ? 10 : SHORT) as t, i (t.id)}
+            {@const cur = player.current?.id === t.id}
+            <li>
+              <button class="row" class:cur onclick={() => playFrom(s.newTop, i, `New to you · ${periodName(period)}`)} oncontextmenu={(e) => ui.openMenu(e, trackMenu(t.id))} aria-label="Play {t.title}">
+                <Cover art={t.art} size={80} radius={6} label={t.title} />
+                <span class="t"><b class="clamp1">{t.title}</b><small class="clamp1">{artistLine(t)}</small></span>
+              </button>
+            </li>
           {/each}
-        </div>
+        </ol>
       </section>
     {/if}
   {/if}
@@ -175,20 +195,45 @@
 <style>
   .periods {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     margin-top: 18px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    padding-bottom: 2px;
   }
-  .periods .chip {
-    flex: none;
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
-  .sep {
-    flex: none;
-    width: 1px;
-    margin: 6px 4px;
-    background: var(--line);
+  .step .icon-btn:disabled {
+    opacity: 0.3;
+  }
+  .step .now {
+    min-width: 7.5em;
+    margin: 0;
+    text-align: center;
+    font-size: 19px;
+    font-variant-numeric: tabular-nums;
+  }
+  .scale {
+    display: flex;
+    padding: 3px;
+    gap: 2px;
+    border-radius: 10px;
+    background: var(--hover);
+  }
+  .scale button {
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--mute);
+  }
+  .scale button[aria-checked="true"] {
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
   }
   .figures {
     display: flex;
@@ -207,13 +252,13 @@
   }
   .figures b {
     font-family: var(--font-display);
-    font-size: 30px;
+    font-size: 40px;
     font-weight: 700;
     letter-spacing: -0.02em;
     line-height: 1.1;
   }
   .figures span {
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--mute);
   }
   .hours {
@@ -301,7 +346,29 @@
     text-overflow: ellipsis;
   }
   .more {
-    margin: 6px 0 0 4px;
+    display: flex;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  .more .pill {
+    height: 32px;
+    font-size: 13px;
+  }
+  h2 small {
+    margin-left: 8px;
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 450;
+    letter-spacing: 0;
+    color: var(--mute);
+  }
+  .fresh {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0 36px;
+  }
+  .fresh .row {
+    grid-template-columns: 40px 1fr;
   }
   .albums {
     display: grid;
@@ -332,30 +399,6 @@
   .album small {
     font-size: 12px;
     color: var(--mute);
-  }
-  .new p {
-    margin: -4px 0 10px 4px;
-    font-size: 13px;
-    color: var(--mute);
-  }
-  .fresh {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-left: 4px;
-  }
-  .fresh button {
-    width: 56px;
-    height: 56px;
-    border-radius: 6px;
-    transition: transform 0.15s var(--ease);
-  }
-  .fresh button:hover {
-    transform: translateY(-2px);
-  }
-  .fresh :global(.cover) {
-    width: 56px;
-    height: 56px;
   }
   .quiet,
   .foot {
