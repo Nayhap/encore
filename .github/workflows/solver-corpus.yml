@@ -1,0 +1,30 @@
+# The whole solver corpus, strict: every fixture player must be fetched
+# and solve (D37). Weekly and on request, apart from pull requests, so a
+# runner YouTube won't answer never blocks a merge but a gap is noticed.
+name: Solver corpus
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  corpus:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ejs-players
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}
+      - run: cargo test -p encore-resolver --release --test ejs_players -- --nocapture
+        env:
+          ENCORE_EJS_PLAYERS: ${{ runner.temp }}/ejs-players
+          ENCORE_EJS_STRICT: "1"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/ejs-players
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}

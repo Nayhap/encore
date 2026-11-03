@@ -119,6 +119,11 @@ solves every player of yt-dlp-ejs's and yt-dlp's own tests, cold and from
 the preprocessed player. The players are YouTube's code, so they are not in
 the repository: the first run fetches them (about 160 MB) into
 `$ENCORE_EJS_PLAYERS`, or Cargo's test tmp folder, and later runs are offline.
+A player that can't be fetched (three tries) is skipped with a message, so a
+CI runner YouTube won't answer doesn't fail the build; set
+`ENCORE_EJS_STRICT=1` to make that a failure, as the weekly Solver corpus
+workflow does and as you should locally before a release. A wrong answer
+always fails.
 
 Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
 Personal fields are scrubbed when they are recorded; never commit a recording

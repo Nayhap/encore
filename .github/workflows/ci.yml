@@ -54,15 +54,23 @@ jobs:
       # The app crate embeds the built UI, so build it before compiling tests.
       - run: bun run build
       # The solver corpus (D37): YouTube's player scripts named in
-      # crates/encore-resolver/upstream.toml, fetched once and kept between
-      # runs, never committed.
-      - uses: actions/cache@v4
+      # crates/encore-resolver/tests/ejs_players.rs, fetched once and kept
+      # between runs, never committed. Restored and saved as two steps so a
+      # failed job still keeps what it fetched (actions/cache saves only on
+      # success, which is why the first runs never had a cache). Players a
+      # runner can't fetch are skipped with a message; a wrong answer fails.
+      - uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ejs-players
-          key: ejs-players-${{ hashFiles('crates/encore-resolver/upstream.toml') }}
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}
       - run: cargo test --workspace
         env:
           ENCORE_EJS_PLAYERS: ${{ runner.temp }}/ejs-players
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/ejs-players
+          key: ejs-players-${{ hashFiles('crates/encore-resolver/tests/ejs_players.rs') }}
       - run: git diff --exit-code src/lib/backend/bindings.ts
       - run: bun run check
       # The release job's update manifest (D24). Bundles here have no

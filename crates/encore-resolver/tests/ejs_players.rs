@@ -6,7 +6,11 @@
 //! The players are YouTube's code, so they are not committed: they are
 //! fetched once from `www.youtube.com/s/player/…` into
 //! `$ENCORE_EJS_PLAYERS` (default: Cargo's test tmp dir) and read from
-//! there afterwards, so later runs are offline.
+//! there afterwards, so later runs are offline. A fetch is tried three
+//! times, paced. A player that still can't be fetched is skipped with a
+//! message, so a CI runner YouTube won't answer doesn't fail the build;
+//! with `ENCORE_EJS_STRICT=1` (locally, and in the scheduled corpus job) it
+//! fails. A wrong answer from a player that was fetched always fails.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,22 +59,47 @@ fn cache_dir() -> PathBuf {
     std::env::var_os("ENCORE_EJS_PLAYERS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ejs-players"))
 }
 
-async fn player(http: &reqwest::Client, id: &str, variant: &str) -> String {
+fn cached(id: &str, variant: &str) -> Option<String> {
+    std::fs::read_to_string(cache_dir().join(format!("{id}-{variant}"))).ok()
+}
+
+fn strict() -> bool {
+    std::env::var("ENCORE_EJS_STRICT").is_ok_and(|v| v == "1")
+}
+
+/// The player from the cache, else fetched (three tries, paced). `Err`
+/// says why it couldn't be had.
+async fn player(http: &reqwest::Client, id: &str, variant: &str) -> Result<String, String> {
     let dir = cache_dir();
     let file = dir.join(format!("{id}-{variant}"));
     if let Ok(s) = std::fs::read_to_string(&file) {
-        return s;
+        return Ok(s);
     }
     let path = VARIANTS.iter().find(|(v, _)| *v == variant).map(|(_, p)| *p).expect("variant");
     let url = format!("https://www.youtube.com/s/player/{id}/{path}");
-    let r = http.get(&url).send().await.unwrap_or_else(|e| panic!("fetching fixture player {id}/{variant} failed ({e}); run once online, or set ENCORE_EJS_PLAYERS to a folder that has them"));
-    assert!(r.status().is_success(), "fixture player {id}/{variant}: {}", r.status());
-    let body = r.text().await.unwrap();
-    std::fs::create_dir_all(&dir).unwrap();
-    let part = file.with_extension("part");
-    std::fs::write(&part, &body).unwrap();
-    std::fs::rename(&part, &file).unwrap();
-    body
+    let mut why = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+        }
+        match http.get(&url).send().await {
+            Ok(r) if r.status().is_success() => match r.text().await {
+                Ok(body) => {
+                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    let part = file.with_extension("part");
+                    std::fs::write(&part, &body).map_err(|e| e.to_string())?;
+                    std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
+                    // Paced, as everything that talks to YouTube is.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    return Ok(body);
+                }
+                Err(e) => why = format!("body: {e}"),
+            },
+            Ok(r) => why = format!("answered {}", r.status()),
+            Err(e) => why = e.to_string(),
+        }
+    }
+    Err(why)
 }
 
 #[test]
@@ -83,13 +112,30 @@ fn the_corpus_is_the_pinned_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_fixture_player_solves() {
-    let http = reqwest::Client::new();
     let solver = QuickJsSolver::new(Limits::default());
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
     let mut failures = Vec::new();
+    let mut missing = Vec::new();
+    let mut missing_in_a_row = 0;
     let (mut cold_total, mut warm_total, mut cold_max, mut runs) = (0u128, 0u128, 0u128, 0u32);
     for case in CASES {
         for variant in case.variants {
-            let code = player(&http, case.player, variant).await;
+            // Three players in a row that couldn't be fetched: YouTube isn't
+            // answering this machine, so the rest aren't tried (only read
+            // from the cache).
+            let offline = missing_in_a_row >= 3;
+            let got = if offline { cached(case.player, variant).ok_or_else(|| "not tried: YouTube didn't answer the ones before".to_string()) } else { player(&http, case.player, variant).await };
+            let code = match got {
+                Ok(c) => {
+                    missing_in_a_row = 0;
+                    c
+                }
+                Err(why) => {
+                    missing_in_a_row += 1;
+                    missing.push(format!("{}/{variant} ({why})", case.player));
+                    continue;
+                }
+            };
             let script = PlayerScript { id: format!("{}/{variant}", case.player), code: Arc::from(code) };
             let mut requests = Vec::new();
             if !case.n.is_empty() {
@@ -135,4 +181,10 @@ async fn every_fixture_player_solves() {
     let n = runs.max(1) as u128;
     eprintln!("solved {runs} player variants: cold {} ms on average (slowest {cold_max} ms), preprocessed {} ms", cold_total / n, warm_total / n);
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    if !missing.is_empty() {
+        let msg = format!("{} fixture players couldn't be fetched and were skipped (set ENCORE_EJS_STRICT=1 to fail instead):\n  {}", missing.len(), missing.join("\n  "));
+        assert!(!strict(), "{msg}");
+        eprintln!("{msg}");
+    }
+    assert!(runs > 0 || !strict(), "no fixture player could be fetched");
 }
