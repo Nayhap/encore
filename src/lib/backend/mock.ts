@@ -449,7 +449,7 @@ if (!new URLSearchParams(location.search).has("empty")) {
 // Built in: nothing to set up. `?needsupdate` shows the notice Settings
 // gives when YouTube changed something only an update fixes.
 const q = new URLSearchParams(location.search);
-const engine = { player: "4efb8b2c/main" as string | null, notice: q.has("needsupdate") ? "YouTube changed how its songs play, and Encore needs an update to follow. Check for updates in Settings." : null };
+const engine = { player: "4efb8b2c/main" as string | null, notice: q.has("needsupdate") ? "YouTube changed how its songs play, and this version of Encore can't follow yet. Check for a newer one under Updates, below." : null };
 function engineStatus(): T.EngineStatus {
   return { solver: "yt-dlp-ejs 0.8.0", engine: "quickjs-ng 0.16.2", extractor: "yt-dlp 2026.10.26 (b77c930)", player: engine.player, notice: engine.notice };
 }

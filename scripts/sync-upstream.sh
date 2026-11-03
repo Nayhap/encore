@@ -4,9 +4,10 @@
 #
 #   scripts/sync-upstream.sh [<yt-dlp commit or branch> [<ejs version>]]
 #
-# Defaults: yt-dlp master and the ejs version that commit pins. Needs git,
-# curl and openssl (3.x, for SHA3-512). Runs no Python: upstream's files are
-# only read. The bundles are replaced only when both hashes match the ones
+# Defaults: yt-dlp master and the ejs version that commit pins. Needs git
+# and curl; SHA3-512 comes from OpenSSL 3 when it has it (macOS's LibreSSL
+# doesn't), else from a small Rust example of encore-resolver (cargo). Runs
+# no Python: upstream's files are only read. The bundles are replaced only when both hashes match the ones
 # yt-dlp pins in jsc/_builtin/vendor/_info.py.
 set -euo pipefail
 
@@ -15,6 +16,14 @@ crate="$here/crates/encore-resolver"
 pins="$crate/upstream.toml"
 target=${1:-master}
 want_ejs=${2:-}
+
+sha3() { # sha3 <file>: the SHA3-512 hex digest
+  if openssl dgst -sha3-512 -r /dev/null >/dev/null 2>&1; then
+    openssl dgst -sha3-512 -r "$1" | cut -d' ' -f1
+  else
+    cargo run -q --manifest-path "$here/Cargo.toml" -p encore-resolver --example sha3 -- "$1"
+  fi
+}
 
 pin() { # pin <section> <key>
   awk -v s="[$1]" -v k="$2" '$0==s{on=1;next} /^\[/{on=0} on && $1==k {gsub(/"/,"",$3); print $3}' "$pins"
@@ -66,12 +75,17 @@ if [ -n "$want_ejs" ] && [ "$want_ejs" != "$ejs" ]; then
 fi
 echo
 echo "== yt-dlp-ejs: pinned $old_ejs, target pins $ejs"
-if [ "$ejs" != "$old_ejs" ]; then
+# The vendored bundles are checked every time, not only when the version
+# moves: a damaged or stale copy is replaced too.
+have_lib=$(sha3 "$crate/vendor/ejs/yt.solver.lib.min.js")
+have_core=$(sha3 "$crate/vendor/ejs/yt.solver.core.min.js")
+if [ "$ejs" != "$old_ejs" ] || [ "$have_lib" != "$lib_hash" ] || [ "$have_core" != "$core_hash" ]; then
+  [ "$ejs" = "$old_ejs" ] && echo "   vendor/ejs doesn't match the pinned hashes: fetching $ejs again"
   for f in yt.solver.lib.min.js yt.solver.core.min.js; do
     curl -fsSL -o "$work/$f" "https://github.com/yt-dlp/ejs/releases/download/$ejs/$f"
   done
-  got_lib=$(openssl dgst -sha3-512 -r "$work/yt.solver.lib.min.js" | cut -d' ' -f1)
-  got_core=$(openssl dgst -sha3-512 -r "$work/yt.solver.core.min.js" | cut -d' ' -f1)
+  got_lib=$(sha3 "$work/yt.solver.lib.min.js")
+  got_core=$(sha3 "$work/yt.solver.core.min.js")
   if [ "$got_lib" != "$lib_hash" ] || [ "$got_core" != "$core_hash" ]; then
     echo "!! the downloaded bundles don't match _info.py; nothing replaced." >&2
     exit 1
@@ -81,6 +95,7 @@ if [ "$ejs" != "$old_ejs" ]; then
   for f in "$pins" "$crate/src/jsc/ejs.rs"; do
     sed -i.bak -e "s/$old_lib/$lib_hash/" -e "s/$old_core/$core_hash/" "$f" && rm -f "$f.bak"
   done
+  # git must keep them byte for byte (.gitattributes): no line-ending changes.
   sed -i.bak -e "/^\[ejs\]/,/^\[/ s/^version = \"$old_ejs\"/version = \"$ejs\"/" "$pins" && rm -f "$pins.bak"
   sed -i.bak -e "s/pub const EJS_VERSION: &str = \"$old_ejs\";/pub const EJS_VERSION: \&str = \"$ejs\";/" "$crate/src/jsc/ejs.rs" && rm -f "$crate/src/jsc/ejs.rs.bak"
   echo "   replaced vendor/ejs with $ejs (hashes verified) and updated upstream.toml and jsc/ejs.rs"

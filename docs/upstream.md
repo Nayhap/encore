@@ -45,15 +45,18 @@ scripts/sync-upstream.sh                 # yt-dlp master, the ejs release it pin
 scripts/sync-upstream.sh <commit> [ejs]  # a given commit or ejs version
 ```
 
-The script needs `git`, `curl` and `openssl` and runs no Python. It fetches
+The script needs `git` and `curl`, and runs no Python. SHA3-512 comes from
+OpenSSL 3 when it has it; macOS's `/usr/bin/openssl` (LibreSSL) doesn't, and
+then the script uses `cargo run -p encore-resolver --example sha3`. It fetches
 both the pinned and the target commit of yt-dlp (and of ejs), then prints:
 
 1. the whole diff of each ported file between the two commits (not only the
    old line ranges: moved functions and new helpers show too);
 2. `INNERTUBE_CLIENTS` at the target, next to `innertube_clients.json`;
-3. the target ejs version and hashes from `vendor/_info.py`. When they
-   changed, it downloads both bundles from the ejs release, checks their
-   SHA3-512 against `_info.py` and replaces `vendor/ejs/` (it refuses on a
+3. the target ejs version and hashes from `vendor/_info.py`. When the
+   version changed, or the vendored files don't match those hashes, it
+   downloads both bundles from the ejs release, checks their SHA3-512
+   against `_info.py` and replaces `vendor/ejs/` (it refuses on a
    mismatch);
 4. the player ids in ejs `tests.ts` and yt-dlp `test_ejs_integration.py`.
 

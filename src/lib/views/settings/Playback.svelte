@@ -10,10 +10,16 @@
   // The built-in player engine (D37): versions folded away, one reset.
   let engine = $state<EngineStatus | null>(null);
   let showEngine = $state(false);
+  // Asked again while Settings is open, so a notice set by a song that
+  // fails meanwhile (or cleared by one that plays) shows here.
   onMount(() => {
-    call((a) => a.playerEngine())
-      .then((e) => (engine = e))
-      .catch(() => {});
+    const read = () =>
+      call((a) => a.playerEngine())
+        .then((e) => (engine = e))
+        .catch(() => {});
+    read();
+    const t = setInterval(read, 4000);
+    return () => clearInterval(t);
   });
   async function resetEngine() {
     const e = await settings.run("engine", () => call((a) => a.playerEngineReset()));

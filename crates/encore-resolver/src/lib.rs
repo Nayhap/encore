@@ -1027,6 +1027,15 @@ mod tests {
         assert!(!Cause::Refused(403).final_now());
     }
 
+    #[test]
+    fn the_versions_shown_are_the_pinned_ones() {
+        let pins = include_str!("../upstream.toml");
+        let commit = pins.split("[yt_dlp]").nth(1).and_then(|s| s.split("commit = \"").nth(1)).and_then(|s| s.split('"').next()).unwrap();
+        assert!(commit.starts_with(YT_DLP_COMMIT), "YT_DLP_COMMIT {YT_DLP_COMMIT} isn't upstream.toml's {commit}");
+        assert!(pins.contains(&format!("version = \"{YT_DLP_VERSION}\"")), "YT_DLP_VERSION isn't upstream.toml's");
+        assert!(pins.contains(&format!("quickjs_ng = \"{}\"", ENGINE.trim_start_matches("quickjs-ng "))), "ENGINE isn't upstream.toml's");
+    }
+
     #[tokio::test]
     async fn the_solver_checks_itself_offline() {
         assert!(solver_self_check().await.is_ok());
