@@ -102,6 +102,8 @@ pub struct Player {
     link: Arc<AtomicU64>,
     /// Held while a play or preload resolves; downloads wait for it.
     gate: Arc<PlaybackGate>,
+    /// Ends the play being reported before Encore quits (D24).
+    settle: Mutex<Option<history::Settle>>,
 }
 
 fn s(n: u64) -> String {
@@ -159,6 +161,7 @@ impl Player {
             online: Arc::new(AtomicBool::new(true)),
             link: Arc::new(AtomicU64::new(0)),
             gate: Arc::new(PlaybackGate::default()),
+            settle: Mutex::new(None),
         });
         p.engine.set_volume(0.8);
         // Engine events arrive on a std channel; forward them into the runtime.
@@ -199,7 +202,19 @@ impl Player {
     /// and Encore is online).
     pub fn report_history(&self, reporter: Arc<dyn PlayReporter>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let _guard = self.rt.enter();
-        history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.link.clone(), on_registered);
+        let s = history::HistoryReporter::spawn(self.subscribe(), reporter, self.reporting.clone(), self.link.clone(), on_registered);
+        *self.settle.lock() = Some(s);
+    }
+
+    /// Before Encore quits or installs an update (D24): the play being
+    /// reported ends, and its last ping goes out within `bound`. Returns
+    /// false when it didn't make it in time.
+    pub async fn settle_history(&self, bound: Duration) -> bool {
+        let s = self.settle.lock().clone();
+        match s {
+            Some(s) => s.settle(bound).await,
+            None => true,
+        }
     }
 
     /// Play downloaded songs from disk (D23).
@@ -324,6 +339,12 @@ impl Player {
 
     pub fn on_persist(&self, f: impl Fn(&Queue, f64) + Send + Sync + 'static) {
         *self.on_persist.lock() = Some(Box::new(f));
+    }
+
+    /// Save the queue and position now rather than on the next 5 s tick
+    /// (before Encore quits, D24).
+    pub fn persist_now(&self) {
+        self.persist();
     }
 
     fn persist(&self) {

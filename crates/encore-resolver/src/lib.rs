@@ -89,6 +89,8 @@ pub struct YtDlpResolver {
     http: reqwest::Client,
     cache: Mutex<HashMap<String, Cached>>,
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Encore is quitting or installing an update: no helper starts (D24).
+    closed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +197,7 @@ impl YtDlpResolver {
             http: reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(20)).build().expect("http"),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
+            closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -210,6 +213,28 @@ impl YtDlpResolver {
         }
     }
 
+    /// Before Encore quits or installs an update (D24): no new helper
+    /// starts, and the running ones are killed and waited for. Dropping a
+    /// helper only sends the kill, and the Windows installer path ends in
+    /// `process::exit`, which runs no destructors: a helper left running
+    /// would keep files of the old install open. A call in progress keeps
+    /// its slot until it ends, so the caller bounds the wait.
+    pub async fn shut_down(&self) {
+        use std::sync::atomic::Ordering;
+        self.closed.store(true, Ordering::SeqCst);
+        for m in &self.pool {
+            let h = m.lock().await.take();
+            if let Some(mut h) = h {
+                let _ = h.child.kill().await;
+            }
+        }
+    }
+
+    /// Quitting didn't happen after all: helpers may start again.
+    pub fn reopen(&self) {
+        self.closed.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The installed set, with the helper script written next to it.
     fn env(&self) -> Result<Env, PlayFailure> {
         let generation = self.runtimes.generation();
@@ -222,6 +247,9 @@ impl YtDlpResolver {
     }
 
     async fn spawn(&self, env: &Env) -> Result<Helper, PlayFailure> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(fail(PlayFailureKind::Unknown, "Encore is closing."));
+        }
         let mut cmd = runtimes::helper_command(&env.python, self.runtimes.deno_dir());
         cmd.arg("-I").arg(&env.helper).arg("--site").arg(&env.site).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| fail(PlayFailureKind::Unknown, format!("could not start the resolver: {}", e.kind())))?;
