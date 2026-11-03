@@ -65,7 +65,9 @@ const folder = async (id: string) => {
   if (!f) throw fail("That folder is gone.", "notFound");
   return f;
 };
-const ok = <X>(v: X) => new Promise<X>((r) => setTimeout(() => r(structuredClone(v)), 60));
+// A JSON copy, as the real IPC makes: what the UI passes in may be a
+// reactive proxy, which structuredClone refuses.
+const ok = <X>(v: X) => new Promise<X>((r) => setTimeout(() => r(JSON.parse(JSON.stringify(v)) as X), 60));
 
 export const mockSaved: SavedApi = {
   bookmarks: async () => ok((await box()).bookmarks),
