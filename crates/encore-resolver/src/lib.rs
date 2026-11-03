@@ -115,7 +115,7 @@ pub struct SolveTime {
 }
 
 /// The built-in engine, for Settings → Playback (D37).
-#[derive(Clone, Debug, Serialize, specta::Type)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     /// "yt-dlp-ejs 0.8.0"
