@@ -4,21 +4,24 @@
 
   let { title, sub, onall, children }: { title: string; sub?: string; onall?: () => void; children: Snippet } = $props();
 
-  let row: HTMLDivElement;
+  let row: HTMLDivElement | null = $state(null);
   let atStart = $state(true);
   let atEnd = $state(false);
 
+  // A ResizeObserver or scroll event can arrive after the shelf has gone.
   function update() {
+    if (!row) return;
     atStart = row.scrollLeft < 4;
     atEnd = row.scrollLeft + row.clientWidth >= row.scrollWidth - 4;
   }
   $effect(() => {
+    if (!row) return;
     update();
     const ro = new ResizeObserver(update);
     ro.observe(row);
     return () => ro.disconnect();
   });
-  const page = (dir: number) => row.scrollBy({ left: dir * row.clientWidth * 0.85, behavior: "smooth" });
+  const page = (dir: number) => row?.scrollBy({ left: dir * row.clientWidth * 0.85, behavior: "smooth" });
 </script>
 
 <section class="shelf">
