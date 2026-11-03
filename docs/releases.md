@@ -38,12 +38,28 @@ Then publish, and make sure it is marked **Latest**: that is the release
 
 ## Pulling a bad release
 
-1. On GitHub, mark it a pre-release or delete it. `releases/latest` falls
-   back to the one before, so Encore stops offering it within a check; an
-   Encore that already downloaded it but hasn't installed it yet drops it
-   at its next check.
-2. Encores that already installed it stay on it (there are no downgrades):
-   fix it in a new release with a higher version, as soon as you can.
+The fix is a new release with a higher version, as soon as you can:
+Encores that installed the bad one stay on it (there are no downgrades),
+and the new one replaces it everywhere, including where it is downloaded
+but not installed yet.
+
+To stop it spreading until then, mark it a pre-release (or delete it), and
+`releases/latest` falls back to the release before. What that does depends
+on whether the one before has a `latest.json`:
+
+- **It has one** (a version that updates itself, older than the bad one):
+  Encore stops offering the bad version at its next check, and an Encore
+  that downloaded it but hasn't installed it drops it then.
+- **It has none** (the bad release is the first that updates itself): the
+  check finds no manifest, which Encore treats as a failed check, so an
+  Encore that already downloaded the bad version **still installs it** when
+  it quits. Attach to the release before a `latest.json` naming that
+  release's own version, `{"version": "0.4.0", "platforms": {}}`: Encore
+  then finds nothing newer than itself and drops the staged copy. (It is
+  never installed, so it needs no signatures.)
+
+Either way, a staged copy on someone's computer is only dropped by a check
+that answers with an older or no newer version.
 
 ## The signing key
 

@@ -57,8 +57,35 @@ jobs:
         run: |
           sudo apt-get install -y minisign
           scripts/test-release-manifest.sh
+      # Signed with a throwaway key made here, never the release secrets:
+      # the updater packages the release workflow uploads are made, under
+      # the names it expects (D24).
+      - name: Throwaway signing key
+        shell: bash
+        run: |
+          pw=$(openssl rand -hex 16)
+          bun run tauri signer generate --ci -w "$RUNNER_TEMP/throwaway.key" -p "$pw" >/dev/null
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<KEY"
+            cat "$RUNNER_TEMP/throwaway.key"
+            echo
+            echo "KEY"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$pw"
+          } >> "$GITHUB_ENV"
       - name: Bundle
-        run: bun run tauri build --bundles ${{ matrix.bundles }}
+        run: bun run tauri build --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
+      - name: Updater packages
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            macOS) want=target/release/bundle/macos/Encore.app.tar.gz ;;
+            Windows) want="$(ls target/release/bundle/nsis/*-setup.exe) $(ls target/release/bundle/msi/*.msi)" ;;
+            Linux) want="$(ls target/release/bundle/appimage/*.AppImage)" ;;
+          esac
+          for f in $want; do
+            [ -s "$f" ] && [ -s "$f.sig" ] || { echo "missing $f or its .sig, which release.yml uploads"; exit 1; }
+            echo "ok: $f.sig"
+          done
       # Run the built artifact the way users get it: set up yt-dlp with the
       # system's Python, resolve a song and decode it. This is the path the
       # AppImage playback and no-audio-device bugs hid in.
