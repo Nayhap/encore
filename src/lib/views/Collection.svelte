@@ -11,21 +11,25 @@
   import Status from "$lib/components/Status.svelte";
   import TrackTable from "$lib/components/TrackTable.svelte";
 
-  let { id }: { id: string } = $props();
+  let { id, params = null }: { id: string; params?: string | null } = $props();
 
   let entries = $state<Entry[]>([]);
   let cursor = $state<string | null>(null);
   let loadingMore = $state(false);
+  /** The service said the list ended: every row is here (D10). */
+  let complete = $state(false);
   const res = new Resource<Collection>(async () => {
-    const c = await call((a) => a.collection(id));
+    const c = await call((a) => a.collection(id, params));
     catalog.addCollection(c);
     entries = c.entries;
     cursor = c.cursor;
+    complete = !c.cursor;
     return c;
   });
   const c = $derived(res.data);
 
-  // Load the rest of a long playlist in the background, in order.
+  // Load the rest of a long playlist in order, a page at a time: each one
+  // waits its turn behind playback and downloads in Rust (D10, D23).
   $effect(() => {
     if (cursor && !loadingMore) void more();
   });
@@ -37,8 +41,10 @@
       catalog.addTracks(p.entries.map((e) => e.track));
       entries = [...entries, ...p.entries];
       cursor = p.cursor;
+      complete = p.complete;
     } catch {
       cursor = null;
+      complete = false;
     } finally {
       loadingMore = false;
     }
@@ -61,7 +67,7 @@
 
   // Offline and not kept, the header plays the downloaded songs it shows.
   function playHere(shuffle: boolean) {
-    if (ui.online || downloads.keptFor(id)) return player.playCollection(id, 0, shuffle);
+    if (ui.online || downloads.keptFor(id)) return player.playCollection(id, 0, shuffle, params);
     const local = tracks.filter((t) => downloads.has(t.id));
     player.playTracks(local, shuffle ? Math.floor(Math.random() * local.length) : 0, { label: c?.title ?? "Downloads", collectionId: id, radioPlaylist: null }, shuffle);
   }
@@ -69,8 +75,8 @@
   const mine = $derived(!!c?.editable && account.signedIn && !!c?.playlistId && ui.online);
   const privacyLabel = { private: "Private", unlisted: "Unlisted", public: "Public" } as const;
   const privacyIcon = { private: "lock", unlisted: "link", public: "globe" } as const;
-  // Reorder only a fully loaded list of rows that have entry ids (D10).
-  const canReorder = $derived(mine && !cursor && !loadingMore && entries.length > 1 && entries.every((e) => !!e.setVideoId));
+  // Reorder only a list known to be whole, of rows that have entry ids (D10).
+  const canReorder = $derived(mine && complete && !loadingMore && entries.length > 1 && entries.every((e) => !!e.setVideoId));
   let moving = $state(false);
 
   /** The row at `from` takes the place of the row at `to`. */

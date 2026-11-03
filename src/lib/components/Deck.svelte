@@ -1,8 +1,9 @@
 <script lang="ts">
   import { mod } from "$lib/platform";
   import { artistLine, fmt } from "$lib/data";
-  import { nav, player, trackMenu, ui } from "$lib/state.svelte";
+  import { deckMenuItems, nav, player, trackMenu, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import DeckChips from "./DeckChips.svelte";
   import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
   import SongMap from "./SongMap.svelte";
@@ -44,7 +45,7 @@
         disabled={!ui.online}
         onclick={() => player.toggleLike(tr.id)}
       ><Icon name={player.liked.has(tr.id) ? "heartFill" : "heart"} size={19} /></button>
-      <button class="icon-btn more" aria-label="More actions" onclick={(e) => ui.openMenu(e, trackMenu(tr.id))}><Icon name="more" size={18} /></button>
+      <button class="icon-btn more" aria-label="More actions" onclick={(e) => ui.openMenu(e, [...trackMenu(tr.id), ...deckMenuItems.items()])}><Icon name="more" size={18} /></button>
     </div>
 
     <div class="transport">
@@ -71,6 +72,7 @@
     </div>
 
     <div class="tools">
+      <DeckChips />
       <button class="icon-btn" class:on={ui.theater} aria-label="Full-screen lyrics" title="Full-screen lyrics (F)" onclick={() => (ui.theater = !ui.theater)}><Icon name="lyrics" size={19} /></button>
       <button class="icon-btn" class:on={ui.stageOpen} aria-pressed={ui.stageOpen} aria-label="Now playing panel" title="Now playing panel ({mod('\\')})" onclick={() => (ui.stageOpen = !ui.stageOpen)}><Icon name="stage" size={19} /></button>
       <div class="volume">

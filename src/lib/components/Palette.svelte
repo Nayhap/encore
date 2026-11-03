@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { call, type AnyArt, type SearchResults } from "$lib/backend";
+  import { call, type SearchResults } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, fmt, kindLabel } from "$lib/data";
-  import { downloads, nav, needsOnline, newPlaylist, playArtist, player, ui } from "$lib/state.svelte";
+  import { downloads, nav, needsOnline, newPlaylist, paletteItems, playArtist, player, ui, type PaletteItem } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -11,18 +11,7 @@
   // Shift+Enter puts a song next in the queue. Search is debounced (200 ms)
   // and stale answers are dropped.
 
-  type Result = {
-    key: string;
-    group: string;
-    title: string;
-    sub: string;
-    art?: AnyArt;
-    round?: boolean;
-    icon?: string;
-    hint?: string;
-    run: () => void;
-    alt?: () => void;
-  };
+  type Result = PaletteItem;
 
   let q = $state("");
   let sel = $state(0);
@@ -56,6 +45,8 @@
 
   const actions = $derived<Result[]>([
     ...downloadActions,
+    // The feature modules' commands (features/hooks).
+    ...paletteItems.items(q.trim()),
     { key: "a-shuffle", group: "Actions", icon: "shuffle", title: player.shuffle ? "Turn shuffle off" : "Turn shuffle on", sub: "Playback", hint: "S", run: () => player.toggleShuffle() },
     { key: "a-repeat", group: "Actions", icon: "repeat", title: "Change repeat mode", sub: "Off, queue, or this song", hint: "R", run: () => player.cycleRepeat() },
     { key: "a-lyrics", group: "Actions", icon: "lyrics", title: "Open full-screen lyrics", sub: "Playback", hint: "F", run: () => (ui.theater = true) },

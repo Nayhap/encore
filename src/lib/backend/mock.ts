@@ -3,6 +3,8 @@
 import * as M from "./mockdata";
 import type { Api, Handlers } from "./index";
 import type * as T from "./types";
+import { mockFeatures } from "./mock/index";
+import { mockPlayer } from "./mock/playback";
 
 const art = (a: M.Art): T.ArtRef => ({ key: `mock:${a.seed}:${a.motif}`, h1: a.h1, h2: a.h2 });
 const mid = (id: string) => `mock:${id}`;
@@ -141,6 +143,7 @@ function snap(): T.PlayerSnapshot {
     shuffle: P.shuffle, repeat: P.repeat, autoplay: P.autoplay, volume: P.volume, muted: P.muted, source: P.source,
     stream: cur ? { itag: 0, codec: "mock", kbps: null, fromCache: true, seekable: true, authenticated: false } : null,
     error: P.error, skippedInARow: 0, queueLoading: false, noOutput: false,
+    loop: mockPlayer.loop, sleep: mockPlayer.sleep, private: mockPlayer.private,
   };
 }
 function publish(queueChanged = false) {
@@ -595,7 +598,7 @@ export const mockApi: Api = {
       cursor: null, playlistId: c.id, saved: c.by === "You" ? true : false, editable: c.by === "You", privacy: c.by === "You" ? privacy.get(c.id) ?? "private" : null, related: [],
     });
   },
-  collectionMore: async () => ({ entries: [], cursor: null }),
+  collectionMore: async () => ({ entries: [], cursor: null, complete: true }),
   async artist(id) {
     const a = M.artists.find((x) => x.id === raw(id));
     if (!a) throw { code: "notFound", message: "That artist does not exist.", retryable: false, action: null };
@@ -961,4 +964,28 @@ export const mockApi: Api = {
   },
   connectivityCheck: async () => dl.online,
   artUrl: () => "",
+  features: mockFeatures,
+};
+
+/** What the feature mocks (./mock/<area>.ts) share with this one: the
+ *  simulated player and its events, the catalogue and the handlers. Read
+ *  it inside functions only (the feature mocks load before this file has
+ *  finished). */
+export const mockKit = {
+  get handlers() {
+    return h;
+  },
+  /** The simulated player's state; `publish()` sends it. */
+  player: P,
+  publish,
+  snapshot: snap,
+  track,
+  delay,
+  /** Online, as the mock's connection says (`?offline`). */
+  get online() {
+    return dl.online;
+  },
+  get signedIn() {
+    return auth.state === "signedIn";
+  },
 };

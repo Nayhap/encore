@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "$lib/state.svelte";
+  import { keyLabels, ui } from "$lib/state.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
 
@@ -60,6 +60,7 @@
     ["D", "Download the current song"],
     ["F", "Full-screen lyrics"],
     ["↑ ↓", "Volume"],
+    ...keyLabels(),
     [mod("K"), "Search and commands"],
     [mod("\\"), "Show or hide now playing panel"],
     [`${mod("[")} ${mod("]")}`, "Back or forward"],

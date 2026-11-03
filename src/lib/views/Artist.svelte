@@ -2,7 +2,7 @@
   import { call, type Artist } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
-  import { account, nav, playArtist, player, ui } from "$lib/state.svelte";
+  import { account, artistMenuItems, nav, playArtist, player, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Shelves from "$lib/components/Shelves.svelte";
@@ -16,6 +16,9 @@
     return a;
   });
   const a = $derived(res.data);
+  // The ⋯ menu shows once a feature puts something in it (bookmark the
+  // artist, don't play them).
+  const menu = $derived(a ? artistMenuItems.items(id) : []);
   let subscribed = $state(false);
   $effect(() => {
     subscribed = !!a?.subscribed;
@@ -58,6 +61,9 @@
         {#if a.channelId}
           <button class="pill subscribe" class:on={subscribed} aria-pressed={subscribed} onclick={toggleSub}>{subscribed ? "Subscribed" : "Subscribe"}</button>
         {/if}
+        {#if menu.length}
+          <button class="icon-btn big" aria-label="More actions" onclick={(e) => ui.openMenu(e, artistMenuItems.items(id))}><Icon name="more" size={19} /></button>
+        {/if}
       </div>
     </header>
 
@@ -65,7 +71,7 @@
       <h2>Top songs</h2>
       <TrackTable tracks={a.topSongs} label={a.name} showPlays />
       {#if a.topSongsMore}
-        <button class="pill all" onclick={() => nav.go({ name: "collection", id: `ytm:${a.topSongsMore!.browseId}` })}>All songs</button>
+        <button class="pill all" onclick={() => nav.go({ name: "collection", id: `ytm:${a.topSongsMore!.browseId}`, params: a.topSongsMore!.params })}>All songs</button>
       {/if}
     {/if}
 
@@ -117,6 +123,10 @@
     display: flex;
     gap: 8px;
     margin-top: 8px;
+  }
+  .big {
+    width: 38px;
+    height: 38px;
   }
   .subscribe {
     margin-left: 8px;

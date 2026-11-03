@@ -32,6 +32,9 @@
   import Library from "./views/Library.svelte";
   import BrowsePage from "./views/BrowsePage.svelte";
   import Settings from "./views/Settings.svelte";
+  import Folder from "./views/Folder.svelte";
+  import FeatureOverlays from "./features/FeatureOverlays.svelte";
+  import { runKey } from "./features/hooks";
 
   let scroller: HTMLDivElement;
   let scrolled = $state(false);
@@ -70,7 +73,7 @@
       const a = catalog.artist(v.id);
       return a ? a.name : "";
     }
-    if (v.name === "page") return v.title ?? "";
+    if (v.name === "page" || v.name === "folder") return v.title ?? "";
     return v.name[0].toUpperCase() + v.name.slice(1);
   });
 
@@ -221,7 +224,8 @@
         ui.shortcuts = true;
         break;
       default:
-        return;
+        // A feature's own key (./features/hooks), or nothing.
+        if (!runKey(e)) return;
     }
     e.preventDefault();
   }
@@ -267,13 +271,15 @@
           {:else if nav.view.name === "downloads"}
             <Downloads />
           {:else if nav.view.name === "collection"}
-            <Collection id={nav.view.id} />
+            <Collection id={nav.view.id} params={nav.view.params ?? null} />
           {:else if nav.view.name === "artist"}
             <Artist id={nav.view.id} />
           {:else if nav.view.name === "page"}
             <BrowsePage browseId={nav.view.browseId} params={nav.view.params ?? null} title={nav.view.title} />
           {:else if nav.view.name === "settings"}
             <Settings />
+          {:else if nav.view.name === "folder"}
+            <Folder id={nav.view.id} />
           {/if}
         </div>
       {/key}
@@ -300,6 +306,7 @@
     Set up playback
   </button>
 {/if}
+<FeatureOverlays />
 <Overlays />
 {#if customChrome}<WindowControls />{/if}
 

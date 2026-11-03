@@ -31,8 +31,16 @@ export const commands = {
 	search: (query: string, filter: SearchFilter | null) => typedError<SearchResults_Serialize, AppError_Serialize>(__TAURI_INVOKE("search", { query, filter })),
 	searchMore: (cursor: string) => typedError<SearchResults_Serialize, AppError_Serialize>(__TAURI_INVOKE("search_more", { cursor })),
 	suggestions: (query: string) => typedError<string[], AppError_Serialize>(__TAURI_INVOKE("suggestions", { query })),
-	/**  Offline, a kept collection shows its saved order, all of it (D23). */
-	collection: (id: ItemId) => typedError<Collection_Serialize, AppError_Serialize>(__TAURI_INVOKE("collection", { id })),
+	/**
+	 *  Offline, a kept collection shows its saved order, all of it (D23).
+	 *  `params` comes with links that carry them (an artist's "All songs"),
+	 *  and is followed as given.
+	 */
+	collection: (id: ItemId, params: string | null) => typedError<Collection_Serialize, AppError_Serialize>(__TAURI_INVOKE("collection", { id, params })),
+	/**
+	 *  The next page of a collection on view, through the paced lane: it waits
+	 *  for its turn after playback and other background requests (D10, D23).
+	 */
 	collectionMore: (cursor: string) => typedError<EntriesPage_Serialize, AppError_Serialize>(__TAURI_INVOKE("collection_more", { cursor })),
 	artist: (id: ItemId) => typedError<Artist_Serialize, AppError_Serialize>(__TAURI_INVOKE("artist", { id })),
 	library: (section: LibrarySection) => typedError<LibraryPage_Serialize, AppError_Serialize>(__TAURI_INVOKE("library", { section })),
@@ -41,7 +49,7 @@ export const commands = {
 	playerSnapshot: () => typedError<PlayerSnapshot_Serialize, AppError_Serialize>(__TAURI_INVOKE("player_snapshot")),
 	queueSnapshot: () => typedError<QueueSnapshot_Serialize, AppError_Serialize>(__TAURI_INVOKE("queue_snapshot")),
 	playTracks: (tracks: Track_Deserialize[], start: number, source: QueueSource_Deserialize | null, shuffle: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_tracks", { tracks, start, source, shuffle })),
-	playCollection: (id: ItemId, start: number, shuffle: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_collection", { id, start, shuffle })),
+	playCollection: (id: ItemId, start: number, shuffle: boolean, params: string | null) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_collection", { id, start, shuffle, params })),
 	playTrack: (track: Track_Deserialize) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_track", { track })),
 	startRadio: (playlistId: string, label: string) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("start_radio", { playlistId, label })),
 	toggle: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("toggle")),
@@ -736,12 +744,24 @@ export type EntriesPage = EntriesPage_Serialize | EntriesPage_Deserialize;
 
 export type EntriesPage_Deserialize = {
 	entries: Entry_Deserialize[],
+	/**  The next page, if the list goes on. */
 	cursor?: string | null,
+	/**
+	 *  The service said the list ended here (D10): without it, a list with
+	 *  no cursor stopped early (stalled) and may be longer.
+	 */
+	complete: boolean,
 };
 
 export type EntriesPage_Serialize = {
 	entries: Entry_Serialize[],
+	/**  The next page, if the list goes on. */
 	cursor: string | null,
+	/**
+	 *  The service said the list ended here (D10): without it, a list with
+	 *  no cursor stopped early (stalled) and may be longer.
+	 */
+	complete: boolean,
 };
 
 /**
@@ -951,6 +971,12 @@ export type LibraryPage_Serialize = {
 
 export type LibrarySection = "playlists" | "albums" | "artists" | "songs" | "liked" | "subscriptions" | "history";
 
+/**  An A–B loop, in seconds of the current song. */
+export type LoopRange = {
+	a: number | null,
+	b: number | null,
+};
+
 export type LyricLine = LyricLine_Serialize | LyricLine_Deserialize;
 
 export type LyricLine_Deserialize = {
@@ -1124,6 +1150,12 @@ export type PlayerSnapshot_Deserialize = {
 	queueLoading: boolean,
 	/**  No audio output could be opened: playback runs silent until one works. */
 	noOutput: boolean,
+	/**  The A–B loop on the current song (D26). Reserved: lane A sets it. */
+	loop?: LoopRange | null,
+	/**  The sleep timer, while one runs (D26). Reserved: lane A sets it. */
+	sleep?: SleepTimer_Deserialize | null,
+	/**  A private session, while one runs (D36). */
+	private?: PrivateSession_Deserialize | null,
 };
 
 export type PlayerSnapshot_Serialize = {
@@ -1149,6 +1181,12 @@ export type PlayerSnapshot_Serialize = {
 	queueLoading: boolean,
 	/**  No audio output could be opened: playback runs silent until one works. */
 	noOutput: boolean,
+	/**  The A–B loop on the current song (D26). Reserved: lane A sets it. */
+	loop: LoopRange | null,
+	/**  The sleep timer, while one runs (D26). Reserved: lane A sets it. */
+	sleep: SleepTimer_Serialize | null,
+	/**  A private session, while one runs (D36). */
+	private: PrivateSession_Serialize | null,
 };
 
 /**  `player:state`, sent on every change. */
@@ -1251,6 +1289,18 @@ export type PositionAnchor_Serialize = {
 };
 
 export type Privacy = "public" | "unlisted" | "private";
+
+export type PrivateSession = PrivateSession_Serialize | PrivateSession_Deserialize;
+
+export type PrivateSession_Deserialize = {
+	/**  Seconds left when this snapshot was taken; `None`: until Encore quits. */
+	remaining?: number | null,
+};
+
+export type PrivateSession_Serialize = {
+	/**  Seconds left when this snapshot was taken; `None`: until Encore quits. */
+	remaining: number | null,
+};
 
 export type QueueEntry = QueueEntry_Serialize | QueueEntry_Deserialize;
 
@@ -1566,6 +1616,24 @@ export type SigninEvent_Deserialize = {
 export type SigninEvent_Serialize = {
 	stage: string,
 	message: string | null,
+};
+
+export type SleepMode = 
+/**  After a set time. */
+"timer" | "endOfSong" | "endOfQueue";
+
+export type SleepTimer = SleepTimer_Serialize | SleepTimer_Deserialize;
+
+export type SleepTimer_Deserialize = {
+	mode: SleepMode,
+	/**  `Timer`: seconds left when this snapshot was taken. */
+	remaining?: number | null,
+};
+
+export type SleepTimer_Serialize = {
+	mode: SleepMode,
+	/**  `Timer`: seconds left when this snapshot was taken. */
+	remaining: number | null,
 };
 
 export type StreamInfo = StreamInfo_Serialize | StreamInfo_Deserialize;

@@ -68,6 +68,22 @@ export type DownloadRemoved = B.DownloadRemoved_Serialize;
 export type DownloadsStorage = B.DownloadsStorage;
 export type KeptCollection = B.KeptCollection_Serialize;
 export type ActiveDownload = B.ActiveDownload_Serialize;
+export type LoopRange = B.LoopRange;
+export type SleepTimer = B.SleepTimer_Serialize;
+export type SleepMode = B.SleepMode;
+export type PrivateSession = B.PrivateSession_Serialize;
+// features: each lane adds the names of its own binding types below its
+// line (append-only; see foundation.md).
+// features: playback (lane A)
+
+// features: library tools (lane B)
+
+// features: saved (lane C)
+
+// features: taste and stats (lane D)
+
+// features: integrations (lane E)
+
 
 /** Mock-only procedural artwork (dev without Tauri). */
 export type Motif = "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks";

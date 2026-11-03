@@ -1,7 +1,8 @@
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type Track } from "./backend";
+import { BackendError, call, isTauri, type AuthState, type RuntimeStatus, type CollectionCard, type Counterpart, type DownloadItem, type DownloadItemEvent, type DownloadsSnapshot, type DownloadsSummary, type KeptCollection, type LoopRange, type Lyrics, type MutationOutcome, type Phase, type PlayerSnapshot, type PositionAnchor, type Privacy, type PrivateSession, type QueueEntry, type QueueSource, type QueueSplice, type Repeat, type SleepTimer, type Track } from "./backend";
 import { catalog } from "./catalog.svelte";
 import { sizeText } from "./data";
+import { collectionMenuItems, loadFeatures, subscribeFeatures, trackMenuItems, type MenuItem } from "./features/hooks";
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
 // methods are the UI contract; each one becomes a backend command. Position
@@ -38,6 +39,10 @@ class Player {
   liked = new SvelteSet<string>();
   lyrics = $state<Lyrics | null>(null);
   lyricsFor = $state<string | null>(null);
+  /** The snapshot's reserved fields (lanes A and D fill them in Rust). */
+  abLoop = $state<LoopRange | null>(null);
+  sleep = $state<SleepTimer | null>(null);
+  privateSession = $state<PrivateSession | null>(null);
 
   current: Track | undefined = $derived(this.index != null ? this.queue[this.index]?.track : undefined);
   currentEntry: QueueEntry | undefined = $derived(this.index != null ? this.queue[this.index] : undefined);
@@ -98,6 +103,9 @@ class Player {
     this.duration = s.duration;
     this.error = s.error?.message ?? null;
     this.noOutput = s.noOutput ?? false;
+    this.abLoop = s.loop ?? null;
+    this.sleep = s.sleep ?? null;
+    this.privateSession = s.private ?? null;
     const sg = big(s.seekGen);
     if (trackChanged || sg > this.#seekGen || this.#localSeek < 0n) {
       this.#seekGen = sg;
@@ -179,8 +187,9 @@ class Player {
     this.playTracks(tracks, start, source ? { label: source.label, collectionId: source.collectionId ?? null, radioPlaylist: null } : null, shuffle);
   }
 
-  playCollection(id: string, start = 0, shuffle = false) {
-    this.#run((a) => a.playCollection(id, start, shuffle), "Could not play");
+  /** `params` when the link carries them (an artist's "All songs"). */
+  playCollection(id: string, start = 0, shuffle = false, params: string | null = null) {
+    this.#run((a) => a.playCollection(id, start, shuffle, params), "Could not play");
   }
 
   /** With context, play that list from the track; without, start its radio. */
@@ -312,12 +321,14 @@ export type View =
   | { name: "home" }
   | { name: "explore" }
   | { name: "library" }
-  | { name: "collection"; id: string }
+  | { name: "collection"; id: string; params?: string | null }
   | { name: "artist"; id: string }
   | { name: "page"; browseId: string; params?: string | null; title?: string }
   | { name: "history" }
   | { name: "downloads" }
-  | { name: "settings" };
+  | { name: "settings" }
+  // Lane C: a folder of playlists and albums (D34).
+  | { name: "folder"; id: string; title?: string };
 
 class Nav {
   stack = $state<View[]>([{ name: "home" }]);
@@ -340,14 +351,7 @@ class Nav {
   }
 }
 
-export interface MenuItem {
-  label: string;
-  icon?: string;
-  run: () => void;
-  danger?: boolean;
-  /** Why it can't be used right now (offline, for one); shown instead of running. */
-  disabled?: string;
-}
+export type { MenuItem };
 
 export type Theme = "system" | "dark" | "light";
 
@@ -909,6 +913,7 @@ export function trackMenu(id: string, uid?: string): MenuItem[] {
   }
   if (account.signedIn) items.push({ label: "Add to playlist…", icon: "plus", disabled: needsOnline("add to a playlist"), run: () => void pickPlaylist([id]) });
   if (downloads.available && tr.playable) items.push(downloadItem(id));
+  items.push(...trackMenuItems.items({ track: tr, uid: entry }));
   if (artist?.id) items.push({ label: "Go to artist", icon: "artist", run: () => nav.go({ name: "artist", id: artist.id! }) });
   if (tr.album?.id) items.push({ label: "Go to album", icon: "album", run: () => nav.go({ name: "collection", id: tr.album!.id! }) });
   items.push({ label: "Copy link", icon: "link", run: () => (navigator.clipboard?.writeText(`https://music.youtube.com/watch?v=${remote(id)}`), ui.say("Link copied")) });
@@ -946,6 +951,7 @@ export function collectionMenu(id: string): MenuItem[] {
     { label: "Play next", icon: "playNext", run: () => withTracks((ids) => (player.playNext(ids), ui.say(`“${title}” plays next`))) },
     { label: "Add to queue", icon: "queue", run: () => withTracks((ids) => (player.addToQueue(ids), ui.say(`Added “${title}” to queue`))) },
     ...dl,
+    ...collectionMenuItems.items(id),
     {
       label: "Copy link",
       icon: "link",
@@ -1025,16 +1031,6 @@ async function pickPlaylist(trackIds: string[]) {
   ]);
 }
 
-/** Play an artist: their radio if YouTube offers one, else the top songs. */
-export async function playArtist(id: string, shuffle = false) {
-  const a = await call((x) => x.artist(id)).catch((e: BackendError) => (ui.say(`Could not load the artist: ${e.message}`), null));
-  if (!a) return;
-  catalog.addArtist(a);
-  const radio = shuffle ? a.shufflePlaylist ?? a.radioPlaylist : a.radioPlaylist ?? a.shufflePlaylist;
-  if (radio) player.startRadio(radio, a.name);
-  else player.playTracks(a.topSongs, 0, { label: a.name, collectionId: null, radioPlaylist: null }, shuffle);
-}
-
 /** Connect to the backend: subscribe first, then bootstrap (D13). */
 export async function connect() {
   await call((a) =>
@@ -1056,6 +1052,7 @@ export async function connect() {
       connectivity: (on) => (ui.online = on),
     }),
   );
+  await subscribeFeatures();
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
@@ -1070,6 +1067,10 @@ export async function connect() {
   if (cur && player.lyricsFor !== cur.id) {
     call((a) => a.lyrics(cur)).then((l) => player.setLyrics(cur.id, l)).catch(() => {});
   }
+  void loadFeatures();
 }
 
 export { catalog };
+
+// The feature modules (./features): their state, actions and hooks.
+export * from "./features";
