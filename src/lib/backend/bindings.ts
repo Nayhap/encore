@@ -149,33 +149,38 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
+	lastfmStatus: () => typedError<LastfmStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("lastfm_status")),
 	/**
-	 *  Plays, Last.fm counts and tempos for `rows`, from what Encore keeps
-	 *  locally; nothing is fetched. The owner is the account now (D25 rule 7).
+	 *  Step one: check the key and secret with Last.fm and return the page
+	 *  where the user approves Encore.
 	 */
-	librarySortFacts: (rows: SortRow_Deserialize[]) => typedError<SortFacts_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_sort_facts", { rows })),
+	lastfmBegin: (apiKey: string, secret: string) => typedError<string, AppError_Serialize>(__TAURI_INVOKE("lastfm_begin", { apiKey, secret })),
+	/**  Step two, once the user approved Encore: keep the session. */
+	lastfmFinish: () => typedError<LastfmStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("lastfm_finish")),
+	lastfmCancel: () => typedError<LastfmStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("lastfm_cancel")),
 	/**
-	 *  Release years of albums (`ytm:MPRE…`) for sorting by year: cached years
-	 *  at once, the rest one album page at a time in the background (D34).
+	 *  Forget the connection. Scrobbles not sent yet stay queued for that
+	 *  Last.fm account, and go if it is connected again.
 	 */
-	libraryYears: (albumIds: ItemId[]) => typedError<YearsStart, AppError_Serialize>(__TAURI_INVOKE("library_years", { albumIds })),
-	/**  Stop looking up years (the list was left or sorted otherwise). */
-	libraryYearsStop: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_years_stop")),
+	lastfmDisconnect: () => typedError<LastfmStatus_Serialize, AppError_Serialize>(__TAURI_INVOKE("lastfm_disconnect")),
 	/**
-	 *  Like (or unlike) many songs: one request each, paced through the
-	 *  background lane so YouTube sees a person, not a script (D34). Returns
-	 *  the job; answers arrive as `LibraryLikeEvent`s.
+	 *  Last.fm play counts for songs, in order (`None`: not matched), for
+	 *  sorting by them (D34). Counts more than an hour old are read again first.
 	 */
-	libraryLike: (trackIds: ItemId[], liked: boolean) => typedError<number, AppError_Serialize>(__TAURI_INVOKE("library_like", { trackIds, liked })),
-	/**  Stop a like job; songs already answered stay as they are. */
-	libraryLikeStop: (job: number) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("library_like_stop", { job })),
+	lastfmPlays: (tracks: Track_Deserialize[]) => typedError<(number | null)[], AppError_Serialize>(__TAURI_INVOKE("lastfm_plays", { tracks })),
+	presenceStatus: () => typedError<PresenceStatus, AppError_Serialize>(__TAURI_INVOKE("presence_status")),
+	/**  Settings → Connections → Discord. */
+	presenceSet: (on: boolean) => typedError<PresenceStatus, AppError_Serialize>(__TAURI_INVOKE("presence_set", { on })),
+	/**  The Wikipedia summary of an artist, if one matches strictly. */
+	wikiArtist: (artistId: string, name: string) => typedError<WikiExtract_Serialize | null, AppError_Serialize>(__TAURI_INVOKE("wiki_artist", { artistId, name })),
 	/**
-	 *  Read an artist's releases from the links its page gave (the `MPAD…`
-	 *  "Albums" and "Singles and EPs" shelves' `more`, params and all). The
-	 *  first page of each is read in turn like any page someone opened; the
-	 *  rest through the background lane (D10, D35).
+	 *  What the details sheet shows beyond the track itself (the album's year
+	 *  comes from the album, through `collection`).
 	 */
-	libraryDiscography: (links: PageLink_Deserialize[]) => typedError<Discography_Serialize, AppError_Serialize>(__TAURI_INVOKE("library_discography", { links })),
+	detailsTrack: (track: Track_Deserialize) => typedError<SongDetails_Serialize, AppError_Serialize>(__TAURI_INVOKE("details_track", { track })),
+	/**  Estimate the song's tempo and key from its file (D28). */
+	detailsAnalyse: (trackId: string) => typedError<AudioAnalysis_Serialize, AppError_Serialize>(__TAURI_INVOKE("details_analyse", { trackId })),
+	detailsCancel: () => typedError<null, AppError_Serialize>(__TAURI_INVOKE("details_cancel")),
 };
 
 /** Events */
@@ -186,13 +191,13 @@ export const events = {
 	downloadItemEvent: makeEvent<DownloadItemEvent_Serialize, DownloadItemEvent_Deserialize>("download-item-event"),
 	downloadsEvent: makeEvent<DownloadsEvent_Serialize, DownloadsEvent_Deserialize>("downloads-event"),
 	historyEvent: makeEvent<HistoryEvent, HistoryEvent>("history-event"),
-	libraryLikeEvent: makeEvent<LibraryLikeEvent_Serialize, LibraryLikeEvent_Deserialize>("library-like-event"),
-	libraryYearEvent: makeEvent<LibraryYearEvent_Serialize, LibraryYearEvent_Deserialize>("library-year-event"),
+	lastfmEvent: makeEvent<LastfmEvent_Serialize, LastfmEvent_Deserialize>("lastfm-event"),
 	lyricsEvent: makeEvent<LyricsEvent_Serialize, LyricsEvent_Deserialize>("lyrics-event"),
 	noticeEvent: makeEvent<NoticeEvent_Serialize, NoticeEvent_Deserialize>("notice-event"),
 	playerPositionEvent: makeEvent<PlayerPositionEvent_Serialize, PlayerPositionEvent_Deserialize>("player-position-event"),
 	playerStateEvent: makeEvent<PlayerStateEvent_Serialize, PlayerStateEvent_Deserialize>("player-state-event"),
 	playlistsEvent: makeEvent<PlaylistsEvent_Serialize, PlaylistsEvent_Deserialize>("playlists-event"),
+	presenceEvent: makeEvent<PresenceEvent, PresenceEvent>("presence-event"),
 	queueEvent: makeEvent<QueueEvent_Serialize, QueueEvent_Deserialize>("queue-event"),
 	runtimesEvent: makeEvent<RuntimesEvent_Serialize, RuntimesEvent_Deserialize>("runtimes-event"),
 	setupNeededEvent: makeEvent<SetupNeededEvent_Serialize, SetupNeededEvent_Deserialize>("setup-needed-event"),
@@ -342,6 +347,32 @@ export type Artist_Serialize = {
 	channelId: string | null,
 	radioPlaylist: string | null,
 	shufflePlaylist: string | null,
+};
+
+/**
+ *  Tempo and key estimated from a downloaded or cached file. `None` where
+ *  the estimate wasn't confident enough to show.
+ */
+export type AudioAnalysis = AudioAnalysis_Serialize | AudioAnalysis_Deserialize;
+
+/**
+ *  Tempo and key estimated from a downloaded or cached file. `None` where
+ *  the estimate wasn't confident enough to show.
+ */
+export type AudioAnalysis_Deserialize = {
+	bpm?: number | null,
+	key?: string | null,
+	confidence?: number | null,
+};
+
+/**
+ *  Tempo and key estimated from a downloaded or cached file. `None` where
+ *  the estimate wasn't confident enough to show.
+ */
+export type AudioAnalysis_Serialize = {
+	bpm: number | null,
+	key: string | null,
+	confidence: number | null,
 };
 
 export type AuthEvent = AuthEvent_Serialize | AuthEvent_Deserialize;
@@ -587,33 +618,6 @@ export type Credit_Deserialize = {
 export type Credit_Serialize = {
 	name: string,
 	id: ItemId | null,
-};
-
-/**
- *  Every release behind an artist's release links, newest first.
- *  `complete`: every link was read to its end; otherwise YouTube stopped
- *  early (or a limit did) and there may be more.
- */
-export type Discography = Discography_Serialize | Discography_Deserialize;
-
-/**
- *  Every release behind an artist's release links, newest first.
- *  `complete`: every link was read to its end; otherwise YouTube stopped
- *  early (or a limit did) and there may be more.
- */
-export type Discography_Deserialize = {
-	releases: CollectionCard_Deserialize[],
-	complete: boolean,
-};
-
-/**
- *  Every release behind an artist's release links, newest first.
- *  `complete`: every link was read to its end; otherwise YouTube stopped
- *  early (or a limit did) and there may be more.
- */
-export type Discography_Serialize = {
-	releases: CollectionCard_Serialize[],
-	complete: boolean,
 };
 
 /**  One downloaded, or downloading, song. */
@@ -1011,30 +1015,41 @@ export type KeptCollection_Serialize = {
 	paused: boolean,
 };
 
-/**  One song of a like job answered, or the job ended. */
-export type LibraryLikeEvent = LibraryLikeEvent_Serialize | LibraryLikeEvent_Deserialize;
+/**  The status changed. */
+export type LastfmEvent = LastfmEvent_Serialize | LastfmEvent_Deserialize;
 
-/**  One song of a like job answered, or the job ended. */
-export type LibraryLikeEvent_Deserialize = {
-	job: number,
-	trackId?: ItemId | null,
-	outcome?: MutationOutcome | null,
-	done: number,
-	total: number,
-	finished: boolean,
-	/**  Why it ended early, for the user. */
+/**  The status changed. */
+export type LastfmEvent_Deserialize = LastfmStatus_Deserialize;
+
+/**  The status changed. */
+export type LastfmEvent_Serialize = LastfmStatus_Serialize;
+
+/**  What Settings shows. */
+export type LastfmStatus = LastfmStatus_Serialize | LastfmStatus_Deserialize;
+
+/**  What Settings shows. */
+export type LastfmStatus_Deserialize = {
+	/**  Connected as this Last.fm user. */
+	username?: string | null,
+	/**  Waiting for the user to approve Encore in the browser. */
+	approving: boolean,
+	/**  Scrobbles waiting to be sent, and ones Last.fm refused for good. */
+	queued: number,
+	failed: number,
+	/**  Why scrobbling is stopped, if it is. */
 	error?: string | null,
 };
 
-/**  One song of a like job answered, or the job ended. */
-export type LibraryLikeEvent_Serialize = {
-	job: number,
-	trackId: ItemId | null,
-	outcome: MutationOutcome | null,
-	done: number,
-	total: number,
-	finished: boolean,
-	/**  Why it ended early, for the user. */
+/**  What Settings shows. */
+export type LastfmStatus_Serialize = {
+	/**  Connected as this Last.fm user. */
+	username: string | null,
+	/**  Waiting for the user to approve Encore in the browser. */
+	approving: boolean,
+	/**  Scrobbles waiting to be sent, and ones Last.fm refused for good. */
+	queued: number,
+	failed: number,
+	/**  Why scrobbling is stopped, if it is. */
 	error: string | null,
 };
 
@@ -1053,40 +1068,6 @@ export type LibraryPage_Serialize = {
 };
 
 export type LibrarySection = "playlists" | "albums" | "artists" | "songs" | "liked" | "subscriptions" | "history";
-
-/**
- *  One album read, or the lookup ending (`finished`, with `stopped` when
- *  it ended early: offline, another account, a failure, or asked to).
- */
-export type LibraryYearEvent = LibraryYearEvent_Serialize | LibraryYearEvent_Deserialize;
-
-/**
- *  One album read, or the lookup ending (`finished`, with `stopped` when
- *  it ended early: offline, another account, a failure, or asked to).
- */
-export type LibraryYearEvent_Deserialize = {
-	job: number,
-	albumId?: string | null,
-	year?: number | null,
-	done: number,
-	total: number,
-	finished: boolean,
-	stopped: boolean,
-};
-
-/**
- *  One album read, or the lookup ending (`finished`, with `stopped` when
- *  it ended early: offline, another account, a failure, or asked to).
- */
-export type LibraryYearEvent_Serialize = {
-	job: number,
-	albumId: string | null,
-	year: number | null,
-	done: number,
-	total: number,
-	finished: boolean,
-	stopped: boolean,
-};
 
 /**  An A–B loop, in seconds of the current song. */
 export type LoopRange = {
@@ -1403,6 +1384,16 @@ export type PositionAnchor_Serialize = {
 	position: number | null,
 	duration: number | null,
 	playing: boolean,
+};
+
+export type PresenceEvent = PresenceStatus;
+
+export type PresenceStatus = {
+	/**  This build has an application id; without one the row is hidden. */
+	available: boolean,
+	enabled: boolean,
+	/**  Discord is running and Encore is talking to it. */
+	connected: boolean,
 };
 
 export type Privacy = "public" | "unlisted" | "private";
@@ -1753,55 +1744,53 @@ export type SleepTimer_Serialize = {
 	remaining: number | null,
 };
 
-/**
- *  What can sort these rows beyond their own fields. Each map only has the
- *  songs that have a value; `lastfm` is `None` without Last.fm counts.
- */
-export type SortFacts = SortFacts_Serialize | SortFacts_Deserialize;
+export type SongDetails = SongDetails_Serialize | SongDetails_Deserialize;
 
-/**
- *  What can sort these rows beyond their own fields. Each map only has the
- *  songs that have a value; `lastfm` is `None` without Last.fm counts.
- */
-export type SortFacts_Deserialize = {
-	/**  Counted plays in Encore (D30), by track id. */
-	plays: { [key in string]: number },
-	lastfm?: { [key in string]: number } | null,
-	/**  Estimated tempo (D28), by track id. */
-	bpm: { [key in string]: number | null },
+export type SongDetails_Deserialize = {
+	file?: SongFile_Deserialize | null,
+	/**  Counted plays in Encore's play log, for this account (D30). */
+	plays: number,
+	/**  From Last.fm's counts, when connected and the song matched (D31). */
+	lastfmPlays?: number | null,
+	/**  The last estimate, if any. */
+	analysis?: AudioAnalysis_Deserialize | null,
+	/**  A file is here that hasn't been estimated (or a newer one is). */
+	canAnalyse: boolean,
 };
 
-/**
- *  What can sort these rows beyond their own fields. Each map only has the
- *  songs that have a value; `lastfm` is `None` without Last.fm counts.
- */
-export type SortFacts_Serialize = {
-	/**  Counted plays in Encore (D30), by track id. */
-	plays: { [key in string]: number },
-	lastfm: { [key in string]: number } | null,
-	/**  Estimated tempo (D28), by track id. */
-	bpm: { [key in string]: number | null },
+export type SongDetails_Serialize = {
+	file: SongFile_Serialize | null,
+	/**  Counted plays in Encore's play log, for this account (D30). */
+	plays: number,
+	/**  From Last.fm's counts, when connected and the song matched (D31). */
+	lastfmPlays: number | null,
+	/**  The last estimate, if any. */
+	analysis: AudioAnalysis_Serialize | null,
+	/**  A file is here that hasn't been estimated (or a newer one is). */
+	canAnalyse: boolean,
 };
 
-/**  One row, as far as sorting needs it. */
-export type SortRow = SortRow_Serialize | SortRow_Deserialize;
+/**  The audio file Encore has of a song. */
+export type SongFile = SongFile_Serialize | SongFile_Deserialize;
 
-/**  One row, as far as sorting needs it. */
-export type SortRow_Deserialize = {
-	id: ItemId,
-	/**  The other version of the recording: its plays count too. */
-	counterpart?: ItemId | null,
-	title: string,
-	artist: string,
+/**  The audio file Encore has of a song. */
+export type SongFile_Deserialize = {
+	/**  Downloaded (kept), rather than in the cache (may be evicted). */
+	downloaded: boolean,
+	/**  "AAC", "Opus". */
+	format: string,
+	kbps?: number | null,
+	bytes: number | null,
 };
 
-/**  One row, as far as sorting needs it. */
-export type SortRow_Serialize = {
-	id: ItemId,
-	/**  The other version of the recording: its plays count too. */
-	counterpart: ItemId | null,
-	title: string,
-	artist: string,
+/**  The audio file Encore has of a song. */
+export type SongFile_Serialize = {
+	/**  Downloaded (kept), rather than in the cache (may be evicted). */
+	downloaded: boolean,
+	/**  "AAC", "Opus". */
+	format: string,
+	kbps: number | null,
+	bytes: number | null,
 };
 
 export type StreamInfo = StreamInfo_Serialize | StreamInfo_Deserialize;
@@ -1874,6 +1863,27 @@ export type Track_Serialize = {
 	counterpart: ItemId | null,
 };
 
+/**  An artist's Wikipedia extract, with what the attribution line needs. */
+export type WikiExtract = WikiExtract_Serialize | WikiExtract_Deserialize;
+
+/**  An artist's Wikipedia extract, with what the attribution line needs. */
+export type WikiExtract_Deserialize = {
+	title: string,
+	description?: string | null,
+	extract: string,
+	url: string,
+	lang: string,
+};
+
+/**  An artist's Wikipedia extract, with what the attribution line needs. */
+export type WikiExtract_Serialize = {
+	title: string,
+	description: string | null,
+	extract: string,
+	url: string,
+	lang: string,
+};
+
 export type Word = Word_Serialize | Word_Deserialize;
 
 export type Word_Deserialize = {
@@ -1886,18 +1896,6 @@ export type Word_Serialize = {
 	t: number | null,
 	end: number | null,
 	text: string,
-};
-
-/**
- *  A year lookup started: what the cache already knew, and how many albums
- *  are being read now (at most `YEARS_LIMIT`; `skipped` more were not).
- */
-export type YearsStart = {
-	job: number,
-	/**  Album id → year; `None`: the album gives no year. */
-	known: { [key in string]: number | null },
-	pending: number,
-	skipped: number,
 };
 
 /* Tauri Specta runtime */

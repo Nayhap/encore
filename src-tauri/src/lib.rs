@@ -157,6 +157,18 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             features::stats::stats_clear,
 
             // features: integrations (lane E)
+            features::lastfm::lastfm_status,
+            features::lastfm::lastfm_begin,
+            features::lastfm::lastfm_finish,
+            features::lastfm::lastfm_cancel,
+            features::lastfm::lastfm_disconnect,
+            features::lastfm::lastfm_plays,
+            features::presence::presence_status,
+            features::presence::presence_set,
+            features::wiki::wiki_artist,
+            features::details::details_track,
+            features::details::details_analyse,
+            features::details::details_cancel,
 
         ])
         .events(collect_events![
@@ -188,6 +200,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             features::stats::StatsEvent,
 
             // features: integrations (lane E)
+            features::lastfm::LastfmEvent,
+            features::presence::PresenceEvent,
 
         ])
 }

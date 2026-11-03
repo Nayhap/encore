@@ -104,6 +104,12 @@ export type TopTrack = B.TopTrack_Serialize;
 export type TopCredit = B.TopCredit_Serialize;
 
 // features: integrations (lane E)
+export type LastfmStatus = B.LastfmStatus_Serialize;
+export type PresenceStatus = B.PresenceStatus;
+export type WikiExtract = B.WikiExtract_Serialize;
+export type SongDetails = B.SongDetails_Serialize;
+export type SongFile = B.SongFile_Serialize;
+export type AudioAnalysis = B.AudioAnalysis_Serialize;
 
 
 /** Mock-only procedural artwork (dev without Tauri). */

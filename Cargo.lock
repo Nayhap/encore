@@ -1417,13 +1417,17 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "encore-analysis",
  "encore-audio",
  "encore-auth",
  "encore-core",
+ "encore-discord",
  "encore-downloads",
+ "encore-lastfm",
  "encore-lyrics",
  "encore-player",
  "encore-resolver",
+ "encore-wiki",
  "encore-ytm",
  "image",
  "objc2",
@@ -1446,6 +1450,15 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "encore-analysis"
+version = "0.4.0"
+dependencies = [
+ "rustfft",
+ "symphonia",
+ "symphonia-adapter-libopus",
 ]
 
 [[package]]
@@ -1540,6 +1553,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "encore-discord"
+version = "0.4.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "encore-downloads"
 version = "0.4.0"
 dependencies = [
@@ -1558,6 +1578,23 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "encore-lastfm"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "encore-core",
+ "hex",
+ "md-5",
+ "parking_lot 0.13.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1613,6 +1650,18 @@ dependencies = [
  "tokio-util",
  "tracing",
  "zip",
+]
+
+[[package]]
+name = "encore-wiki"
+version = "0.4.0"
+dependencies = [
+ "encore-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "unicode-normalization",
+ "url",
 ]
 
 [[package]]
@@ -3067,6 +3116,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
 ]
 
 [[package]]

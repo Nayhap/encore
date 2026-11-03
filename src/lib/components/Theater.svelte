@@ -2,6 +2,7 @@
   import { artistLine, fmt } from "$lib/data";
   import { nav, player, ui } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
+  import CoverWash from "./CoverWash.svelte";
   import Icon from "./Icon.svelte";
   import Lyrics from "./Lyrics.svelte";
   import SongMap from "./SongMap.svelte";
@@ -15,6 +16,7 @@
   <div class="bg" aria-hidden="true">
     <div class="blob a"></div>
     <div class="blob b"></div>
+    <CoverWash strength="theater" />
   </div>
   <div class="bar" data-tauri-drag-region>
     <button class="close" onclick={() => (ui.theater = false)}>
@@ -95,6 +97,11 @@
   @keyframes drift {
     to {
       transform: translate(8vmax, 6vmax) scale(1.1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .blob {
+      animation: none;
     }
   }
   /* WebKitGTK redraws large blurs on the CPU every frame: on Linux the same

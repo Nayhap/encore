@@ -1,9 +1,12 @@
 <script lang="ts">
-  // The wash of colour behind the now playing panel (lane E: the cover
-  // ambience of D27 grows from here).
+  // The wash of colour behind the now playing panel: the cover's two hues,
+  // and over them the cover itself, blurred (D27).
+  import CoverWash from "../CoverWash.svelte";
 </script>
 
-<div class="ambient" aria-hidden="true"></div>
+<div class="ambient" aria-hidden="true">
+  <CoverWash />
+</div>
 
 <style>
   .ambient {

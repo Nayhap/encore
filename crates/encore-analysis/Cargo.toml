@@ -1,0 +1,12 @@
+[package]
+name = "encore-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Tempo and key estimated from a downloaded or cached file (D28). Original
+# DSP on Symphonia's decoders and rustfft; nothing GPL (no aubio, Essentia).
+[dependencies]
+symphonia = { version = "0.6", default-features = false, features = ["isomp4", "aac", "mkv", "ogg", "pcm", "wav"] }
+symphonia-adapter-libopus = "0.3"
+rustfft = "6"

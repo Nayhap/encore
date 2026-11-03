@@ -9,6 +9,7 @@
   import Status from "$lib/components/Status.svelte";
   import TrackTable from "$lib/components/TrackTable.svelte";
   import Discography from "$lib/components/library-tools/Discography.svelte";
+  import WikiBlurb from "$lib/components/WikiBlurb.svelte";
 
   let { id }: { id: string } = $props();
   const res = new Resource<Artist>(async () => {
@@ -76,7 +77,7 @@
     <header class="hero">
       <p class="kind">Artist{a.subscribers ? ` · ${a.subscribers}` : ""}</p>
       <h1>{a.name}</h1>
-      {#if a.description}<p class="blurb">{a.description}</p>{/if}
+      {#if a.description}<p class="blurb">{a.description}</p>{:else}<WikiBlurb {id} name={a.name} />{/if}
       <div class="actions">
         <button class="pill primary" disabled={!a.topSongs.length} onclick={() => player.playTracks(a.topSongs, 0, { label: a.name, collectionId: null, radioPlaylist: a.radioPlaylist })}><Icon name="play" size={16} />Play</button>
         <button class="pill" onclick={() => playArtist(id, true)}><Icon name="shuffle" size={16} />Shuffle</button>
