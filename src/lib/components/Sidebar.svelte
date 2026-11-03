@@ -34,7 +34,19 @@
   const isActive = (v: View) => nav.view.name === v.name;
   const isOpen = (id: string) => nav.view.name === "collection" && nav.view.id === id;
   const isFolderOpen = (id: string) => nav.view.name === "folder" && nav.view.id === id;
-  const listsText = (n: number) => (n === 1 ? "1 playlist or album" : n ? `${n} playlists and albums` : "Empty");
+  const itemsText = (n: number) => (n === 1 ? "1 item" : n ? `${n} items` : "empty");
+
+  // The narrow rail shows covers and icons only: names move to tooltips
+  // and accessible names, which the wide sidebar doesn't need.
+  let compact = $state(false);
+  $effect(() => {
+    const mq = matchMedia("(max-width: 1000px)");
+    compact = mq.matches;
+    const on = () => (compact = mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  });
+  const tip = (s: string) => (compact ? s : undefined);
 
   function addMenu(e: MouseEvent) {
     ui.openMenu(e, [
@@ -85,7 +97,7 @@
     {#if !isMac}<span class="brand" data-tauri-drag-region><img src="/icon.png" alt="" data-tauri-drag-region /><span data-tauri-drag-region>Encore</span></span>{/if}
   </div>
 
-  <button class="search" onclick={() => (ui.palette = true)}>
+  <button class="search" aria-label={tip("Search")} title={tip(`Search (${mod("K")})`)} onclick={() => (ui.palette = true)}>
     <Icon name="search" size={16} />
     <span>Search</span>
     <kbd>{mod("K")}</kbd>
@@ -94,7 +106,7 @@
   <ul class="primary">
     {#each items as it}
       <li>
-        <button class="nav" class:active={isActive(it.view)} aria-current={isActive(it.view) ? "page" : undefined} onclick={() => nav.go(it.view)}>
+        <button class="nav" class:active={isActive(it.view)} aria-current={isActive(it.view) ? "page" : undefined} aria-label={tip(it.label)} title={tip(it.label)} onclick={() => nav.go(it.view)}>
           <Icon name={it.icon} size={19} />
           <span>{it.label}</span>
           {#if it.view.name === "downloads"}
@@ -118,16 +130,27 @@
     {#each saved.folders as f (f.id)}
       <li class="folder" class:over={over === f.id}>
         <div class="frow" role="group" ondragover={(e) => { e.stopPropagation(); hover(e, f.id); }} ondrop={(e) => { e.stopPropagation(); dropOnFolder(f); }}>
-          <button class="pin" class:active={isFolderOpen(f.id)} onclick={() => nav.go({ name: "folder", id: f.id, title: f.name })} oncontextmenu={(e) => ui.openMenu(e, folderMenu(f))}>
+          <button
+            class="pin"
+            class:active={isFolderOpen(f.id)}
+            aria-label={tip(`${f.name}, folder, ${itemsText(f.items.length)}`)}
+            title={tip(`${f.name} · ${itemsText(f.items.length)}`)}
+            onclick={() => nav.go({ name: "folder", id: f.id, title: f.name })}
+            oncontextmenu={(e) => ui.openMenu(e, folderMenu(f))}
+          >
             <span class="thumb"><FolderCover folder={f} radius={5} size={120} /></span>
-            <span class="txt">
-              <span class="name ell">{f.name}</span>
-              <span class="sub ell">{listsText(f.items.length)}</span>
-            </span>
+            <span class="txt"><span class="name ell">{f.name}</span></span>
+            <span class="n" aria-label={itemsText(f.items.length)}>{f.items.length || ""}</span>
           </button>
           {#if f.items.length}
-            <button class="icon-btn chev" aria-expanded={!f.collapsed} aria-label={f.collapsed ? `Show what's in ${f.name}` : `Hide what's in ${f.name}`} onclick={() => setCollapsed(f, !f.collapsed)}>
-              <Icon name="down" size={15} />
+            <button
+              class="chev"
+              aria-expanded={!f.collapsed}
+              aria-label={f.collapsed ? `Show what's in ${f.name}` : `Hide what's in ${f.name}`}
+              title={f.collapsed ? `Show what's in ${f.name}` : `Hide what's in ${f.name}`}
+              onclick={() => setCollapsed(f, !f.collapsed)}
+            >
+              <Icon name="down" size={compact ? 12 : 15} />
             </button>
           {/if}
         </div>
@@ -144,6 +167,8 @@
                   ondragend={end}
                   ondragover={(e) => { e.stopPropagation(); hover(e, `${f.id}/${c.id}`); }}
                   ondrop={(e) => { e.stopPropagation(); dropOnFolder(f, c.id); }}
+                  aria-label={tip(`${c.title}, in ${f.name}`)}
+                  title={tip(`${c.title} · in ${f.name}`)}
                   onclick={() => nav.go({ name: "collection", id: c.id })}
                   oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}
                 >
@@ -171,6 +196,8 @@
           draggable={saved.folders.length ? "true" : undefined}
           ondragstart={(e) => start(e, c.id, null)}
           ondragend={end}
+          aria-label={tip(c.title)}
+          title={tip(c.title)}
           onclick={() => nav.go({ name: "collection", id: c.id })}
           oncontextmenu={(e) => ui.openMenu(e, collectionMenu(c.id))}
         >
@@ -190,7 +217,7 @@
   </ul>
 
   <div class="foot">
-    <button class="account" onclick={() => nav.go({ name: "settings" })}>
+    <button class="account" aria-label={tip("Settings")} title={tip("Settings")} onclick={() => nav.go({ name: "settings" })}>
       <span class="avatar">{initial}</span>
       <span class="txt">
         <span class="name ell">{account.name ?? (account.state.state === "expired" ? "Session expired" : account.state.state === "choosingChannel" ? "Choose a channel" : "Not signed in")}</span>
@@ -369,19 +396,35 @@
   .frow .pin {
     padding-right: 34px;
   }
+  .n {
+    font-size: 12px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
   .chev {
     position: absolute;
     right: 4px;
+    display: grid;
+    place-items: center;
     width: 26px;
     height: 26px;
+    border-radius: 7px;
     color: var(--dim);
-    transition: transform 0.18s var(--ease), color 0.15s;
+    transition: color 0.15s, background-color 0.15s;
   }
-  .chev[aria-expanded="false"] {
+  .chev :global(svg) {
+    transition: transform 0.18s var(--ease);
+  }
+  .chev[aria-expanded="false"] :global(svg) {
     transform: rotate(-90deg);
   }
-  .frow:hover .chev {
+  .chev:hover,
+  .chev:focus-visible {
     color: var(--text);
+    background: var(--hover);
+  }
+  .frow:hover .chev {
+    color: var(--mute);
   }
   .inner {
     margin: 0 0 4px 25px;
@@ -534,19 +577,31 @@
     .thumb {
       width: 40px;
     }
-    .chev {
+    .n {
       display: none;
+    }
+    /* The folder's expander becomes a small tab under its cover, and what's
+       in it hangs from a hairline, so the nesting reads without names. */
+    .frow {
+      flex-direction: column;
     }
     .frow .pin {
       padding-right: 4px;
     }
+    .chev {
+      position: static;
+      width: 40px;
+      height: 14px;
+      margin: 1px 0 2px;
+      border-radius: 5px;
+    }
     .inner {
-      margin: 0 0 4px;
-      padding-left: 0;
-      border-left: 0;
+      margin: 0 0 6px 6px;
+      padding-left: 5px;
+      border-left: 2px solid var(--line);
     }
     .inner .pin {
-      padding: 3px 4px 3px 9px;
+      padding: 3px 4px;
     }
     .inner .thumb {
       width: 31px;
