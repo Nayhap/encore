@@ -109,6 +109,11 @@ pub trait MusicService: Send + Sync {
     async fn counterpart(&self, _ctx: &RequestContext, _track: &Track) -> Result<Option<Counterpart>> {
         Ok(None)
     }
+    /// Tell the service the user isn't interested in a song (D36), with the
+    /// token of a row seen this session. `None`: no token is held for it.
+    async fn not_interested(&self, _ctx: &RequestContext, _video_id: &str) -> Result<Option<MutationOutcome>> {
+        Ok(None)
+    }
 }
 
 fn unsupported() -> crate::error::AppError {

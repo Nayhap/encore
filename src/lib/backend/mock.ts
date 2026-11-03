@@ -5,6 +5,8 @@ import type { Api, Handlers } from "./index";
 import type * as T from "./types";
 import { mockFeatures } from "./mock/index";
 import { mockPlayer } from "./mock/playback";
+import { mockStatsPlayed } from "./mock/stats";
+import { mockPodcastShelf, mockPrivate } from "./mock/taste";
 
 const art = (a: M.Art): T.ArtRef => ({ key: `mock:${a.seed}:${a.motif}`, h1: a.h1, h2: a.h2 });
 const mid = (id: string) => `mock:${id}`;
@@ -102,7 +104,9 @@ const hist: { title: string; rows: T.HistoryRow[] }[] = [
 hist[0].rows = [M.tracks[3], M.tracks[14], M.tracks[0]].map((t) => row(t.id));
 let reportHistory = true;
 function played(t: T.Track) {
-  if (!reportHistory || auth.state !== "signedIn") return;
+  // The local play log counts every play (D30); history skips a private session's (D36).
+  mockStatsPlayed(t);
+  if (!reportHistory || auth.state !== "signedIn" || mockPrivate()) return;
   hist[0].rows.unshift({ rowId: `h${++rowN}`, track: t, removable: true });
   h?.history({ trackId: t.id });
 }
@@ -542,6 +546,7 @@ export const mockApi: Api = {
         shelf("Quick picks", M.tracks.filter((t) => t.plays).slice(0, 12).map(item.t), "list"),
         shelf("Mixed for you", [...M.collections.filter((c) => c.kind === "mix").map(item.c), ...M.artists.slice(0, 4).map(item.a)], "carousel", "Updated daily"),
         shelf("New releases", M.collections.filter((c) => c.kind === "album").map(item.c)),
+        mockPodcastShelf(),
       ],
     }),
   explore: () =>

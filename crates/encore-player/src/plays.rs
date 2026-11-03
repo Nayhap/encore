@@ -53,6 +53,8 @@ struct Current {
     play: Option<Arc<PlayStart>>,
     counted: bool,
     saved: f64,
+    /// Audio was playing at the last observation.
+    playing: bool,
 }
 
 impl PlayObserver {
@@ -109,6 +111,7 @@ async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySin
                         play: None,
                         counted: false,
                         saved: 0.0,
+                        playing: false,
                     });
                 }
                 if matches!(s.phase, Phase::Ended | Phase::Error | Phase::Idle) {
@@ -120,7 +123,8 @@ async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySin
                     c.duration = s.duration;
                 }
                 let seeked = std::mem::replace(&mut c.seek_gen, s.seek_gen.clone()) != s.seek_gen;
-                c.listen.observe(now, s.position, s.phase == Phase::Playing && s.playing, seeked);
+                c.playing = s.phase == Phase::Playing && s.playing;
+                c.listen.observe(now, s.position, c.playing, seeked);
             }
             PlayerEvent::Position(p) => {
                 let Some(c) = cur.as_mut().filter(|c| c.track_gen == p.track_gen) else { continue };
@@ -128,6 +132,7 @@ async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySin
                     c.duration = p.duration;
                 }
                 let seeked = std::mem::replace(&mut c.seek_gen, p.seek_gen.clone()) != p.seek_gen;
+                c.playing = p.playing;
                 c.listen.observe(now, p.position, p.playing, seeked);
             }
             _ => continue,
@@ -158,7 +163,9 @@ async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySin
                     c.saved = heard;
                     sink.update(&play.id, heard, true, false);
                     let _ = tx.send(PlayEvent::Counted { play, heard });
-                } else if heard - c.saved >= CHECKPOINT {
+                } else if heard - c.saved >= CHECKPOINT || (!c.playing && heard > c.saved) {
+                    // Every 15 heard seconds, and on pause: Encore may be
+                    // quit while paused.
                     c.saved = heard;
                     sink.update(&play.id, heard, c.counted, false);
                 }
@@ -250,6 +257,21 @@ mod tests {
         assert!(!begun[0].offline);
         let last = sink.updates.lock().last().cloned().unwrap();
         assert_eq!((last.1.round(), last.2, last.3), (120.0, true, true));
+    }
+
+    #[tokio::test]
+    async fn a_pause_saves_what_was_heard() {
+        let (etx, erx) = broadcast::channel(64);
+        let sink = Arc::new(Sink::default());
+        let _obs = PlayObserver::spawn(erx, sink.clone(), Arc::new(|| "acc".to_string()), Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+        etx.send(PlayerEvent::State(snap("1", "a", Phase::Playing, 0.0))).unwrap();
+        for s in 1..=9 {
+            etx.send(at("1", s as f64)).unwrap();
+        }
+        etx.send(PlayerEvent::State(snap("1", "a", Phase::Paused, 9.0))).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let last = sink.updates.lock().last().cloned().unwrap();
+        assert_eq!((last.1.round(), last.3), (9.0, false), "saved, not ended");
     }
 
     #[tokio::test]

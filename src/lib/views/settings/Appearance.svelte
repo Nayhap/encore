@@ -2,7 +2,7 @@
   import { isTauri } from "$lib/backend";
   import { commands } from "$lib/backend/bindings";
   import { isMac, os } from "$lib/platform";
-  import { ui, type Theme } from "$lib/state.svelte";
+  import { taste, ui, type Theme } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
   const themes: { v: Theme; label: string; icon: string }[] = [
@@ -36,6 +36,13 @@
       <p>Tint highlights and backgrounds with colours from the song that is playing.</p>
     </div>
     <input type="checkbox" role="switch" bind:checked={ui.tint} />
+  </label>
+  <label class="row">
+    <div>
+      <b>Hide podcasts</b>
+      <p>Leave podcast episodes out of Home, Explore, radio and Autoplay.</p>
+    </div>
+    <input type="checkbox" role="switch" checked={taste.hidePodcasts} onchange={(e) => taste.setHidePodcasts(e.currentTarget.checked)} />
   </label>
   {#if !isMac}
     <label class="row">
