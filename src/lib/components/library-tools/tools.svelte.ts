@@ -72,7 +72,8 @@ export class ListTools {
     if (!this.kind.album && es.some((e) => e.track.album?.id)) ks.push("year");
     if (known(es, "plays", f)) ks.push("plays");
     if (this.facts.lastfm && known(es, "lastfm", f)) ks.push("lastfm");
-    if (known(es, "youtube", f)) ks.push("youtube");
+    // YouTube shows counts on some rows only: offered when most have one.
+    if (known(es, "youtube", f) * 2 >= es.length) ks.push("youtube");
     if (known(es, "bpm", f)) ks.push("bpm");
     return ks;
   });
@@ -128,9 +129,30 @@ export class ListTools {
   review() {
     this.selecting = true;
     this.reviewing = true;
+    this.selectCopies();
+  }
+
+  /** Just the extra copies: every song keeps its first row. */
+  selectCopies() {
     this.selected.clear();
     for (const id of this.dups.copies) this.selected.add(id);
   }
+
+  /** In review: the selection is exactly the extra copies. */
+  onlyCopies = $derived(this.selected.size === this.dups.copies.size && [...this.dups.copies].every((id) => this.selected.has(id)));
+
+  /** In review, what is selected besides extra copies: first rows, and
+   *  the other version (song or video) of a song. */
+  beyondCopies = $derived.by(() => {
+    let firsts = 0;
+    let versions = 0;
+    for (const id of this.selected) {
+      if (this.dups.copies.has(id)) continue;
+      if (this.dups.versions.has(id)) versions++;
+      else firsts++;
+    }
+    return { firsts, versions };
+  });
 
   done() {
     this.selecting = false;

@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Find, Sort, Select and (when there are any) Duplicates, at the end of
-  // a list's header toolbar (D34). ⌘F / Ctrl+F opens Find.
+  // A list's toolbar (D34): Find songs on the left; Sort, Duplicates (when
+  // there are any) and Select on the right. ⌘F / Ctrl+F goes to Find.
   import type { MenuItem } from "$lib/state.svelte";
   import { ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -12,19 +12,16 @@
   let { tools, duplicates = false, select = true }: { tools: ListTools; duplicates?: boolean; select?: boolean } = $props();
 
   let input = $state<HTMLInputElement>();
-  let open = $state(false);
-  const shown = $derived(open || tools.query !== "");
 
   function openFind() {
-    open = true;
-    queueMicrotask(() => input?.focus());
+    input?.focus();
+    input?.select();
   }
   function key(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
       tools.query = "";
-      open = false;
       input?.blur();
     }
   }
@@ -57,7 +54,7 @@
       const w = on ? way(k, tools.desc) : "";
       return { label: w ? `${label(k)}, ${w}` : label(k), icon: on ? "check" : "none", run: () => tools.sortBy(k) };
     });
-    items.push({ label: "Reverse the order", icon: "swap", run: () => tools.reverse() });
+    items.push({ label: "Reverse the order", icon: "swap", sep: true, run: () => tools.reverse() });
     ui.openMenu(e, items);
   }
   const sorted = $derived(tools.key !== "order" || tools.desc);
@@ -65,37 +62,50 @@
 
 <svelte:window onkeydown={global} />
 
-<div class="tools" role="group" aria-label="Library tools">
-  <label class="find" class:shown>
-    <button class="lens" tabindex={shown ? -1 : 0} aria-label="Find in {tools.kind.noun}" title="Find in {tools.kind.noun} ({mod('F')})" onclick={openFind}><Icon name="search" size={17} /></button>
-    <input bind:this={input} bind:value={tools.query} placeholder="Find in {tools.kind.noun}" aria-label="Find in {tools.kind.noun}" spellcheck="false" autocomplete="off" onkeydown={key} onblur={() => (open = false)} tabindex={shown ? 0 : -1} />
-    {#if tools.query}<button class="clear" aria-label="Clear" onclick={() => ((tools.query = ""), input?.focus())}><Icon name="x" size={14} /></button>{/if}
-  </label>
-  <button class="tool" class:on={sorted} aria-label={sorted ? `Sorted by ${label(tools.key)}, ${way(tools.key, tools.desc)}. Change sort` : "Sort"} onclick={sortMenu}>
-    <Glyph name={sorted && !tools.desc && tools.key !== "order" ? "sortUp" : "sort"} />
-    <span>{sorted ? label(tools.key) : "Sort"}</span>
-  </button>
-  {#if duplicates}
-    <button class="tool" onclick={() => tools.review()} title="Review songs that are in here more than once" aria-label="{tools.dupCount} duplicates: review them">
-      <Glyph name="dupes" />
-      <span>{tools.dupCount} {tools.dupCount === 1 ? "duplicate" : "duplicates"}</span>
+<div class="wrap">
+  <div class="tools" role="group" aria-label="Library tools">
+    <label class="find" class:filled={tools.query !== ""}>
+      <Icon name="search" size={15} />
+      <input bind:this={input} bind:value={tools.query} placeholder="Find songs" aria-label="Find songs in {tools.kind.noun}" spellcheck="false" autocomplete="off" onkeydown={key} />
+      {#if tools.query}
+        <button class="clear" aria-label="Clear" onclick={() => ((tools.query = ""), input?.focus())}><Icon name="x" size={13} /></button>
+      {:else}
+        <kbd aria-hidden="true">{mod("F")}</kbd>
+      {/if}
+    </label>
+    <span class="grow"></span>
+    <button class="tool" class:on={sorted} aria-label={sorted ? `Sorted by ${label(tools.key)}, ${way(tools.key, tools.desc)}. Change sort` : "Sort"} title={sorted ? `Sorted by ${label(tools.key).toLowerCase()}, ${way(tools.key, tools.desc)}` : "Sort"} onclick={sortMenu}>
+      <Glyph name={sorted && !tools.desc && tools.key !== "order" ? "sortUp" : "sort"} />
+      <span>{sorted ? label(tools.key) : "Sort"}</span>
     </button>
-  {/if}
-  {#if select}
-    <button class="tool" onclick={() => tools.start()} aria-label="Select songs" title="Select songs"><Glyph name="select" /><span>Select</span></button>
-  {/if}
+    {#if duplicates}
+      <button class="tool" onclick={() => tools.review()} title="Exact copies, and songs that are here as both song and video" aria-label="{tools.dupCount} duplicates: review them">
+        <Glyph name="dupes" />
+        <span>{tools.dupCount} {tools.dupCount === 1 ? "duplicate" : "duplicates"}</span>
+      </button>
+    {/if}
+    {#if select}
+      <button class="tool" onclick={() => tools.start()} aria-label="Select songs" title="Select songs"><Glyph name="select" /><span>Select</span></button>
+    {/if}
+  </div>
 </div>
 
 <style>
+  /* Laid out by the list's own width, not the window's: a closed panel
+     gives the list room a wide window might not. */
+  .wrap {
+    container-type: inline-size;
+  }
   .tools {
     display: flex;
     align-items: center;
     gap: 2px;
-    margin-left: auto;
-    min-width: 0;
   }
-  .tool,
-  .find {
+  .grow {
+    flex: 1;
+    min-width: 8px;
+  }
+  .tool {
     display: inline-flex;
     align-items: center;
     gap: 7px;
@@ -116,29 +126,29 @@
     color: var(--accent);
   }
   .find {
-    padding: 0;
-    gap: 0;
-    width: 34px;
-    overflow: hidden;
-    transition: width 0.22s var(--ease), background-color 0.15s;
-  }
-  .find.shown {
-    width: clamp(160px, 22vw, 240px);
-    background: var(--hover);
-    color: var(--text);
-  }
-  .lens {
-    display: grid;
-    place-items: center;
-    flex: none;
-    width: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 1 260px;
+    min-width: 132px;
     height: 34px;
-    border-radius: 50%;
+    padding: 0 6px 0 12px;
+    border-radius: 999px;
     color: var(--mute);
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+    box-shadow: inset 0 0 0 1px var(--line);
+    transition: background-color 0.15s, box-shadow 0.15s;
+    cursor: text;
   }
-  .find:not(.shown) .lens:hover {
+  .find:hover {
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+  }
+  .find:focus-within,
+  .find.filled {
     color: var(--text);
-    background: var(--hover);
+  }
+  .find:focus-within {
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 70%, transparent);
   }
   input {
     flex: 1;
@@ -151,21 +161,24 @@
     user-select: text;
   }
   input::placeholder {
-    color: var(--dim);
+    color: var(--mute);
   }
   input:focus-visible {
     outline: none;
   }
-  .find:has(input:focus-visible) {
-    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 70%, transparent);
+  kbd {
+    margin-right: 4px;
+    background: none;
+  }
+  .find:focus-within kbd {
+    visibility: hidden;
   }
   .clear {
     display: grid;
     place-items: center;
     flex: none;
-    width: 26px;
-    height: 26px;
-    margin-right: 4px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     color: var(--mute);
   }
@@ -173,7 +186,10 @@
     color: var(--text);
     background: var(--hover);
   }
-  @media (max-width: 900px) {
+  @container (max-width: 560px) {
+    kbd {
+      display: none;
+    }
     .tool span {
       display: none;
     }

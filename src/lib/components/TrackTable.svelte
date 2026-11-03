@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Track } from "$lib/backend";
   import { artistLine, fmt } from "$lib/data";
-  import { downloads, nav, player, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
+  import { downloads, grouped, nav, player, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
@@ -20,6 +20,7 @@
     reorder,
     select,
     tag,
+    groupStart,
     metric,
   }: {
     tracks: Track[];
@@ -42,6 +43,8 @@
     select?: { has: (i: number) => boolean; toggle: (i: number, range: boolean) => void };
     /** A short tag after the title ("Copy", "Video"). */
     tag?: (i: number) => { text: string; strong?: boolean } | null;
+    /** Rows that begin a group (an original and its duplicates): a gap above. */
+    groupStart?: (i: number) => boolean;
     /** The value a list is sorted by, in the plays column's place. */
     metric?: { label: string; value: (i: number) => string | null };
   } = $props();
@@ -51,7 +54,7 @@
     const items = trackMenu(tracks[i].id);
     const extra = extraMenu?.(i) ?? [];
     const rm = onremove ? [{ label: "Remove from this playlist", icon: "x", run: () => onremove(i) }] : [];
-    return [...extra, ...rm, ...items, ...(endMenu?.(i) ?? [])];
+    return grouped([...extra, ...rm], items, endMenu?.(i) ?? []);
   };
 
   let dragFrom = $state<number | null>(null);
@@ -101,6 +104,7 @@
     <div
       class="row"
       class:picked
+      class:group-start={groupStart?.(i)}
       aria-selected={select ? picked : undefined}
       class:current
       class:unplayable={!downloads.playable(t)}
@@ -182,6 +186,18 @@
 <style>
   .row.unplayable {
     opacity: 0.45;
+  }
+  .row.group-start {
+    margin-top: 18px;
+  }
+  .row.group-start::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: -10px;
+    height: 1px;
+    background: var(--line);
   }
   .row {
     position: relative;

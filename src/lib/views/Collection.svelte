@@ -190,13 +190,21 @@
     const rows = tools.chosen.filter((e) => e.setVideoId);
     if (!c?.playlistId || !rows.length) return ui.say("These songs can't be removed from this playlist");
     const dupes = tools.reviewing;
-    ui.confirm = {
-      title: dupes ? `Remove ${rows.length === 1 ? "1 duplicate" : `${rows.length} duplicates`}?` : `Remove ${songs(rows.length)}?`,
-      text: dupes ? `They're removed from “${c.title}” on YouTube Music. The rows that aren't selected stay.` : `They're removed from “${c.title}” on YouTube Music.`,
-      confirm: "Remove",
-      danger: true,
-      run: () => void removeRows(rows, dupes),
-    };
+    // Reviewing, say plainly when more than extra copies would go.
+    const { firsts, versions } = tools.beyondCopies;
+    const copies = rows.length - firsts - versions;
+    const besides = [firsts && (firsts === 1 ? "1 original" : `${firsts} originals`), versions && (versions === 1 ? "1 other version" : `${versions} other versions`)].filter(Boolean).join(" and ");
+    ui.confirm = !dupes
+      ? { title: `Remove ${songs(rows.length)}?`, text: `They're removed from “${c.title}” on YouTube Music.`, confirm: "Remove", danger: true, run: () => void removeRows(rows, false) }
+      : besides
+        ? {
+            title: `Remove ${songs(rows.length)}, including ${besides}?`,
+            text: `${firsts ? `The originals are the first row of their song: removing them can take a song out of “${c.title}” altogether.` : `Each song stays in “${c.title}” as the version that isn't selected.`}${copies ? ` The other ${copies === 1 ? "one is an extra copy" : `${copies} are extra copies`}.` : ""}`,
+            confirm: "Remove",
+            danger: true,
+            run: () => void removeRows(rows, true),
+          }
+        : { title: `Remove ${rows.length === 1 ? "1 extra copy" : `${rows.length} extra copies`}?`, text: `The first copy of each song stays in “${c.title}”.`, confirm: "Remove copies", danger: true, run: () => void removeRows(rows, true) };
   }
   async function removeRows(rows: Entry[], dupes: boolean) {
     const gone = new Set(rows.map((e) => e.entryId));
@@ -211,7 +219,7 @@
       } else if (r === "outcomeUnknown") {
         ui.say("Not sure that worked; reloading the playlist");
         void res.reload();
-      } else ui.say(dupes ? `Removed ${rows.length === 1 ? "1 duplicate" : `${rows.length} duplicates`}` : `Removed ${songs(rows.length)}`);
+      } else ui.say(`Removed ${songs(rows.length)}`);
     } catch (err: any) {
       entries = before;
       ui.say(`Could not remove: ${err.message}`);
@@ -234,10 +242,12 @@
       ? (i: number) => {
           const e = view[i];
           const k = e && tools.dups.kind.get(e.entryId);
-          return k === "copy" ? { text: "Copy", strong: true } : k === "version" ? { text: e.track.kind === "video" ? "Video" : "Song" } : null;
+          return k === "copy" ? { text: "Copy", strong: true } : k === "version" ? { text: e.track.kind === "video" ? "Video" : "Song" } : { text: "Original" };
         }
       : undefined,
   );
+  // Reviewing, each original starts a group with its copies and versions.
+  const groupStart = $derived(tools.reviewing ? (i: number) => i > 0 && !!view[i] && !tools.dups.kind.has(view[i].entryId) : undefined);
   const years = $derived(tools.key === "year" && yearLookup.total > 0 && yearLookup.done < yearLookup.total);
 
   async function toggleSave() {
@@ -312,24 +322,21 @@
       {:else if entries.length > 1}
         <!-- The list's own toolbar (D34): what the list shows on the left, the tools on the right. -->
         <div class="list-head">
-          <p class="tools-note">
-            {#if years}
-              Looking up release years · {yearLookup.done} of {yearLookup.total} albums · <button onclick={stopYears}>Stop</button>
-            {:else if tools.changed && cursor}
-              {tools.filtered ? "Searching" : "Sorting"} {entries.length.toLocaleString()} of {total.toLocaleString()} songs · <button onclick={() => (loadAll = true)} disabled={loadAll}>{loadAll ? "Loading all…" : "Load all"}</button>
-            {:else if tools.query.trim()}
-              {view.length === 1 ? "1 song matches" : `${view.length.toLocaleString()} songs match`}
-            {:else if tools.key === "year" && yearLookup.skipped}
-              Years of {yearLookup.skipped.toLocaleString()} albums weren't looked up; their songs sort last.
-            {:else if mine && tools.changed}
-              Sorted here only · <button onclick={() => tools.reset()}>Back to playlist order</button> to reorder
-            {/if}
-          </p>
           <Toolbar {tools} duplicates={mine && tools.dupCount > 0} />
+          <!-- One line at most, the most useful first; none when the empty state says it. -->
+          {#if years}
+            <p class="tools-note">Looking up release years · {yearLookup.done} of {yearLookup.total} albums · <button onclick={stopYears}>Stop</button></p>
+          {:else if tools.changed && cursor}
+            <p class="tools-note">{tools.filtered ? "Searching" : "Sorting"} {entries.length.toLocaleString()} of {total.toLocaleString()} songs · <button onclick={() => (loadAll = true)} disabled={loadAll}>{loadAll ? "Loading all…" : "Load all"}</button></p>
+          {:else if tools.query.trim() && view.length}
+            <p class="tools-note">{view.length === 1 ? "1 song matches" : `${view.length.toLocaleString()} songs match`}</p>
+          {:else if tools.key === "year" && yearLookup.skipped}
+            <p class="tools-note">Years of {yearLookup.skipped.toLocaleString()} albums weren't looked up; their songs sort last.</p>
+          {/if}
         </div>
       {/if}
       {#if view.length}
-        <TrackTable tracks={shown} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum || tools.key === "youtube"} {metric} {select} {tag} onremove={c.editable && account.signedIn && ui.online ? remove : undefined} endMenu={moveMenu} reorder={canReorder && !tools.changed ? move : undefined} />
+        <TrackTable tracks={shown} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum || tools.key === "youtube"} {metric} {select} {tag} {groupStart} onremove={c.editable && account.signedIn && ui.online ? remove : undefined} endMenu={moveMenu} reorder={canReorder && !tools.changed ? move : undefined} />
       {:else}
         <Status empty={cursor ? `No songs match “${tools.query.trim()}” in the ${entries.length.toLocaleString()} loaded so far.` : `No songs match “${tools.query.trim()}”.`} />
       {/if}
@@ -437,15 +444,13 @@
     color: var(--mute);
   }
   .list-head {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    min-height: 40px;
-    margin: -6px 0 6px;
+    display: grid;
+    gap: 6px;
+    margin: -6px 0 10px;
   }
   .tools-note {
-    flex: 1;
     min-width: 0;
+    padding: 0 4px;
     font-size: 13px;
     color: var(--mute);
   }

@@ -23,8 +23,8 @@
   <SelectionBar {tools} />
 {:else if songs.length > 1}
   <div class="list-head">
-    <p>{tools.query.trim() ? (view.length === 1 ? "1 song matches" : `${view.length.toLocaleString()} songs match`) : ""}</p>
     <Toolbar {tools} />
+    {#if tools.query.trim() && view.length}<p>{view.length === 1 ? "1 song matches" : `${view.length.toLocaleString()} songs match`}</p>{/if}
   </div>
 {/if}
 {#if view.length}
@@ -35,14 +35,12 @@
 
 <style>
   .list-head {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    min-height: 40px;
-    margin-bottom: 6px;
+    display: grid;
+    gap: 6px;
+    margin-bottom: 10px;
   }
   p {
-    flex: 1;
+    padding: 0 4px;
     font-size: 13px;
     color: var(--mute);
   }
