@@ -696,7 +696,16 @@ async fn record(svc: &YtMusic, dir: Option<PathBuf>) -> Result<()> {
     save("search_videos", svc.raw("search", json!({"query": "daft punk", "params": "EgWKAQIQAWoMEA4QChADEAQQCRAF"})).await.map_err(e)?)?;
     save("suggestions", svc.raw("music/get_search_suggestions", json!({"input": "daft p"})).await.map_err(e)?)?;
     save("album", svc.raw("browse", json!({"browseId": "MPREb_7ltM34kr0mH"})).await.map_err(e)?)?;
-    save("artist", svc.raw("browse", json!({"browseId": "UCRr1xG_2WIDs18a6cIiCxeA"})).await.map_err(e)?)?;
+    let artist = svc.raw("browse", json!({"browseId": "UCRr1xG_2WIDs18a6cIiCxeA"})).await.map_err(e)?;
+    // The artist's release pages (D35): each shelf's MPAD link with its own params.
+    let releases: Vec<_> = encore_ytm::pages::artist(&artist, &ItemId::ytm("UCRr1xG_2WIDs18a6cIiCxeA"))
+        .map(|a| a.value.shelves.into_iter().filter_map(|s| s.more).filter(|l| l.browse_id.starts_with("MPAD")).collect())
+        .unwrap_or_default();
+    save("artist", artist)?;
+    for (name, l) in ["discography", "discography_singles"].into_iter().zip(&releases) {
+        save(name, svc.raw("browse", json!({"browseId": l.browse_id, "params": l.params})).await.map_err(e)?)?;
+    }
+    save("search_community", svc.raw("search", json!({"query": "daft punk", "params": "EgeKAQQoAEABagwQDhAKEAMQBBAJEAU="})).await.map_err(e)?)?;
     let pl = svc.raw("browse", json!({"browseId": "VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3"})).await.map_err(e)?;
     let tok = encore_ytm::pages::collection(&pl, &ItemId::ytm("VLPLgVLQgm4lkANkwLnIYZiwf6o2jKIc5Th3")).ok().and_then(|p| p.cont);
     save("playlist_long", pl)?;

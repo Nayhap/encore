@@ -4,6 +4,7 @@
   import type { MenuItem } from "$lib/state.svelte";
   import { ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import { mod } from "$lib/platform";
   import Glyph from "./Glyph.svelte";
   import type { SortKey } from "./logic";
   import { sortLabels, type ListTools } from "./tools.svelte";
@@ -66,7 +67,7 @@
 
 <div class="tools" role="group" aria-label="Library tools">
   <label class="find" class:shown>
-    <button class="lens" tabindex={shown ? -1 : 0} aria-label="Find in {tools.kind.noun}" title="Find in {tools.kind.noun} (⌘F)" onclick={openFind}><Icon name="search" size={17} /></button>
+    <button class="lens" tabindex={shown ? -1 : 0} aria-label="Find in {tools.kind.noun}" title="Find in {tools.kind.noun} ({mod('F')})" onclick={openFind}><Icon name="search" size={17} /></button>
     <input bind:this={input} bind:value={tools.query} placeholder="Find in {tools.kind.noun}" aria-label="Find in {tools.kind.noun}" spellcheck="false" autocomplete="off" onkeydown={key} onblur={() => (open = false)} tabindex={shown ? 0 : -1} />
     {#if tools.query}<button class="clear" aria-label="Clear" onclick={() => ((tools.query = ""), input?.focus())}><Icon name="x" size={14} /></button>{/if}
   </label>

@@ -62,6 +62,7 @@
     ["↑ ↓", "Volume"],
     ...keyLabels(),
     [mod("K"), "Search and commands"],
+    [mod("F"), "Find in a list"],
     [mod("\\"), "Show or hide now playing panel"],
     [`${mod("[")} ${mod("]")}`, "Back or forward"],
   ];

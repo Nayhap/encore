@@ -49,9 +49,19 @@ export const mockTaste: TasteApi = {
   async block(kind, target, label, detail) {
     blocked = [{ kind, target, label, detail, created: String(now()) }, ...blocked.filter((b) => !(b.kind === kind && b.target === target))];
     emit();
-    // The player passes over what's blocked (lane A); the one playing goes at once.
+    // As the player's admission_changed: blocked songs leave Up next, the one playing goes at once.
+    const P = mockKit.player;
+    if (P.index != null) {
+      const keep = P.entries.filter((e, i) => i <= P.index! || !blocks(e.track));
+      if (keep.length !== P.entries.length) {
+        P.entries = keep;
+        const uids = new Set(keep.map((e) => e.uid));
+        P.canon = P.canon.filter((u) => uids.has(u));
+        mockKit.publish(true);
+      }
+    }
     const cur = mockKit.snapshot().current;
-    if (cur && blocks(cur.track)) await mockApi.next();
+    if (cur && P.playing && blocks(cur.track)) await mockApi.next();
     return mockKit.delay(state(), 60);
   },
   async unblock(kind, target) {

@@ -22,7 +22,8 @@ use encore_auth::store::{LASTFM_ACCOUNT, OsStore, STORE_NAME, SecretStore};
 use encore_core::error::{AppError, Result};
 use encore_core::local::integrations::{Scrobble, ScrobbleState};
 use encore_core::model::{Track, TrackKind};
-use encore_lastfm::{Client, Credentials, Http, Play, Saved, Session, normalise};
+use encore_core::local::library::match_key;
+use encore_lastfm::{Client, Credentials, Http, Play, Saved, Session};
 use encore_player::plays::PlayEvent;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -128,7 +129,7 @@ fn play_of(t: &Track, started: i64) -> Option<Play> {
 pub fn plays_for(core: &Core, t: &Track) -> Option<u32> {
     let user = core.features.lastfm.inner.lock().username.clone()?;
     let artist = t.artists.first()?;
-    core.store.lastfm_plays(&user, &normalise(&artist.name), &normalise(&t.title)).ok().flatten()
+    core.store.lastfm_plays(&user, &match_key(&artist.name), &match_key(&t.title)).ok().flatten()
 }
 
 /// Once, from `setup`: subscribe to what this area follows.

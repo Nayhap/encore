@@ -71,6 +71,20 @@ network off and on flips it too), and `?dlfail` makes every third download
 fail as unavailable and the fifth meet a bot check, which pauses downloads
 for 20 seconds without failing the song.
 
+For the features after 0.4.0, the mock starts with a few bookmarks, saved
+queues and folders (`?nosaved` for none) and five months of plays in History
+→ Stats (`?nostats` for none). In your library, "Everything twice" has
+duplicates and song/video pairs, and "The long way round" has 1,340 songs
+that arrive a page at a time. Tidewalker's page shows a Wikipedia summary.
+
+| Flag | Starts with |
+|---|---|
+| `?loop`, `?sleep` | an A–B loop on the loaded song; a sleep timer |
+| `?autoplayoff` | Autoplay off (an artist's Shuffle plays their songs, not a radio) |
+| `?blocked`, `?private` | a song and an artist blocked; a private session |
+| `?lastfm`, `?lastfmexpired` | Last.fm connected; a session Last.fm refuses |
+| `?discord`, `?discordoff`, `?nodiscord` | Discord on; on but not running; a build without a Discord app id |
+
 ## Build
 
 ```sh
@@ -82,25 +96,33 @@ bun run tauri build --bundles deb,appimage  # Linux: bundle/deb/*.deb, bundle/ap
 Bundles land in `target/release/bundle/`. CI builds all three on every pull
 request.
 
+Discord presence needs a Discord application id, set as
+`ENCORE_DISCORD_APP_ID` when building; without it the Discord row is hidden
+and the feature is left out.
+
 ## Test
 
 ```sh
 cargo test --workspace               # also regenerates src/lib/backend/bindings.ts
 bun run check                        # svelte-check
+bun test src/lib                     # the UI's pure logic (palette queries, find, sort, duplicates)
 ```
 
 Parser tests run against recorded responses in `crates/encore-ytm/fixtures/`.
+Personal fields are scrubbed when they are recorded; never commit a recording
+made with your own session without running it through `encore-cli record`.
 
 To check that a real database migrates and comes back from its backups,
 point the ignored tests at a **copy** (they change the file):
 
 ```sh
-cp ~/Library/Application\ Support/app.encore.desktop/encore.sqlite /tmp/db/
+cp ~/Library/Application\ Support/app.encore.desktop/encore.sqlite* /tmp/db/
 ENCORE_TEST_DB=/tmp/db/encore.sqlite cargo test -p encore-core real_database_migrates -- --ignored
 ENCORE_TEST_DB=/tmp/db/encore.sqlite cargo test -p encore-core real_database_restores -- --ignored
 ```
-Personal fields are scrubbed when they are recorded; never commit a recording
-made with your own session without running it through `encore-cli record`.
+
+Copy `encore.sqlite-wal` and `encore.sqlite-shm` with it if they exist, and
+never point the tests at the original.
 
 ### Testing a built bundle
 
@@ -168,8 +190,10 @@ cookies, tokens or tracking URLs.
 | What | macOS | Windows | Linux |
 |---|---|---|---|
 | Session | Keychain item `app.encore.desktop` / `youtube-music-session` | Credential Manager entry `youtube-music-session-key.app.encore.desktop` holds the key; the sealed session is `session.enc` in the data folder | Secret Service item, service `app.encore.desktop` |
+| Last.fm key, secret and session (if connected) | Keychain item `app.encore.desktop` / `lastfm-session` | Credential Manager entry `lastfm-session.app.encore.desktop` | Secret Service item, service `app.encore.desktop`, account `lastfm-session` |
 | Library cache, settings, queue, lyrics cache, your bookmarks, folders and play log, player components (`runtimes/`) | `~/Library/Application Support/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` | `~/.local/share/app.encore.desktop/` |
 | Backups of the database (the newest three, daily and before an update changes it) | `~/Library/Application Support/app.encore.desktop/backups/` | `%LOCALAPPDATA%\app.encore.desktop\backups\` | `~/.local/share/app.encore.desktop/backups/` |
+| Folder covers you picked | `~/Library/Application Support/app.encore.desktop/covers/` | `%LOCALAPPDATA%\app.encore.desktop\covers\` | `~/.local/share/app.encore.desktop/covers/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
 | Audio (1 GB) and artwork (256 MB) caches | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
