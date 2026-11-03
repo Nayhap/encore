@@ -7,7 +7,7 @@
 <label class="autoplay">
   <span>
     <b>Autoplay</b>
-    <small>{player.autoplay || !ui.online ? autoplayCopy(player.autoplay, ui.online) : "Off: only what you choose plays"}</small>
+    <small>{autoplayCopy(player.autoplay, ui.online)}</small>
   </span>
   <input type="checkbox" role="switch" checked={player.autoplay} disabled={!ui.online} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
 </label>

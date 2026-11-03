@@ -444,6 +444,10 @@ paletteItems.add((q) => {
   const r = pageRefOf(nav.view);
   if (r) out.push({ key: "c-page", group: "Actions", icon: pageBookmark(r) ? "bookmarkFill" : "bookmark", title: pageBookmark(r) ? "Remove bookmark of this page" : "Bookmark this page", sub: pageLabel(r).title, run: () => togglePageBookmark(r) });
   if (player.queue.length) out.push({ key: "c-saveq", group: "Actions", icon: "queue", title: "Save queue…", sub: `${songsText(player.queue.length)}, to restore later`, run: saveQueue });
+  // Folders: found by name, and all listed under `#` (D32).
+  for (const f of saved.folders) {
+    out.push({ key: `c-f-${f.id}`, group: "Folders", icon: "folder", title: f.name, sub: listsText(f.items.length), hint: "Open", run: () => nav.go({ name: "folder", id: f.id, title: f.name }) });
+  }
   if (!q) return out;
   // Typed: your bookmarks and saved queues are found too.
   for (const b of saved.bookmarks.slice(0, 200)) {

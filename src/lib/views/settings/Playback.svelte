@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { call } from "$lib/backend";
-  import { account, openExternal, player, setup, taste, ui } from "$lib/state.svelte";
+  import { account, autoplayCopy, openExternal, player, setup, taste, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { mb, settings } from "./shared.svelte";
 
@@ -41,7 +41,7 @@
   <label class="row">
     <div>
       <b>Autoplay</b>
-      <p>Keep playing similar songs when the queue ends. Off: only what you choose plays.</p>
+      <p>{autoplayCopy(player.autoplay, ui.online)}</p>
     </div>
     <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
   </label>

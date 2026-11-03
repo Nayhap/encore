@@ -79,7 +79,7 @@ pub struct AudioAnalysis {
 }
 
 /// One song's play count on Last.fm (`user.getTopTracks`), under the keys
-/// `encore_lastfm::normalise` makes.
+/// [`match_key`](super::library::match_key) makes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LastfmPlays {
     pub artist_key: String,

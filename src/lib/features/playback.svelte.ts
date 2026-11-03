@@ -158,9 +158,9 @@ export const sleepTimer = new SleepTimer();
 
 // ---------- Autoplay (D33) ----------
 
-/** The Autoplay switch's line, here and in Settings (lane D uses it). */
+/** The line under an "Autoplay" switch, in the queue panel and in Settings. */
 export const autoplayCopy = (on: boolean, online = true) =>
-  !online ? "Waits until you're back online" : on ? "Keep playing similar songs when the queue ends" : "Autoplay off: only what you choose plays";
+  !online ? "Waits until you're back online" : on ? "Keep playing similar songs when the queue ends" : "Off: only what you choose plays";
 
 /** Play an artist: their radio if YouTube offers one, else the top songs.
  *  With Autoplay off nothing is chosen for the user (D33): Play and

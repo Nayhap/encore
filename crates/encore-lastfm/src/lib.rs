@@ -8,7 +8,7 @@
 //!   `scrobble_queue` and sent in batches by [`flush`], whenever Encore is
 //!   online; Last.fm takes timestamps, so plays made offline arrive later.
 //!   A song that starts is sent as now playing, never queued.
-//! * Play counts come from `user.getTopTracks`, matched by [`normalise`]d
+//! * Play counts come from `user.getTopTracks`, matched by `match_key`ed
 //!   artist and title.
 //!
 //! Every call is a POST with the parameters in the body, so no key, secret
@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use encore_core::local::integrations::{LastfmPlays, Scrobble, ScrobbleState};
+use encore_core::local::library::match_key;
 use encore_core::store::Store;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
@@ -330,19 +331,9 @@ impl Client {
     }
 }
 
-/// A title or artist reduced for matching: case, spacing and the
-/// punctuation around words don't matter ("Daft Punk" = "daft  punk").
-/// These are the keys lane B's "Last.fm plays" sort asks `lastfm_plays`
-/// with: a copy of `encore_core::local::library::match_key` (branch
-/// features-b), which this branch doesn't have yet. Keep the two identical.
-pub fn normalise(s: &str) -> String {
-    let s: String = s.to_lowercase().chars().filter(|c| !matches!(c, '’' | '\'')).map(|c| if matches!(c, '"' | '.' | ',' | '!' | '?') { ' ' } else { c }).collect();
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Rows for `lastfm_plays` from a read of the top tracks.
 pub fn play_rows(top: &[TopTrack]) -> Vec<LastfmPlays> {
-    top.iter().map(|t| LastfmPlays { artist_key: normalise(&t.artist), title_key: normalise(&t.title), plays: t.plays }).collect()
+    top.iter().map(|t| LastfmPlays { artist_key: match_key(&t.artist), title_key: match_key(&t.title), plays: t.plays }).collect()
 }
 
 /// What a [`flush`] did.
@@ -510,10 +501,10 @@ mod tests {
 
     #[test]
     fn normalises_for_matching() {
-        assert_eq!(normalise("  Daft  Punk "), "daft punk");
-        assert_eq!(normalise("Don’t Stop Me Now!"), "dont stop me now");
-        assert_eq!(normalise("Glass Weather (Remastered)"), "glass weather (remastered)", "brackets stay, as the sort's keys keep them");
-        assert_eq!(normalise("夜行列車"), "夜行列車");
+        assert_eq!(match_key("  Daft  Punk "), "daft punk");
+        assert_eq!(match_key("Don’t Stop Me Now!"), "dont stop me now");
+        assert_eq!(match_key("Glass Weather (Remastered)"), "glass weather (remastered)", "brackets stay, as the sort's keys keep them");
+        assert_eq!(match_key("夜行列車"), "夜行列車");
         assert!(scrobblable(None) && scrobblable(Some(31.0)) && !scrobblable(Some(30.0)));
     }
 

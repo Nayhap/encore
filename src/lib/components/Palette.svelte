@@ -165,8 +165,17 @@
   const yourPlaylists = $derived(playlists.list.map((c) => collectionRow(c, "Your playlists")));
   const things = $derived(contributed.filter((i) => !isCommand(i)) as Result[]);
 
-  const results = $derived.by<Result[]>(() => {
-    const s = norm(text);
+  /** Rows of one group together, groups in the order they first appear:
+   *  results, then your things, then commands. */
+  function grouped(rows: Result[]): Result[] {
+    const by = new Map<string, Result[]>();
+    for (const r of rows) by.set(r.group, [...(by.get(r.group) ?? []), r]);
+    return [...by.values()].flat();
+  }
+
+  const results = $derived.by<Result[]>(() => grouped(rowsFor(norm(text))));
+
+  function rowsFor(s: string): Result[] {
     const hit = (...xs: (string | undefined)[]) => !s || xs.some((x) => x && norm(x).includes(s));
 
     if (scope === "commands") return actions.filter((a) => hit(a.title, a.sub));
@@ -208,7 +217,7 @@
     top ??= all[0];
     const rest = all.filter((x) => x.key !== top?.key);
     return [...seek, ...(top ? [{ ...top, group: "Top result" }] : []), ...rest, ...mine, ...acts];
-  });
+  }
 
   $effect(() => {
     q;
