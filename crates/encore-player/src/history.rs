@@ -11,7 +11,10 @@
 //! The [`HistoryReporter`] task feeds it from the player's own events and
 //! sends the pings through a [`PlayReporter`], one at a time. Failures are
 //! logged once and never touch playback. Offline nothing is opened or sent,
-//! and a play that started offline is never reported later (D23).
+//! and a play that started offline is never reported later (D23). A private
+//! session works the same way (D36): from the moment it starts nothing more
+//! is opened or sent, not even pings already queued, and a play that began
+//! in one is never reported, even if the session ends while it plays.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -200,13 +203,14 @@ impl HistoryReporter {
     pub fn spawn(events: broadcast::Receiver<PlayerEvent>, reporter: Arc<dyn PlayReporter>, enabled: Arc<AtomicBool>, link: Arc<AtomicU64>, private: Arc<AtomicBool>, on_registered: Arc<dyn Fn(&ItemId) + Send + Sync>) {
         let (send_tx, mut send_rx) = mpsc::channel::<Queued>(SEND_QUEUE);
         let link2 = link.clone();
+        let private2 = private.clone();
         // One ping at a time, in order.
         tokio::spawn(async move {
             let mut failed_for: Option<ItemId> = None;
             while let Some((r, ping, itag, id, at)) = send_rx.recv().await {
                 // Pings are not kept for later: a play replayed hours after
                 // the fact would be wrong history (D23).
-                if link2.load(Ordering::SeqCst) != at {
+                if link2.load(Ordering::SeqCst) != at || private2.load(Ordering::SeqCst) {
                     continue;
                 }
                 let first = matches!(ping, Ping::Playback { .. });
@@ -234,8 +238,8 @@ async fn run(
     reporter: Arc<dyn PlayReporter>,
     enabled: Arc<AtomicBool>,
     link: Arc<AtomicU64>,
-    // A private session runs (D36): lane D stops reporting while it's set.
-    _private: Arc<AtomicBool>,
+    // A private session runs (D36).
+    private: Arc<AtomicBool>,
     send: mpsc::Sender<Queued>,
 ) {
     let t0 = Instant::now();
@@ -271,10 +275,11 @@ async fn run(
                     continue;
                 }
                 let now_link = link.load(Ordering::SeqCst);
+                let private_now = private.load(Ordering::SeqCst);
                 let connected = now_link % 2 == 0;
-                // The connection changed since this play began: it is not
-                // reported, now or later.
-                if let Some(a) = active.as_mut().filter(|a| a.link != now_link) {
+                // The connection changed since this play began, or a private
+                // session started: it is not reported, now or later.
+                if let Some(a) = active.as_mut().filter(|a| a.link != now_link || private_now) {
                     a.report = ReportState::Off;
                 }
                 match ev {
@@ -286,7 +291,7 @@ async fn run(
                         let same = active.as_ref().is_some_and(|a| a.track_gen == s.track_gen && a.uid == cur.uid);
                         if !same {
                             end(active.take(), now);
-                            let report = if connected { ReportState::Waiting } else { ReportState::Off };
+                            let report = if connected && !private_now { ReportState::Waiting } else { ReportState::Off };
                             active = Some(Active { track_gen: s.track_gen.clone(), uid: cur.uid.clone(), id: cur.track.id.clone(), seek_gen: s.seek_gen.clone(), itag: None, listen: Listen::new(), report, link: now_link });
                         }
                         let a = active.as_mut().unwrap();
@@ -312,9 +317,9 @@ async fn run(
                 // Long enough heard: ask for this play's report, once.
                 if let Some(a) = active.as_mut().filter(|a| matches!(a.report, ReportState::Waiting) && a.listen.counts()) {
                     a.report = ReportState::Opening;
-                    let (r, tx, id, tg, uid, link, at) = (reporter.clone(), open_tx.clone(), a.id.clone(), a.track_gen.clone(), a.uid.clone(), link.clone(), a.link);
+                    let (r, tx, id, tg, uid, link, at, private) = (reporter.clone(), open_tx.clone(), a.id.clone(), a.track_gen.clone(), a.uid.clone(), link.clone(), a.link, private.clone());
                     tokio::spawn(async move {
-                        if link.load(Ordering::SeqCst) != at {
+                        if link.load(Ordering::SeqCst) != at || private.load(Ordering::SeqCst) {
                             return;
                         }
                         let res = match r.open_report(&id).await {
@@ -332,6 +337,10 @@ async fn run(
                 // A report for a play that has already ended (or went
                 // offline meanwhile) is dropped unsent.
                 let Some(a) = active.as_mut().filter(|a| a.track_gen == tg && a.uid == uid && matches!(a.report, ReportState::Opening) && a.link == link.load(Ordering::SeqCst)) else { continue };
+                if private.load(Ordering::SeqCst) {
+                    a.report = ReportState::Off;
+                    continue;
+                }
                 if !enabled.load(Ordering::Relaxed) {
                     active = None;
                     continue;
@@ -641,4 +650,37 @@ mod tests {
         assert!(log.opened.lock().is_empty());
     }
 
+    #[tokio::test]
+    async fn a_private_session_stops_reports_and_its_plays_stay_unreported() {
+        let (tx, rx) = broadcast::channel(256);
+        let log = Arc::new(Log::default());
+        let private = Arc::new(AtomicBool::new(false));
+        HistoryReporter::spawn(rx, Arc::new(FakeReporter(log.clone(), Duration::ZERO)), Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)), private.clone(), Arc::new(|_: &ItemId| {}));
+        tx.send(state("a", 1, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=6 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        let before = log.pings.lock().len();
+        assert!(before > 0, "reported before the session");
+        // The session starts halfway through: nothing more for this play.
+        private.store(true, Ordering::SeqCst);
+        for i in 7..=60 {
+            tx.send(anchor(1, i as f64 * 0.5)).unwrap();
+        }
+        // A play inside the session, which ends while it plays.
+        tx.send(state("b", 2, Phase::Playing, 0.0)).unwrap();
+        for i in 1..=6 {
+            tx.send(anchor(2, i as f64 * 0.5)).unwrap();
+        }
+        settle().await;
+        private.store(false, Ordering::SeqCst);
+        for i in 7..=60 {
+            tx.send(anchor(2, i as f64 * 0.5)).unwrap();
+        }
+        tx.send(state("c", 3, Phase::Loading, 0.0)).unwrap();
+        settle().await;
+        assert_eq!(log.pings.lock().len(), before);
+        assert_eq!(*log.opened.lock(), vec!["a"], "b was never opened");
+    }
 }
