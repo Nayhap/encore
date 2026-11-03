@@ -21,6 +21,13 @@ use serde::{Deserialize, Serialize};
 /// Settings scope and keys in the store (D11).
 pub const SETTINGS: &str = "settings";
 pub const REPORT_HISTORY: &str = "report_history";
+/// In-app updates (D24): install automatically (default on), the version
+/// the user skipped, when GitHub last answered a check, and the version
+/// whose "What's new" was last shown.
+pub const AUTO_UPDATE: &str = "auto_update";
+pub const UPDATE_SKIPPED: &str = "update_skipped";
+pub const UPDATE_CHECKED_AT: &str = "update_checked_at";
+pub const LAST_SEEN_VERSION: &str = "last_seen_version";
 
 /// Why downloads are off, when the system gives Encore no data folder.
 pub const DOWNLOADS_OFF: &str = "Downloads are off: Encore can't find a folder to keep them in on this computer.";
@@ -79,6 +86,8 @@ pub struct Core {
     /// A message from startup for the UI, and whether the UI is listening
     /// yet (events sent before it subscribes are lost).
     pub startup_notice: parking_lot::Mutex<(bool, Option<String>)>,
+    /// `prepare_exit` ran (and wasn't undone).
+    exit_prepared: tokio::sync::Mutex<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -154,7 +163,7 @@ impl Core {
                 }
             }
         };
-        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, downloads, connectivity, paths, startup_notice: parking_lot::Mutex::new((false, None)) });
+        let core = Arc::new(Core { ytm, accounts, player, lyrics, resolver, store, audio_cache, art, downloads, connectivity, paths, startup_notice: parking_lot::Mutex::new((false, None)), exit_prepared: tokio::sync::Mutex::new(false) });
         Ok(core)
     }
 
@@ -221,6 +230,49 @@ impl Core {
                 }
             }
         });
+    }
+
+    /// Before Encore quits or installs an update (D24). Idempotent, and a
+    /// second caller waits for the first. Every step is bounded, so quitting
+    /// never hangs on the network:
+    /// 1. pause, and save the queue and position now (not on the 5 s tick);
+    /// 2. the play being reported gets its last history ping (≤ 2 s);
+    /// 3. downloads stop after the current range and let go of their
+    ///    folder, without touching the user's pause (≤ 5 s);
+    /// 4. the yt-dlp helpers are killed and waited for, and none starts again.
+    ///
+    /// The Windows installer path ends in `process::exit`, so all of this
+    /// has to be done before `Update::install` is called.
+    pub async fn prepare_exit(&self) {
+        let mut done = self.exit_prepared.lock().await;
+        if *done {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        self.player.pause();
+        self.player.persist_now();
+        let history = self.player.settle_history(Duration::from_secs(2)).await;
+        let downloads = match &self.downloads {
+            Some(d) => tokio::time::timeout(Duration::from_secs(5), d.quiesce()).await.is_ok(),
+            None => true,
+        };
+        self.resolver.runtimes().cancel();
+        let helpers = tokio::time::timeout(Duration::from_secs(3), self.resolver.shut_down()).await.is_ok();
+        tracing::info!(history, downloads, helpers, ms = t0.elapsed().as_millis() as u64, "ready to exit");
+        *done = true;
+    }
+
+    /// The exit didn't happen after all (an update failed to install):
+    /// downloads and the helpers carry on. Playback stays paused.
+    pub async fn abort_exit(&self) {
+        let mut done = self.exit_prepared.lock().await;
+        if !std::mem::take(&mut *done) {
+            return;
+        }
+        self.resolver.reopen();
+        if let Some(d) = &self.downloads {
+            d.resume_after_quiesce();
+        }
     }
 
     /// A request that got no answer may mean the connection is gone: the

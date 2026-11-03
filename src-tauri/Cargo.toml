@@ -46,6 +46,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # fell behind on quick song changes.
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 tauri-plugin-single-instance = "2"
+# In-app updates (D24), driven from Rust only.
+tauri-plugin-updater = "~2.14"
+semver = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

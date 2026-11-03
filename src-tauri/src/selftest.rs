@@ -57,6 +57,11 @@ async fn check(video: Option<String>, strict: bool) -> Value {
     let mut ok = true;
     let paths = Paths::new();
 
+    // How this copy updates itself (D24). No network: GitHub's answer
+    // isn't a property of the machine.
+    let (install, refusal) = crate::updates::classify();
+    r["update"] = json!({ "install": install, "canInstall": refusal.is_none(), "reason": refusal });
+
     // Data folder and database.
     match Store::open(&paths.data.join("encore.sqlite")) {
         Ok(s) => r["store"] = json!({ "ok": true, "downloads": s.download_count().unwrap_or(0) }),

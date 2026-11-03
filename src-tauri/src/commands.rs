@@ -17,8 +17,10 @@ use tauri_specta::Event;
 
 use crate::core::Core;
 use crate::events::*;
+use crate::updates::{UpdateStatus, Updates};
 
 type S<'a> = State<'a, Arc<Core>>;
+type U<'a> = State<'a, Arc<Updates>>;
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +37,8 @@ pub struct Bootstrap {
     pub notice: Option<String>,
     /// Encore can reach YouTube (D23).
     pub online: bool,
+    /// In-app updates (D24).
+    pub update: UpdateStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, specta::Type)]
@@ -76,6 +80,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
         report_history: core.player.reporting(),
         notice: core.take_startup_notice(),
         online: core.connectivity.online(),
+        update: app.state::<Arc<Updates>>().status(),
     })
 }
 
@@ -708,6 +713,57 @@ pub async fn downloads_storage(core: S<'_>) -> Result<DownloadsStorage> {
 #[specta::specta]
 pub async fn connectivity_check(core: S<'_>) -> Result<bool> {
     Ok(core.connectivity.check_now().await)
+}
+
+// ---------- updates (D24) ----------
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_status(updates: U<'_>) -> Result<UpdateStatus> {
+    Ok(updates.status())
+}
+
+/// "Check for updates": asks GitHub now, shows a skipped version too, and
+/// returns once it has answered.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_check(updates: U<'_>) -> Result<UpdateStatus> {
+    Ok(updates.inner().check(true).await)
+}
+
+/// Download the update that was found (automatic updates off, or a retry).
+#[tauri::command]
+#[specta::specta]
+pub async fn update_download(updates: U<'_>) -> Result<UpdateStatus> {
+    updates.inner().download(true);
+    Ok(updates.status())
+}
+
+/// "Restart to update": pauses, installs and starts the new version. Only
+/// returns when the install failed.
+#[tauri::command]
+#[specta::specta]
+pub async fn update_install(updates: U<'_>) -> Result<()> {
+    updates.inner().install(true).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_skip(updates: U<'_>, version: String) -> Result<UpdateStatus> {
+    updates.inner().skip(&version)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_unskip(updates: U<'_>) -> Result<UpdateStatus> {
+    updates.inner().unskip()
+}
+
+/// Settings → Updates → "Install updates automatically".
+#[tauri::command]
+#[specta::specta]
+pub async fn set_auto_update(updates: U<'_>, on: bool) -> Result<UpdateStatus> {
+    updates.inner().set_auto(on)
 }
 
 // ---------- auth ----------
