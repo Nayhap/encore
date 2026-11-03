@@ -661,8 +661,11 @@ mod tests {
         n as f32 / (l.len() as f32 / rate as f32)
     }
 
+    /// A test worker's ring, timeline, counter and channels.
+    type TestWorker = (rtrb::Consumer<f32>, Arc<Mutex<Timeline>>, Arc<AtomicU64>, Sender<WorkerCmd>, Receiver<WorkerEvent>);
+
     /// Start a worker on a fixture with an output ring of `secs` seconds.
-    fn worker(n: &str, secs: f64) -> (rtrb::Consumer<f32>, Arc<Mutex<Timeline>>, Arc<AtomicU64>, Sender<WorkerCmd>, Receiver<WorkerEvent>) {
+    fn worker(n: &str, secs: f64) -> TestWorker {
         let (p, c) = rtrb::RingBuffer::<f32>::new((48000.0 * secs) as usize * 2);
         let (tx, rx) = std::sync::mpsc::channel();
         let (etx, erx) = std::sync::mpsc::channel();

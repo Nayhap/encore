@@ -88,6 +88,7 @@ pub async fn page(service: &dyn MusicService, ctx: &RequestContext, cursor: &str
 /// Read from `cursor` to the end of the list, page by page, handing each
 /// page to `each` as it arrives. Returns how it ended: `Ok(())` only after
 /// `More::Ended`.
+#[allow(clippy::too_many_arguments)]
 pub async fn read_rest(
     service: &dyn MusicService,
     ctx: &RequestContext,

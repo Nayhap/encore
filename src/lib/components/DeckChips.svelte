@@ -45,4 +45,16 @@
   .deck-chip:hover {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
+  /* In a narrow window the song's title needs the room: icons only (the
+     title attribute still says what each one is). */
+  @media (max-width: 1000px) {
+    .deck-chip {
+      width: 26px;
+      padding: 0;
+      justify-content: center;
+    }
+    .deck-chip .mono {
+      display: none;
+    }
+  }
 </style>

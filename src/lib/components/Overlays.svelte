@@ -138,6 +138,8 @@
     position: fixed;
     z-index: 61;
     min-width: 220px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
     padding: 5px;
     border-radius: 12px;
     background: var(--raise);
