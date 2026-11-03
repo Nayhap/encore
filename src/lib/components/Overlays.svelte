@@ -72,6 +72,10 @@
   <div class="catch" role="presentation" onmousedown={() => (ui.menu = null)} oncontextmenu={(e) => { e.preventDefault(); ui.menu = null; }}></div>
   <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{pos.x}px" style:top="{pos.y}px" onkeydown={menuKey}>
     {#each ui.menu.items as it}
+      {#if it.sep}
+        <div class="sep" role="separator"></div>
+        {#if typeof it.sep === "string"}<div class="head" aria-hidden="true">{it.sep}</div>{/if}
+      {/if}
       {#if it.disabled}
         <!-- Not available now: still focusable, and says why when chosen. -->
         <button role="menuitem" class="off" aria-disabled="true" title={it.disabled} onclick={() => { ui.menu = null; ui.say(it.disabled!); }}>
@@ -79,9 +83,10 @@
           <span>{it.label}</span>
         </button>
       {:else}
-        <button role="menuitem" class:danger={it.danger} onclick={() => { ui.menu = null; it.run(); }}>
+        <button role="menuitem" class:danger={it.danger} aria-haspopup={it.more ? "menu" : undefined} onclick={() => { ui.menu = null; it.run(); }}>
           {#if it.icon}<Icon name={it.icon} size={16} />{/if}
           <span>{it.label}</span>
+          {#if it.more}<i class="chev"><Icon name="right" size={14} /></i>{/if}
         </button>
       {/if}
     {/each}
@@ -176,6 +181,32 @@
   .menu button.danger:hover,
   .menu button.danger:focus-visible {
     background: hsl(0 70% 55% / 0.14);
+  }
+  .menu button span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: left;
+  }
+  .chev {
+    display: grid;
+    margin-right: -4px;
+    opacity: 0.7;
+  }
+  .sep {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--line);
+  }
+  .head {
+    padding: 4px 10px 3px;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--dim);
   }
   .menu button.off {
     color: var(--dim);

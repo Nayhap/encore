@@ -14,6 +14,28 @@ export interface MenuItem {
   danger?: boolean;
   /** Why it can't be used right now (offline, for one); shown instead of running. */
   disabled?: string;
+  /** Starts a group: a hairline above it, and with text a small heading. */
+  sep?: true | string;
+  /** Opens a second menu in its place (drawn with a chevron). */
+  more?: true;
+  /** Track menus: the group a feature's item joins (see `trackMenu`). */
+  band?: TrackBand;
+}
+
+/** The track menu's groups, top to bottom: what to do with it now, where
+ *  to keep it, this song, where it leads, and blocking on its own. */
+export type TrackBand = "play" | "keep" | "song" | "goto" | "last";
+
+/** Items in groups to one list, a hairline between non-empty groups. */
+export function grouped(...groups: (MenuItem[] | [string, MenuItem[]])[]): MenuItem[] {
+  const out: MenuItem[] = [];
+  for (const g of groups) {
+    const [head, items] = typeof g[0] === "string" ? (g as [string, MenuItem[]]) : [undefined, g as MenuItem[]];
+    if (!items.length) continue;
+    const sep = head ?? (out.length ? true : undefined);
+    out.push(sep ? { ...items[0], sep } : items[0], ...items.slice(1));
+  }
+  return out;
 }
 
 /** One row of the ⌘K palette. */
@@ -84,15 +106,14 @@ export interface TrackMenuContext {
   uid?: string;
 }
 
-/** Track menus everywhere: after Download, before "Go to artist". */
+/** Track menus everywhere: each item joins its `band` ("song" if none). */
 export const trackMenuItems = new HookList<[TrackMenuContext], MenuItem>();
 /** A playlist's or album's menu (header ⋯, right-click on a card): before "Copy link". */
 export const collectionMenuItems = new HookList<[string], MenuItem>();
 /** An artist page's ⋯ menu, shown only when something is in it. */
 export const artistMenuItems = new HookList<[string], MenuItem>();
-/** The player bar's ⋯ menu: after the current song's track menu. */
-export const deckMenuItems = new HookList<[], MenuItem>();
-/** The player bar's chips, beside the lyrics button. */
+/** The player bar's chips, beside the lyrics button (a background job's
+ *  progress); the sleep timer and private session have the session control. */
 export const deckChips = new HookList<[], DeckChip>();
 /** Palette commands for the query typed so far (empty: the idle list). */
 export const paletteItems = new HookList<[string], PaletteItem>();

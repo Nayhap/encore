@@ -12,8 +12,8 @@
 import { call, type BackendError, type Blocked, type BlockKind, type Shelf, type TasteState, type Track } from "$lib/backend";
 import { catalog } from "$lib/catalog.svelte";
 import { artistLine } from "$lib/data";
-import { player, ui } from "$lib/state.svelte";
-import { artistMenuItems, deckChips, deckMenuItems, paletteItems, registerFeature, trackMenuItems, type MenuItem } from "./hooks";
+import { account, player, ui } from "$lib/state.svelte";
+import { artistMenuItems, paletteItems, registerFeature, trackMenuItems } from "./hooks";
 
 /** How long "Undo" stays up (Rust waits a little longer before telling YouTube). */
 const UNDO_MS = 8000;
@@ -122,19 +122,10 @@ class Taste {
     try {
       await call((a) => a.features.taste.setPrivate(on));
       this.now = Date.now();
-      ui.say(on ? "Private session for the next hour. YouTube still sees what you play and search, but it isn't added to your history." : "Private session ended");
+      ui.say(on ? "Private session for the next hour: plays stay out of your YouTube history" : "Private session ended");
     } catch (e) {
       ui.say(`Could not change that: ${(e as BackendError).message}`, "error");
     }
-  }
-
-  endPrivate() {
-    ui.confirm = {
-      title: "End the private session?",
-      text: "Songs you play are added to your YouTube history again.",
-      confirm: "End session",
-      run: () => void this.setPrivate(false),
-    };
   }
 }
 
@@ -151,10 +142,10 @@ registerFeature({
   },
 });
 
-// Track menus: after Download.
+// Track menus: alone at the bottom.
 trackMenuItems.add(({ track }) => {
-  if (taste.has("track", track.id)) return [{ label: "Play this again", icon: "check", run: () => void taste.unblock("track", track.id) }];
-  return [{ label: "Don't play this again", icon: "x", run: () => void taste.blockTrack(track) }];
+  if (taste.has("track", track.id)) return [{ label: "Play this again", icon: "check", band: "last", run: () => void taste.unblock("track", track.id) }];
+  return [{ label: "Don't play this again", icon: "x", band: "last", run: () => void taste.blockTrack(track) }];
 }, 60);
 
 // The artist page's ⋯ menu.
@@ -164,23 +155,11 @@ artistMenuItems.add((id) => {
   return [{ label: "Don't play this artist", icon: "x", run: () => void taste.block("artist", id, name, null) }];
 }, 60);
 
-const privateItem = (): MenuItem =>
-  taste.private
-    ? { label: "End private session", icon: "lock", run: () => void taste.setPrivate(false) }
-    : { label: "Start a private session", icon: "lock", run: () => void taste.setPrivate(true) };
-
-deckMenuItems.add(() => [privateItem()], 70);
-
-deckChips.add(() => {
-  if (!taste.private) return [];
-  const left = leftText();
-  const m = taste.privateLeft;
-  return [{ key: "private", icon: "lock", label: m == null ? "Private" : `Private ${m >= 60 ? "1h" : `${m}m`}`, title: `Private session${left ? `, ${left}` : ""}: plays aren't added to your YouTube history. Select to end it.`, run: () => taste.endPrivate() }];
-}, 60);
-
 // The palette filters these by what's typed.
 paletteItems.add(() => {
   const on = taste.private;
+  // Signed out nothing goes to a history, so there is nothing to pause.
+  if (!on && !account.signedIn) return [];
   return [{
     key: "taste-private",
     group: "Actions",

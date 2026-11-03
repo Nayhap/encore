@@ -1,8 +1,7 @@
 <script lang="ts">
-  // The player bar's status chips (`deckChips` in features/hooks): a sleep
-  // timer counting down, a private session. Nothing shows until a feature
-  // adds one. A chip that opens a menu opens it where it was clicked
-  // (`ui.openMenuAgain`).
+  // The player bar's status chips (`deckChips` in features/hooks): a
+  // background job's progress. Nothing shows until a feature adds one. A
+  // chip that opens a menu opens it where it was clicked (`ui.openMenuAgain`).
   import { deckChips, ui } from "$lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -21,40 +20,32 @@
     }}
   >
     {#if c.icon}<Icon name={c.icon} size={14} />{/if}
-    <span class="mono">{c.label}</span>
+    <span class="num">{c.label}</span>
   </button>
 {/each}
 
 <style>
+  /* Quiet like the session control: a background job's progress, not an alarm. */
   .deck-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 26px;
-    padding: 0 9px;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px 0 9px;
     border-radius: 99px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--text);
+    border: 1px solid var(--line);
     white-space: nowrap;
   }
-  .deck-chip .mono {
+  .deck-chip :global(svg) {
+    color: var(--accent);
+  }
+  .deck-chip .num {
     font-variant-numeric: tabular-nums;
   }
   .deck-chip:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  /* In a narrow window the song's title needs the room: icons only (the
-     title attribute still says what each one is). */
-  @media (max-width: 1000px) {
-    .deck-chip {
-      width: 26px;
-      padding: 0;
-      justify-content: center;
-    }
-    .deck-chip .mono {
-      display: none;
-    }
+    background: var(--hover);
   }
 </style>

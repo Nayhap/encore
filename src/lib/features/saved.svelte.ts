@@ -10,7 +10,7 @@ import { call, type ArtRef, type BackendError, type Bookmark, type BookmarkTarge
 import { catalog } from "$lib/catalog.svelte";
 import { fmt, kindLabel } from "$lib/data";
 import { account, downloads, nav, newPlaylist, player, ui, type MenuItem, type View } from "$lib/state.svelte";
-import { addKey, artistMenuItems, collectionMenuItems, deckMenuItems, paletteItems, registerFeature, trackMenuItems, type PaletteItem } from "./hooks";
+import { addKey, artistMenuItems, collectionMenuItems, grouped, paletteItems, registerFeature, trackMenuItems, type PaletteItem } from "./hooks";
 
 /** The name sheet (overlays/Saved.svelte): a folder's or a saved queue's name. */
 export interface NameSheet {
@@ -241,23 +241,24 @@ export async function removeQueue(q: SavedQueueInfo) {
 /** The queue panel's ⋯ menu. */
 export function queueMenu(): MenuItem[] {
   const ids = player.queue.map((e) => e.track.id);
-  const items: MenuItem[] = [
+  const save: MenuItem[] = [
     { label: "Save queue…", icon: "bookmark", disabled: ids.length ? undefined : "The queue is empty.", run: saveQueue },
   ];
-  if (account.signedIn) items.push({ label: "Save as playlist…", icon: "plus", disabled: !ids.length ? "The queue is empty." : ui.online ? undefined : "You're offline. Connect to the internet to create a playlist.", run: () => newPlaylist(ids) });
-  for (const q of saved.queues.slice(0, 8)) {
-    items.push({
-      label: `${q.name} · ${songsText(q.songs)}`,
-      icon: "queue",
-      run: () =>
-        ui.openMenuAgain([
-          { label: q.current ? `Restore, paused at “${q.current.title}”` : "Restore", icon: "play", run: () => void restoreQueue(q) },
-          { label: "Delete saved queue", icon: "trash", danger: true, run: () => void removeQueue(q) },
-        ]),
-    });
-  }
-  if (player.upNext.length) items.push({ label: "Clear upcoming", icon: "x", danger: true, run: () => (player.clearUpNext(), ui.say("Cleared upcoming songs")) });
-  return items;
+  if (account.signedIn) save.push({ label: "Save as playlist…", icon: "plus", disabled: !ids.length ? "The queue is empty." : ui.online ? undefined : "You're offline. Connect to the internet to create a playlist.", run: () => newPlaylist(ids) });
+  // Saved queues under their own heading; a click restores (paused), and
+  // the second menu offers the delete too.
+  const restore = saved.queues.slice(0, 8).map<MenuItem>((q) => ({
+    label: `${q.name} · ${songsText(q.songs)}`,
+    icon: "queue",
+    more: true,
+    run: () =>
+      ui.openMenuAgain([
+        { label: q.current ? `Restore, paused at “${q.current.title}”` : "Restore", icon: "play", run: () => void restoreQueue(q) },
+        { label: "Delete saved queue", icon: "trash", danger: true, run: () => void removeQueue(q) },
+      ]),
+  }));
+  const clear: MenuItem[] = player.upNext.length ? [{ label: "Clear upcoming", icon: "x", danger: true, run: () => (player.clearUpNext(), ui.say("Cleared upcoming songs")) }] : [];
+  return grouped(save, ["Saved queues", restore], clear);
 }
 
 // ---------- folders (D34) ----------
@@ -417,7 +418,24 @@ function pickFolder(id: string) {
 
 // ---------- hooks ----------
 
-trackMenuItems.add(({ track }) => [{ label: trackBookmark(track.id) ? "Remove bookmark" : "Bookmark", icon: trackBookmark(track.id) ? "bookmarkFill" : "bookmark", run: () => toggleTrackBookmark(track) }], 40);
+// One Bookmark row: on the song that's playing it offers the moment too.
+trackMenuItems.add(({ track }) => {
+  const had = trackBookmark(track.id);
+  const song: MenuItem = { label: had ? "Remove bookmark" : "Bookmark", icon: had ? "bookmarkFill" : "bookmark", band: "keep", run: () => toggleTrackBookmark(track) };
+  if (track.id !== player.current?.id) return [song];
+  const at = fmt(Math.floor(player.position));
+  return [{
+    label: "Bookmark",
+    icon: had ? "bookmarkFill" : "bookmark",
+    band: "keep",
+    more: true,
+    run: () =>
+      ui.openMenuAgain([
+        { ...song, label: had ? "Remove the song's bookmark" : "This song", band: undefined },
+        { label: `This moment (${at})`, icon: "clock", run: bookmarkMoment },
+      ]),
+  }];
+}, 40);
 
 collectionMenuItems.add((id) => {
   const r: PageRef = { name: "collection", id, params: null };
@@ -432,8 +450,6 @@ artistMenuItems.add((id) => {
   const r: PageRef = { name: "artist", id };
   return [{ label: pageBookmark(r) ? "Remove bookmark" : "Bookmark", icon: pageBookmark(r) ? "bookmarkFill" : "bookmark", run: () => togglePageBookmark(r) }];
 }, 40);
-
-deckMenuItems.add(() => (player.current ? [{ label: "Bookmark this moment", icon: "bookmark", run: bookmarkMoment }] : []), 40);
 
 addKey({ key: "b", label: ["B", "Bookmark this moment of the song"], run: bookmarkMoment });
 

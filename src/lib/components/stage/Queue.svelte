@@ -2,7 +2,7 @@
   // Up next: where the queue came from, how long it has left, its songs,
   // and Autoplay. The ⋯ menu saves, restores and clears it (D33).
   import { artistLine, fmt } from "$lib/data";
-  import { downloads, nav, player, queueMenu, spanText, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
+  import { downloads, grouped, nav, player, queueMenu, spanText, trackMenu, ui, type MenuItem } from "$lib/state.svelte";
   import Cover from "../Cover.svelte";
   import DownloadMark from "../DownloadMark.svelte";
   import Icon from "../Icon.svelte";
@@ -36,12 +36,12 @@
 
   function rowMenu(k: number, uid: string, id: string): MenuItem[] {
     const last = player.upNext.length - 1;
-    return [
+    const here: MenuItem[] = [
       ...(k > 0 ? [{ label: "Move up", icon: "up", run: () => player.move(qi(k), qi(k - 1)) }] : []),
       ...(k < last ? [{ label: "Move down", icon: "down", run: () => player.move(qi(k), qi(k + 1)) }] : []),
       { label: "Remove from queue", icon: "x", run: () => player.removeAt(qi(k)) },
-      ...trackMenu(id, uid),
     ];
+    return grouped(here, trackMenu(id, uid));
   }
 </script>
 

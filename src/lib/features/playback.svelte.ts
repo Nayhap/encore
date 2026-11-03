@@ -16,7 +16,7 @@ import type { PlaybackApi } from "$lib/backend/features/playback";
 import { catalog } from "$lib/catalog.svelte";
 import { fmt } from "$lib/data";
 import { player, ui } from "$lib/state.svelte";
-import { addKey, deckChips, paletteItems, registerFeature, trackMenuItems, type MenuItem, type PaletteItem } from "./hooks";
+import { addKey, paletteItems, registerFeature, trackMenuItems, type PaletteItem } from "./hooks";
 
 registerFeature({ name: "playback" });
 
@@ -65,8 +65,9 @@ class Loop {
     if (!dur) return ui.say("This song's length isn't known yet. Try again in a moment.");
     const at = player.position;
     const a = at + FIRST_LOOP <= dur ? at : Math.max(0, dur - FIRST_LOOP);
-    this.set(a, Math.min(dur, a + FIRST_LOOP));
-    ui.say("Looping. Drag its ends on the seek bar, or press A to set them as it plays.");
+    const b = Math.min(dur, a + FIRST_LOOP);
+    this.set(a, b);
+    ui.say(`Looping ${fmt(a)}–${fmt(b)}. Drag the handles to adjust. A clears the loop.`);
   }
 
   /** <kbd>A</kbd>: the first press marks the start, the second the end, a
@@ -85,7 +86,9 @@ class Loop {
       return ui.say(`Loop from ${fmt(t)}. Press A again where it should end.`);
     }
     if (Math.abs(t - p) < 1) return ui.say("A loop needs to be at least a second long.");
-    this.set(Math.min(p, t), Math.max(p, t));
+    const [x, y] = [Math.min(p, t), Math.max(p, t)];
+    this.set(x, y);
+    ui.say(`Looping ${fmt(x)}–${fmt(y)}. Drag the handles to adjust. A clears the loop.`);
   }
 }
 
@@ -99,10 +102,10 @@ if (typeof window !== "undefined") setInterval(() => (clock.now = Date.now()), 1
 /** When each snapshot's timer arrived (its `remaining` is from then). */
 const arrived = new WeakMap<object, number>();
 
-const CHOICES: [number, string][] = [
-  [15, "15 minutes"],
-  [30, "30 minutes"],
-  [45, "45 minutes"],
+export const SLEEP_CHOICES: [number, string][] = [
+  [15, "15 min"],
+  [30, "30 min"],
+  [45, "45 min"],
   [60, "1 hour"],
 ];
 
@@ -112,6 +115,9 @@ const minutesText = (s: number) => {
 };
 
 class SleepTimer {
+  /** The minutes last chosen, to tick in the session popover. */
+  chosen = $state<number | null>(null);
+
   /** Seconds until a timed sleep, counting down; null for the other kinds. */
   get left(): number | null {
     const s = player.sleep;
@@ -121,11 +127,21 @@ class SleepTimer {
     return Math.max(0, s.remaining - (clock.now - at) / 1000);
   }
 
-  /** What the chip and the menu say about the running timer. */
+  /** The session control's short text: "23 min", "End of song". */
+  get short(): string | null {
+    const s = player.sleep;
+    if (!s) return null;
+    if (s.mode === "endOfSong") return "End of song";
+    if (s.mode === "endOfQueue") return "End of queue";
+    const m = Math.max(1, Math.ceil((this.left ?? 0) / 60));
+    return m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}` : `${m} min`;
+  }
+
+  /** What the popover and the palette say about the running timer. */
   get status(): string | null {
     const s = player.sleep;
     if (!s) return null;
-    if (s.mode === "endOfSong") return "Pauses at the end of this song";
+    if (s.mode === "endOfSong") return player.abLoop ? "Pauses when this song ends; the loop keeps it going" : "Pauses at the end of this song";
     if (s.mode === "endOfQueue") return "Pauses at the end of the queue";
     return `Pauses in ${minutesText(this.left ?? 0)}`;
   }
@@ -133,24 +149,13 @@ class SleepTimer {
   set(mode: SleepMode, minutes: number | null = null) {
     void api((p) => p.sleepSet(mode, minutes)).then((ok) => {
       if (!ok) return;
+      this.chosen = minutes;
       ui.say(mode === "endOfSong" ? "Pausing at the end of this song" : mode === "endOfQueue" ? "Pausing at the end of the queue" : `Pausing in ${minutesText((minutes ?? 0) * 60)}`);
     });
   }
 
   off() {
-    void api((p) => p.sleepCancel()).then((ok) => ok && ui.say("Sleep timer off"));
-  }
-
-  /** The moon button's menu (and the chip's). */
-  menu(): MenuItem[] {
-    const on = player.sleep;
-    const looping = !!player.abLoop;
-    return [
-      ...CHOICES.map<MenuItem>(([m, label]) => ({ label, icon: "clock", run: () => this.set("timer", m) })),
-      { label: "End of this song", icon: "moon", disabled: looping ? "Clear the loop to stop at the end of this song" : undefined, run: () => this.set("endOfSong") },
-      { label: "End of the queue", icon: "queue", run: () => this.set("endOfQueue") },
-      ...(on ? [{ label: "Turn off the sleep timer", icon: "x", run: () => this.off() }] : []),
-    ];
+    void api((p) => p.sleepCancel()).then((ok) => ok && ((this.chosen = null), ui.say("Sleep timer off")));
   }
 }
 
@@ -188,15 +193,7 @@ trackMenuItems.add(({ track }) => {
   if (track.id !== player.current?.id) return [];
   return player.abLoop
     ? [{ label: "Clear the loop", icon: "x", run: () => abLoop.clear() }]
-    : [{ label: "Loop a part…", icon: "repeat", run: () => abLoop.part() }];
-});
-
-deckChips.add(() => {
-  const s = player.sleep;
-  if (!s) return [];
-  const left = sleepTimer.left;
-  const label = s.mode === "timer" ? fmt(left) : s.mode === "endOfSong" ? "End of song" : "End of queue";
-  return [{ key: "sleep", icon: "moon", label, title: `Sleep timer: ${sleepTimer.status?.toLowerCase()}. Change or turn it off.`, run: () => ui.openMenuAgain(sleepTimer.menu()) }];
+    : [{ label: "Loop a part", icon: "repeat", run: () => abLoop.part() }];
 });
 
 paletteItems.add((q) => {
@@ -207,7 +204,7 @@ paletteItems.add((q) => {
   // The rest only when asked for: the idle list stays short.
   if (!q) return out;
   if (player.current && !player.abLoop) out.push({ key: "loop", group: "Actions", icon: "repeat", title: "Loop a part of this song", sub: "A–B loop", hint: "A", run: () => abLoop.part() });
-  for (const [m, label] of CHOICES) out.push({ key: `sleep-${m}`, group: "Actions", icon: "moon", title: `Sleep in ${label}`, sub, run: () => sleepTimer.set("timer", m) });
+  for (const [m] of SLEEP_CHOICES) out.push({ key: `sleep-${m}`, group: "Actions", icon: "moon", title: `Sleep in ${minutesText(m * 60)}`, sub, run: () => sleepTimer.set("timer", m) });
   if (player.current && !player.abLoop) out.push({ key: "sleep-song", group: "Actions", icon: "moon", title: "Sleep at the end of this song", sub, run: () => sleepTimer.set("endOfSong") });
   out.push({ key: "sleep-queue", group: "Actions", icon: "moon", title: "Sleep at the end of the queue", sub, run: () => sleepTimer.set("endOfQueue") });
   return out;

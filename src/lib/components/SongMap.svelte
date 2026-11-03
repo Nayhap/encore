@@ -204,26 +204,19 @@
           aria-valuemax={Math.round(track.dur)}
           aria-valuenow={Math.round(b[end])}
           aria-valuetext={fmt(b[end])}
-          title="{end === 'a' ? 'Loop start' : 'Loop end'} {fmt(b[end])}: drag to move"
+          title="{end === 'a' ? 'Loop starts' : 'Loop ends'} at {fmt(b[end])}: drag to move"
           onpointerdown={(e) => grab(end, e)}
           onpointermove={slide}
           onpointerup={drop}
           onkeydown={(e) => nudge(end, e)}
         ><i></i></button>
       {/each}
+      {#if !moving}
+        <button class="unloop" style:left={pct(b.b)} aria-label="Clear the loop {fmt(b.a)}–{fmt(b.b)}" title="Clear the loop (A)" onclick={() => onclearloop?.()}><Icon name="x" size={10} /></button>
+      {/if}
     {/if}
   </div>
 
-  {#if loop && onloop}
-    {@const b = band ?? loop}
-    <div class="pill" role="group" aria-label="Loop">
-      <button class="go" title="Play the loop from its start" onclick={() => onseek(loop.a)}>
-        <Icon name="repeat" size={13} />
-        <span class="mono times">{fmt(b.a)}–{fmt(b.b)}</span>
-      </button>
-      <button class="x" aria-label="Clear the loop" title="Clear the loop (A)" onclick={() => onclearloop?.()}><Icon name="x" size={12} /></button>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -400,41 +393,27 @@
     box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px color-mix(in srgb, var(--accent) 50%, transparent);
   }
 
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    flex: none;
-    height: 22px;
-    border-radius: 99px;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    font-size: 11.5px;
-    font-weight: 600;
+  /* Clears the loop: a small mark riding the band's end. */
+  .unloop {
+    position: absolute;
+    top: -9px;
+    width: 16px;
+    height: 16px;
+    margin-left: 3px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--accent-ink);
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--panel);
+    opacity: 0.85;
+    z-index: 3;
+    transition: opacity 0.15s, transform 0.15s var(--ease);
   }
-  .pill button {
-    display: inline-flex;
-    align-items: center;
-    height: 100%;
-    border-radius: 99px;
-  }
-  .pill .go {
-    gap: 5px;
-    padding: 0 4px 0 8px;
-  }
-  .pill .x {
-    padding: 0 7px 0 3px;
-    opacity: 0.75;
-  }
-  .pill .x:hover,
-  .pill .go:hover {
+  .unloop:hover,
+  .unloop:focus-visible {
     opacity: 1;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-  }
-  /* A narrow bar keeps the bar itself: the times move to the tooltip. */
-  @container (max-width: 330px) {
-    .pill .times {
-      display: none;
-    }
+    transform: scale(1.12);
   }
 
   .tip {
