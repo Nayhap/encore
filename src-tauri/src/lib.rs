@@ -117,6 +117,15 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             // features: saved (lane C)
 
             // features: taste and stats (lane D)
+            features::taste::taste_state,
+            features::taste::taste_block,
+            features::taste::taste_unblock,
+            features::taste::taste_set_hide_podcasts,
+            features::taste::taste_private,
+            features::stats::stats_overview,
+            features::stats::stats_period,
+            features::stats::stats_play_counts,
+            features::stats::stats_clear,
 
             // features: integrations (lane E)
 
@@ -144,6 +153,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             // features: saved (lane C)
 
             // features: taste and stats (lane D)
+            features::taste::TasteEvent,
+            features::stats::StatsEvent,
 
             // features: integrations (lane E)
 

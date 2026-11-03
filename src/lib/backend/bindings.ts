@@ -149,6 +149,24 @@ export const commands = {
 	 *  the UI reads it here rather than keeping its own copy.
 	 */
 	getSystemTitlebar: () => typedError<boolean, AppError_Serialize>(__TAURI_INVOKE("get_system_titlebar")),
+	tasteState: () => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_state")),
+	/**
+	 *  Block a song or an artist. A song that is playing (or an artist's)
+	 *  is skipped at once; a song's "Not interested" goes to YouTube after the
+	 *  undo window, if a row of it carried the token.
+	 */
+	tasteBlock: (kind: BlockKind, target: ItemId, label: string, detail: string | null) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_block", { kind, target, label, detail })),
+	tasteUnblock: (kind: BlockKind, target: ItemId) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_unblock", { kind, target })),
+	tasteSetHidePodcasts: (on: boolean) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_set_hide_podcasts", { on })),
+	/**  Start a private session (an hour, or until Encore quits) or end it. */
+	tastePrivate: (on: boolean) => typedError<TasteState_Serialize, AppError_Serialize>(__TAURI_INVOKE("taste_private", { on })),
+	/**  The months with plays, and since when Encore has counted. */
+	statsOverview: () => typedError<StatsOverview_Serialize, AppError_Serialize>(__TAURI_INVOKE("stats_overview")),
+	statsPeriod: (period: StatsPeriod_Deserialize) => typedError<ListeningStats_Serialize, AppError_Serialize>(__TAURI_INVOKE("stats_period", { period })),
+	/**  Counted plays per song (by `ItemId`), for "your plays" sorting. */
+	statsPlayCounts: (ids: ItemId[]) => typedError<{ [key in string]: number }, AppError_Serialize>(__TAURI_INVOKE("stats_play_counts", { ids })),
+	/**  Forget the current owner's plays (Settings → Storage). */
+	statsClear: () => typedError<number, AppError_Serialize>(__TAURI_INVOKE("stats_clear")),
 };
 
 /** Events */
@@ -168,6 +186,8 @@ export const events = {
 	runtimesEvent: makeEvent<RuntimesEvent_Serialize, RuntimesEvent_Deserialize>("runtimes-event"),
 	setupNeededEvent: makeEvent<SetupNeededEvent_Serialize, SetupNeededEvent_Deserialize>("setup-needed-event"),
 	signinEvent: makeEvent<SigninEvent_Serialize, SigninEvent_Deserialize>("signin-event"),
+	statsEvent: makeEvent<StatsEvent, StatsEvent>("stats-event"),
+	tasteEvent: makeEvent<TasteEvent_Serialize, TasteEvent_Deserialize>("taste-event"),
 };
 
 /* Types */
@@ -334,6 +354,30 @@ export type AuthState_Serialize = { state: "anonymous" } |
 { state: "choosingChannel"; channels: AccountChannel_Serialize[]; source: string } | { state: "signedIn"; channel: AccountChannel_Serialize; channels: AccountChannel_Serialize[]; source: string; premium: boolean | null } | 
 /**  The stored session stopped working; offer re-import / sign-in. */
 { state: "expired"; source: string; reason: string };
+
+export type BlockKind = "track" | "artist";
+
+export type Blocked = Blocked_Serialize | Blocked_Deserialize;
+
+export type Blocked_Deserialize = {
+	kind: BlockKind,
+	target: ItemId,
+	/**  The song's title or the artist's name. */
+	label: string,
+	/**  A song's artist line. */
+	detail?: string | null,
+	created: string,
+};
+
+export type Blocked_Serialize = {
+	kind: BlockKind,
+	target: ItemId,
+	/**  The song's title or the artist's name. */
+	label: string,
+	/**  A song's artist line. */
+	detail: string | null,
+	created: string,
+};
 
 export type Bootstrap = Bootstrap_Serialize | Bootstrap_Deserialize;
 
@@ -970,6 +1014,46 @@ export type LibraryPage_Serialize = {
 };
 
 export type LibrarySection = "playlists" | "albums" | "artists" | "songs" | "liked" | "subscriptions" | "history";
+
+export type ListeningStats = ListeningStats_Serialize | ListeningStats_Deserialize;
+
+export type ListeningStats_Deserialize = {
+	period: StatsPeriod_Deserialize,
+	/**  Everything heard, counted or not. */
+	minutes: number | null,
+	/**  Plays that met the counting rule. */
+	plays: number,
+	/**  Different songs among them. */
+	songs: number,
+	topSongs: TopTrack_Deserialize[],
+	topArtists: TopCredit_Deserialize[],
+	topAlbums: TopCredit_Deserialize[],
+	/**  Minutes heard by the local hour a play started in, 0–23. */
+	byHour: (number | null)[],
+	/**  Songs counted for the first time in this period. */
+	newSongs: number,
+	/**  The most played of them. */
+	newTop: Track_Deserialize[],
+};
+
+export type ListeningStats_Serialize = {
+	period: StatsPeriod_Serialize,
+	/**  Everything heard, counted or not. */
+	minutes: number | null,
+	/**  Plays that met the counting rule. */
+	plays: number,
+	/**  Different songs among them. */
+	songs: number,
+	topSongs: TopTrack_Serialize[],
+	topArtists: TopCredit_Serialize[],
+	topAlbums: TopCredit_Serialize[],
+	/**  Minutes heard by the local hour a play started in, 0–23. */
+	byHour: (number | null)[],
+	/**  Songs counted for the first time in this period. */
+	newSongs: number,
+	/**  The most played of them. */
+	newTop: Track_Serialize[],
+};
 
 /**  An A–B loop, in seconds of the current song. */
 export type LoopRange = {
@@ -1636,6 +1720,51 @@ export type SleepTimer_Serialize = {
 	remaining: number | null,
 };
 
+/**  `stats`: a play was counted or ended, so open stats can refresh. */
+export type StatsEvent = null;
+
+export type StatsOverview = StatsOverview_Serialize | StatsOverview_Deserialize;
+
+export type StatsOverview_Deserialize = {
+	/**  Months with plays, newest first. */
+	months: StatsPeriod_Deserialize[],
+	/**  Unix seconds of the first play, if any. */
+	since?: string | null,
+	plays: number,
+};
+
+export type StatsOverview_Serialize = {
+	/**  Months with plays, newest first. */
+	months: StatsPeriod_Serialize[],
+	/**  Unix seconds of the first play, if any. */
+	since: string | null,
+	plays: number,
+};
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod = StatsPeriod_Serialize | StatsPeriod_Deserialize;
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod_Deserialize = {
+	year: number,
+	month?: number | null,
+};
+
+/**
+ *  A month (`month` 1–12) or a whole year, in the local time each play
+ *  started in.
+ */
+export type StatsPeriod_Serialize = {
+	year: number,
+	month: number | null,
+};
+
 export type StreamInfo = StreamInfo_Serialize | StreamInfo_Deserialize;
 
 export type StreamInfo_Deserialize = {
@@ -1654,6 +1783,74 @@ export type StreamInfo_Serialize = {
 	fromCache: boolean,
 	seekable: boolean,
 	authenticated: boolean,
+};
+
+/**  `taste`: the block list, a setting or the private session changed. */
+export type TasteEvent = TasteEvent_Serialize | TasteEvent_Deserialize;
+
+/**  `taste`: the block list, a setting or the private session changed. */
+export type TasteEvent_Deserialize = TasteState_Deserialize;
+
+/**  `taste`: the block list, a setting or the private session changed. */
+export type TasteEvent_Serialize = TasteState_Serialize;
+
+export type TasteState = TasteState_Serialize | TasteState_Deserialize;
+
+export type TasteState_Deserialize = {
+	/**  The current owner's block list, newest first. */
+	blocked: Blocked_Deserialize[],
+	hidePodcasts: boolean,
+	/**  Unix seconds a private session ends at, while one runs. */
+	privateUntil?: string | null,
+};
+
+export type TasteState_Serialize = {
+	/**  The current owner's block list, newest first. */
+	blocked: Blocked_Serialize[],
+	hidePodcasts: boolean,
+	/**  Unix seconds a private session ends at, while one runs. */
+	privateUntil: string | null,
+};
+
+/**  An artist or an album, ranked. */
+export type TopCredit = TopCredit_Serialize | TopCredit_Deserialize;
+
+/**  An artist or an album, ranked. */
+export type TopCredit_Deserialize = {
+	name: string,
+	id?: ItemId | null,
+	/**  The cover of its most played song. */
+	art?: ArtRef_Deserialize | null,
+	/**  An album's artist line. */
+	detail?: string | null,
+	plays: number,
+	minutes: number | null,
+};
+
+/**  An artist or an album, ranked. */
+export type TopCredit_Serialize = {
+	name: string,
+	id: ItemId | null,
+	/**  The cover of its most played song. */
+	art: ArtRef_Serialize | null,
+	/**  An album's artist line. */
+	detail: string | null,
+	plays: number,
+	minutes: number | null,
+};
+
+export type TopTrack = TopTrack_Serialize | TopTrack_Deserialize;
+
+export type TopTrack_Deserialize = {
+	track: Track_Deserialize,
+	plays: number,
+	minutes: number | null,
+};
+
+export type TopTrack_Serialize = {
+	track: Track_Serialize,
+	plays: number,
+	minutes: number | null,
 };
 
 export type Track = Track_Serialize | Track_Deserialize;
