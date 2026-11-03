@@ -231,10 +231,10 @@ impl ArtCache {
         let first = LOCAL_HUES.get_or_init(Default::default).lock().insert(key.to_string());
         if first {
             let bytes = b.clone();
-            if let Some((h1, h2)) = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten() {
-                if let Some(f) = self.on_hue.lock().as_ref() {
-                    f(key, h1, h2);
-                }
+            if let Some((h1, h2)) = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten()
+                && let Some(f) = self.on_hue.lock().as_ref()
+            {
+                f(key, h1, h2);
             }
         }
         Ok((b, mime))
