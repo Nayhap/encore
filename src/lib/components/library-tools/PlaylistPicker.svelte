@@ -2,22 +2,32 @@
   // "Add to playlists" for a selection (D34): tick any of your playlists,
   // then one add per playlist (D20, duplicates checked), each with its own
   // answer. An add whose outcome is unknown is never sent again by itself.
+  //
+  // With `folder`, the same sheet fills a folder (D34) from the folder's
+  // page: tick playlists and albums from your library to move them in.
   import { untrack } from "svelte";
-  import { call, type BackendError, type MutationOutcome } from "$lib/backend";
+  import { call, type BackendError, type Folder, type MutationOutcome } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
+  import { kindLabel } from "$lib/data";
   import { fold } from "./logic";
-  import { newPlaylist, playlistPicker, playlists, ui } from "$lib/state.svelte";
+  import { fileIn, newPlaylist, playlistPicker, playlists, saved, ui } from "$lib/state.svelte";
   import Cover from "$lib/components/Cover.svelte";
   import Icon from "$lib/components/Icon.svelte";
 
-  const ids = untrack(() => [...playlistPicker.trackIds]);
-  const exclude = untrack(() => playlistPicker.exclude);
+  let { folder, onclose }: { folder?: Folder; onclose?: () => void } = $props();
+
+  const ids = untrack(() => (folder ? [] : [...playlistPicker.trackIds]));
+  const exclude = untrack(() => (folder ? null : playlistPicker.exclude));
   const bare = (id: string) => id.replace(/^(ytm|mock):/, "").replace(/^VL/, "");
   const songs = (n: number) => (n === 1 ? "1 song" : `${n.toLocaleString()} songs`);
   const one = ids.length === 1 ? catalog.track(ids[0])?.title : null;
 
   if (!playlists.loaded) void playlists.load();
-  const lists = $derived(playlists.list.filter((p) => p.kind === "playlist" && bare(p.id) !== (exclude ? bare(exclude) : "")));
+  const lists = $derived(
+    folder
+      ? playlists.list.filter((p) => !folder.items.some((i) => i.itemId === p.id))
+      : playlists.list.filter((p) => p.kind === "playlist" && bare(p.id) !== (exclude ? bare(exclude) : "")),
+  );
   let q = $state("");
   const shown = $derived(q.trim() ? lists.filter((p) => fold(p.title).includes(fold(q))) : lists);
 
@@ -31,6 +41,7 @@
 
   const close = () => {
     if (running) return;
+    if (folder) return onclose?.();
     playlistPicker.open = false;
     const added = Object.values(outcome).filter((o) => o === "done").length;
     if (added) ui.say(`Added ${one ? `“${one}”` : songs(ids.length)} to ${added === 1 ? "1 playlist" : `${added} playlists`}`);
@@ -50,6 +61,13 @@
     if (ran) return close();
     if (!count) return;
     running = true;
+    if (folder) {
+      const todo = lists.filter((p) => picked[p.id]);
+      for (const p of todo) await fileIn(folder, p.id, true);
+      running = false;
+      ui.say(todo.length === 1 ? `Added “${todo[0].title}” to “${folder.name}”` : `Added ${todo.length} to “${folder.name}”`);
+      return onclose?.();
+    }
     const todo = lists.filter((p) => picked[p.id]).map((p) => p.id);
     for (const [i, id] of todo.entries()) {
       await addTo(id, false);
@@ -95,8 +113,13 @@
 
 <div class="scrim" role="presentation" onmousedown={(e) => e.target === e.currentTarget && close()}>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="pp-title" tabindex="-1" bind:this={box} onkeydown={key}>
-    <h2 id="pp-title">Add to playlists</h2>
-    <p class="lead">{one ? `“${one}”` : songs(ids.length)}{ran ? "" : ", to every playlist you tick"}</p>
+    {#if folder}
+      <h2 id="pp-title">Add to “{folder.name}”</h2>
+      <p class="lead">Tick playlists and albums to move them into this folder</p>
+    {:else}
+      <h2 id="pp-title">Add to playlists</h2>
+      <p class="lead">{one ? `“${one}”` : songs(ids.length)}{ran ? "" : ", to every playlist you tick"}</p>
+    {/if}
     {#if lists.length > 6}
       <label class="find">
         <Icon name="search" size={16} />
@@ -104,7 +127,7 @@
       </label>
     {/if}
     <ul class="lists" aria-label="Your playlists">
-      {#if !ran}
+      {#if !ran && !folder}
         <li>
           <button class="row new" onclick={() => ((playlistPicker.open = false), newPlaylist(ids))}>
             <span class="plus"><Icon name="plus" size={18} /></span>
@@ -114,11 +137,12 @@
       {/if}
       {#each shown as p (p.id)}
         {@const o = outcome[p.id]}
+        {@const home = folder ? saved.folderOf(p.id) : undefined}
         <li>
           <button class="row" class:on={picked[p.id]} role="checkbox" aria-checked={!!picked[p.id]} disabled={running || ran} onclick={() => (picked[p.id] = !picked[p.id])}>
             <span class="box" class:on={picked[p.id]}>{#if picked[p.id]}<Icon name="check" size={13} stroke={2.6} />{/if}</span>
             <span class="art"><Cover art={p.art} radius={6} size={120} label={p.title} /></span>
-            <span class="txt"><b class="ell">{p.title}</b>{#if o && hint(p.id, o)}<small class="ell">{hint(p.id, o)}</small>{/if}</span>
+            <span class="txt"><b class="ell">{p.title}</b>{#if o && hint(p.id, o)}<small class="ell">{hint(p.id, o)}</small>{:else if folder}<small class="ell">{home ? `In “${home.name}”` : kindLabel[p.kind]}</small>{/if}</span>
             {#if o}<span class="out {o}">{#if o === "done"}<Icon name="check" size={14} />{/if}{said[o]}</span>{/if}
           </button>
           {#if o === "duplicate"}
@@ -126,13 +150,13 @@
           {/if}
         </li>
       {:else}
-        <li class="none">{q ? "No playlist by that name." : playlists.loaded ? "You have no other playlists yet." : "Loading your playlists…"}</li>
+        <li class="none">{q ? "No playlist by that name." : !playlists.loaded ? "Loading your playlists…" : folder ? "Everything in your library is in this folder already." : "You have no other playlists yet."}</li>
       {/each}
     </ul>
     <div class="btns">
       {#if !ran}<button class="pill" disabled={running} onclick={close}>Cancel</button>{/if}
       <button class="pill primary" disabled={running || (!ran && !count)} onclick={run}>
-        {running ? "Adding…" : ran ? "Done" : count > 1 ? `Add to ${count} playlists` : "Add"}
+        {running ? "Adding…" : ran ? "Done" : folder ? (count > 1 ? `Add ${count}` : "Add") : count > 1 ? `Add to ${count} playlists` : "Add"}
       </button>
     </div>
   </div>

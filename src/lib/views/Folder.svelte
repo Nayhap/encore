@@ -3,8 +3,9 @@
   // `{ name: "folder", id, title }`. Folders are Encore's own, kept on this
   // computer; what's in them opens and plays as usual.
   import { catalog } from "$lib/catalog.svelte";
-  import { chooseCover, folderMenu, renameFolder, saved, ui } from "$lib/state.svelte";
+  import { folderMenu, renameFolder, saved, ui } from "$lib/state.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import PlaylistPicker from "$lib/components/library-tools/PlaylistPicker.svelte";
   import Status from "$lib/components/Status.svelte";
   import Tile from "$lib/components/Tile.svelte";
   import FolderCover from "$lib/components/saved/FolderCover.svelte";
@@ -16,6 +17,7 @@
   const lists = $derived(f ? f.items.length - albums : 0);
   const hue = $derived(f ? catalog.hue(f.cover ? { key: f.cover, h1: null, h2: null } : (f.items[0]?.card.art ?? null), f.name)[0] : 200);
   const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
+  let adding = $state(false);
 </script>
 
 <div class="page">
@@ -26,15 +28,14 @@
       <div class="art"><FolderCover folder={f} radius={12} size={544} /></div>
       <div class="info">
         <p class="kind">Folder</p>
-        <h1 class:long={f.name.length > 22}>{f.name}</h1>
+        <h1 class:long={f.name.length > 22}><button class="name" title="Rename" onclick={() => renameFolder(f)}>{f.name}</button></h1>
         <p class="meta">
           {#if lists}<span>{count(lists, "playlist", "playlists")}</span>{/if}
           {#if albums}<span>{count(albums, "album", "albums")}</span>{/if}
           <span>On this computer</span>
         </p>
         <div class="actions">
-          <button class="pill" onclick={() => renameFolder(f)}><Icon name="edit" size={15} />Rename</button>
-          <button class="pill" onclick={() => chooseCover(f)}><Icon name="sparkle" size={15} />{f.cover ? "Change cover" : "Choose cover"}</button>
+          <button class="pill primary" onclick={() => (adding = true)}><Icon name="plus" size={16} />Add playlists…</button>
           <button class="icon-btn big" aria-label="More actions" onclick={(e) => ui.openMenu(e, folderMenu(f, false))}><Icon name="more" size={19} /></button>
         </div>
       </div>
@@ -48,9 +49,10 @@
       </div>
     {:else}
       <div class="empty">
-        <p>This folder is empty. Drag playlists onto it in the sidebar, or choose <b>Add to folder</b> in a playlist's or album's menu.</p>
+        <p>Nothing in this folder yet. Choose <b>Add playlists…</b>, or drag them onto the folder in the sidebar.</p>
       </div>
     {/if}
+    {#if adding}<PlaylistPicker folder={f} onclose={() => (adding = false)} />{/if}
   {/if}
 </div>
 
@@ -97,6 +99,18 @@
     font-variation-settings: "wdth" 88;
     text-wrap: balance;
     padding-bottom: 4px;
+  }
+  h1 .name {
+    font: inherit;
+    letter-spacing: inherit;
+    text-align: left;
+    border-radius: 8px;
+  }
+  h1 .name:hover {
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-decoration-color: color-mix(in srgb, var(--text) 25%, transparent);
+    text-underline-offset: 6px;
   }
   h1.long {
     font-size: clamp(28px, 3.2vw, 44px);
