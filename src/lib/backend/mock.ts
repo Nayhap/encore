@@ -56,7 +56,7 @@ function card(c: M.MCollection): T.CollectionCard {
     id: mid(c.id),
     kind: kindOf(c),
     title: c.title,
-    subtitle: c.year ? `${c.kind === "album" ? "Album" : "Playlist"} • ${c.by} • ${c.year}` : `${c.kind === "mix" ? "Mix" : "Playlist"} • ${c.by}`,
+    subtitle: c.year ? `${c.kind === "album" ? "Album" : c.kind === "single" ? "Single" : "Playlist"} • ${c.by} • ${c.year}` : `${c.kind === "mix" ? "Mix" : "Playlist"} • ${c.by}`,
     artists: c.artistId ? [{ name: c.by, id: mid(c.artistId) }] : [],
     year: c.year ?? null,
     art: art(c.art),

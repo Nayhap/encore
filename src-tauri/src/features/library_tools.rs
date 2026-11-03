@@ -253,10 +253,8 @@ pub async fn library_like(app: AppHandle, core: S<'_>, track_ids: Vec<ItemId>, l
             }
         }
         // Liked songs kept downloaded follow, once (D23).
-        if changed {
-            if let Some(d) = &core.downloads {
-                d.collection_changed(&ItemId::ytm("VLLM"));
-            }
+        if changed && let Some(d) = &core.downloads {
+            d.collection_changed(&ItemId::ytm("VLLM"));
         }
         st.stopped.lock().remove(&job);
         let _ = LibraryLikeEvent { job, track_id: None, outcome: None, done, total, finished: true, error }.emit(&app);

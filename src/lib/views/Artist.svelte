@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { call, type Artist } from "$lib/backend";
+  import { call, type Artist, type Shelf } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
   import { Resource } from "$lib/load.svelte";
   import { account, artistMenuItems, nav, playArtist, player, ui } from "$lib/state.svelte";
@@ -8,6 +8,7 @@
   import Shelves from "$lib/components/Shelves.svelte";
   import Status from "$lib/components/Status.svelte";
   import TrackTable from "$lib/components/TrackTable.svelte";
+  import Discography from "$lib/components/library-tools/Discography.svelte";
 
   let { id }: { id: string } = $props();
   const res = new Resource<Artist>(async () => {
@@ -19,6 +20,28 @@
   // The ⋯ menu shows once a feature puts something in it (bookmark the
   // artist, don't play them).
   const menu = $derived(a ? artistMenuItems.items(id) : []);
+  // The release shelves' own links (`MPAD…` with their params): the
+  // Discography tab reads every release behind them (D35).
+  const releaseLinks = $derived(a ? a.shelves.flatMap((s) => (s.more?.browseId.startsWith("MPAD") ? [s.more] : [])) : []);
+  let tab = $state<"overview" | "discography">("overview");
+
+  // "Playlists with <artist>": what YouTube Music's community-playlist
+  // search finds for the name (D35). Named for what it is, a search.
+  let community = $state<Shelf | null>(null);
+  $effect(() => {
+    const name = a?.name;
+    if (!name || !ui.online) return;
+    let live = true;
+    call((x) => x.search(name, "communityPlaylists"))
+      .then((r) => {
+        if (!live || !r.playlists.length) return;
+        catalog.addItems(r.playlists.map((c) => ({ type: "collection" as const, ...c })));
+        community = { title: `Playlists with ${name}`, subtitle: "From listeners", layout: "carousel", items: r.playlists.slice(0, 12).map((c) => ({ type: "collection" as const, ...c })), more: null };
+      })
+      .catch(() => {});
+    return () => (live = false);
+  });
+
   let subscribed = $state(false);
   $effect(() => {
     subscribed = !!a?.subscribed;
@@ -67,6 +90,16 @@
       </div>
     </header>
 
+    {#if releaseLinks.length}
+      <div class="tabs" role="tablist" aria-label="{a.name}">
+        <button role="tab" aria-selected={tab === "overview"} onclick={() => (tab = "overview")}>Overview</button>
+        <button role="tab" aria-selected={tab === "discography"} onclick={() => (tab = "discography")}>Discography</button>
+      </div>
+    {/if}
+
+    {#if tab === "discography" && releaseLinks.length}
+      <Discography links={releaseLinks} />
+    {:else}
     {#if a.topSongs.length}
       <h2>Top songs</h2>
       <TrackTable tracks={a.topSongs} label={a.name} showPlays />
@@ -76,6 +109,8 @@
     {/if}
 
     <Shelves shelves={a.shelves} />
+    {#if community}<Shelves shelves={[community]} />{/if}
+    {/if}
   {/if}
 </div>
 
@@ -145,5 +180,34 @@
   }
   .all {
     margin-top: 10px;
+  }
+  .tabs {
+    display: flex;
+    gap: 22px;
+    margin: -6px 0 22px;
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    position: relative;
+    padding: 10px 0 12px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--mute);
+  }
+  .tabs button:hover {
+    color: var(--text);
+  }
+  .tabs button[aria-selected="true"] {
+    color: var(--text);
+  }
+  .tabs button[aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--accent);
   }
 </style>
