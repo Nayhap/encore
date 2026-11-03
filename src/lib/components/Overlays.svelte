@@ -127,8 +127,8 @@
       {#if ui.toast.level === "info"}<Icon name="check" size={16} />{/if}
       <span>{ui.toast.text}</span>
       {#if ui.toast.action}
-        {@const act = ui.toast.action}
-        <button class="toast-act" onclick={() => ((ui.toast = null), act.run())}>{act.label}</button>
+        <!-- The action is read before the toast goes (it is null after). -->
+        <button class="toast-act" onclick={() => { const run = ui.toast?.action?.run; ui.toast = null; run?.(); }}>{ui.toast.action.label}</button>
       {/if}
       {#if ui.toast.level !== "info"}
         <button class="toast-x" aria-label="Dismiss" onclick={() => (ui.toast = null)}><Icon name="x" size={14} /></button>
