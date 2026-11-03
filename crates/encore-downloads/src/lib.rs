@@ -150,6 +150,9 @@ struct Mem {
     started: bool,
     /// Songs found again from their sidecars at open.
     recovered: usize,
+    /// Encore is quitting or installing an update: nothing new starts
+    /// (session only, unlike the user's pause, D24).
+    quiescing: bool,
 }
 
 /// One check of a kept collection, bound to the account and session it was
@@ -327,6 +330,7 @@ impl DownloadManager {
                 lyrics_tried: HashSet::new(),
                 started: false,
                 recovered,
+                quiescing: false,
             }),
             tx,
             wake: Notify::new(),
@@ -708,6 +712,36 @@ impl DownloadManager {
         self.emit_summary();
     }
 
+    /// Before Encore quits or installs an update (D24): the song being
+    /// fetched stops after the current range (its partial file stays and is
+    /// continued next time), a collection check stops at the next page,
+    /// and the folder's lock is let go once no file is being written. Unlike `pause`, nothing is stored:
+    /// the next launch carries on as before. The caller bounds the wait.
+    pub async fn quiesce(&self) {
+        self.mem.lock().quiescing = true;
+        self.wake.notify_one();
+        self.sync_wake.notify_one();
+        // Only the worker writes song files; a check's changes are one
+        // database transaction, whole or not at all.
+        loop {
+            if self.mem.lock().active.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        *self.lock.lock() = None;
+        tracing::info!("downloads: stopped for the exit");
+    }
+
+    /// Quitting didn't happen after all (a failed update install): carry on.
+    pub fn resume_after_quiesce(&self) {
+        if !std::mem::replace(&mut self.mem.lock().quiescing, false) {
+            return;
+        }
+        self.wake.notify_one();
+        self.sync_wake.notify_one();
+    }
+
     /// Try again: failed songs, a stopped bot-check wait, a full disk.
     pub fn retry(&self) {
         {
@@ -894,7 +928,10 @@ impl DownloadManager {
     /// folder's lock, and only online.
     async fn run_syncs(self: Arc<Self>) {
         loop {
-            let ready = { self.mem.lock().online } && self.lock.lock().is_some();
+            let ready = {
+                let m = self.mem.lock();
+                m.online && !m.quiescing
+            } && self.lock.lock().is_some();
             let job = if ready { self.mem.lock().sync_queue.pop_front() } else { None };
             let Some(job) = job else {
                 tokio::select! {
@@ -937,7 +974,13 @@ impl DownloadManager {
         let same = {
             let me = self.clone();
             let ctx = ctx.clone();
-            move || me.mem.lock().online && me.d.service.context() == ctx
+            move || {
+                let live = {
+                    let m = me.mem.lock();
+                    m.online && !m.quiescing
+                };
+                live && me.d.service.context() == ctx
+            }
         };
         if !same() {
             return;
@@ -992,6 +1035,9 @@ impl DownloadManager {
         let (held, error) = {
             let mut l = self.lock.lock();
             let mut error = None;
+            if self.mem.lock().quiescing {
+                return false;
+            }
             if l.is_none() {
                 *l = match WorkerLock::try_acquire(&self.layout.root) {
                     Ok(x) => x,
@@ -1065,7 +1111,7 @@ impl DownloadManager {
     fn should_stop(&self) -> bool {
         let fresh = {
             let mut m = self.mem.lock();
-            if !m.online || m.paused {
+            if !m.online || m.paused || m.quiescing {
                 return true;
             }
             let fresh = m.pause_read.is_some_and(|t| t.elapsed() < Duration::from_secs(1));
@@ -1080,6 +1126,10 @@ impl DownloadManager {
 
     async fn run(self: Arc<Self>) {
         loop {
+            if self.mem.lock().quiescing {
+                self.nap(Duration::from_secs(60)).await;
+                continue;
+            }
             if !self.hold_lock() {
                 self.nap(Duration::from_secs(30)).await;
                 continue;
@@ -1145,14 +1195,20 @@ impl DownloadManager {
     async fn run_job(self: &Arc<Self>, row: DownloadRow) {
         let vid = row.video_id.clone();
         let attempt = next_attempt();
-        if !matches!(self.d.store.download_start(&vid, attempt), Ok(true)) {
-            return;
-        }
         let cancel = Arc::new(AtomicBool::new(false));
         {
+            // Checked with the same lock `quiesce` waits on: once it let
+            // go of the folder, no song starts.
             let mut m = self.mem.lock();
+            if m.quiescing {
+                return;
+            }
             m.active = Some(Active { video_id: vid.clone(), attempt, bytes: 0, total: row.total, cancel: cancel.clone() });
             m.last_progress = None;
+        }
+        if !matches!(self.d.store.download_start(&vid, attempt), Ok(true)) {
+            self.mem.lock().active = None;
+            return;
         }
         self.emit_row(&vid);
         let end = self.fetch_song(&row, attempt, &cancel).await;
@@ -1647,6 +1703,24 @@ mod tests {
         assert_eq!(r.removed, 1);
         assert!(m.lookup(VID).is_none());
         assert!(!f.path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quiescing_lets_go_without_pausing() {
+        let (m, dir, _) = setup(None);
+        m.start();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(WorkerLock::try_acquire(&dir).unwrap().is_none(), "the worker holds the folder");
+        tokio::time::timeout(Duration::from_secs(5), m.quiesce()).await.expect("quiesced");
+        assert!(WorkerLock::try_acquire(&dir).unwrap().is_some(), "and let it go");
+        m.add(vec![sync::tests::track(VID)]).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(m.lookup(VID).is_none(), "nothing starts while quitting");
+        assert_eq!(m.d.store.get::<bool>(SETTINGS, PAUSED).unwrap(), None, "the user's pause is untouched");
+        m.resume_after_quiesce();
+        assert_eq!(m.settle().await, None);
+        assert!(m.lookup(VID).is_some(), "carries on afterwards");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

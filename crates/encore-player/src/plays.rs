@@ -8,7 +8,8 @@
 //! Heard time is the [`Listen`] accounting of `history.rs`: pauses, loading
 //! and seek jumps add nothing. A seek back inside the same entry (an A–B
 //! loop wrapping, D26) stays the same play. The owner is the account the
-//! play started under.
+//! play started under. Before Encore quits or installs an update, the open
+//! play ends with what was heard ([`PlayObserver::settle`], D24).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +18,7 @@ use std::time::Instant;
 use encore_core::local::Owner;
 use encore_core::local::plays::{PlaySink, PlayStart, counts};
 use encore_core::model::Track;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::history::{Listen, MIN_HEARD};
 use crate::{Phase, PlayerEvent};
@@ -39,6 +40,7 @@ pub type OwnerFn = Arc<dyn Fn() -> String + Send + Sync>;
 
 pub struct PlayObserver {
     tx: broadcast::Sender<PlayEvent>,
+    settle: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
 struct Current {
@@ -62,9 +64,21 @@ impl PlayObserver {
     /// account; it is read once per play, when the play begins.
     pub fn spawn(events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySink>, owner: OwnerFn, online: Arc<AtomicBool>, private: Arc<AtomicBool>) -> Arc<Self> {
         let (tx, _) = broadcast::channel(128);
-        let me = Arc::new(PlayObserver { tx: tx.clone() });
-        tokio::spawn(run(events, sink, owner, online, private, tx));
+        let (settle_tx, settle_rx) = mpsc::unbounded_channel();
+        let me = Arc::new(PlayObserver { tx: tx.clone(), settle: settle_tx });
+        tokio::spawn(run(events, sink, owner, online, private, tx, settle_rx));
         me
+    }
+
+    /// Encore is quitting (D24): the open play ends now with the seconds
+    /// heard so far, after the player's last events. Returns whether it
+    /// was written within `bound`.
+    pub async fn settle(&self, bound: std::time::Duration) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self.settle.send(tx).is_err() {
+            return true;
+        }
+        matches!(tokio::time::timeout(bound, rx).await, Ok(Ok(())))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<PlayEvent> {
@@ -72,7 +86,7 @@ impl PlayObserver {
     }
 }
 
-async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySink>, owner: OwnerFn, online: Arc<AtomicBool>, private: Arc<AtomicBool>, tx: broadcast::Sender<PlayEvent>) {
+async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySink>, owner: OwnerFn, online: Arc<AtomicBool>, private: Arc<AtomicBool>, tx: broadcast::Sender<PlayEvent>, mut settle: mpsc::UnboundedReceiver<oneshot::Sender<()>>) {
     let t0 = Instant::now();
     let clock = move || t0.elapsed().as_secs_f64();
     let mut cur: Option<Current> = None;
@@ -84,10 +98,20 @@ async fn run(mut events: broadcast::Receiver<PlayerEvent>, sink: Arc<dyn PlaySin
         let _ = tx.send(PlayEvent::Ended { play, heard, counted: c.counted });
     };
     loop {
-        let ev = match events.recv().await {
-            Ok(e) => e,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => break,
+        // Events first: the pause Encore publishes as it quits is counted
+        // before the play is closed.
+        let ev = tokio::select! {
+            biased;
+            ev = events.recv() => match ev {
+                Ok(e) => e,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            Some(done) = settle.recv() => {
+                end(cur.take());
+                let _ = done.send(());
+                continue;
+            }
         };
         let now = clock();
         match ev {
@@ -272,6 +296,22 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let last = sink.updates.lock().last().cloned().unwrap();
         assert_eq!((last.1.round(), last.3), (9.0, false), "saved, not ended");
+    }
+
+    #[tokio::test]
+    async fn settling_ends_the_open_play() {
+        let (etx, erx) = broadcast::channel(64);
+        let sink = Arc::new(Sink::default());
+        let obs = PlayObserver::spawn(erx, sink.clone(), Arc::new(|| "acc".to_string()), Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+        etx.send(PlayerEvent::State(snap("1", "a", Phase::Playing, 0.0))).unwrap();
+        for s in 1..=20 {
+            etx.send(at("1", s as f64)).unwrap();
+        }
+        assert!(obs.settle(std::time::Duration::from_secs(2)).await);
+        let last = sink.updates.lock().last().cloned().unwrap();
+        assert_eq!((last.1.round(), last.3), (20.0, true), "ended with what was heard");
+        // Nothing open: settles at once.
+        assert!(obs.settle(std::time::Duration::from_millis(200)).await);
     }
 
     #[tokio::test]

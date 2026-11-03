@@ -5,6 +5,8 @@ use encore_core::model::{AuthState, Lyrics};
 use encore_downloads::{DownloadItem, DownloadsSummary};
 use encore_player::{PlayerSnapshot, PositionAnchor, QueueSplice};
 use encore_resolver::RuntimeStatus;
+
+use crate::updates::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use tauri_specta::Event;
 
@@ -99,6 +101,11 @@ pub struct DownloadItemEvent {
     pub revision: String,
     pub item: DownloadItem,
 }
+
+/// In-app updates changed: a check, download progress (at most four a
+/// second), ready, installing (D24). Newer revisions win.
+#[derive(Serialize, Deserialize, Clone, specta::Type, Event)]
+pub struct UpdateEvent(pub UpdateStatus);
 
 /// The connection was lost, or came back.
 #[derive(Serialize, Deserialize, Clone, specta::Type, Event)]

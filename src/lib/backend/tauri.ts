@@ -23,6 +23,7 @@ export const tauriApi: Api = {
       events.downloadsEvent.listen((e) => h.downloads(e.payload as any)),
       events.downloadItemEvent.listen((e) => h.downloadItem(e.payload as any)),
       events.connectivityEvent.listen((e) => h.connectivity(e.payload.online)),
+      events.updateEvent.listen((e) => h.update(e.payload as any)),
     ]);
     return () => offs.forEach((off) => off());
   },
@@ -102,6 +103,13 @@ export const tauriApi: Api = {
   downloadsRemoveAll: () => u(commands.downloadsRemoveAll()) as any,
   downloadsStorage: () => u(commands.downloadsStorage()),
   connectivityCheck: () => u(commands.connectivityCheck()),
+  updateStatus: () => u(commands.updateStatus()) as any,
+  updateCheck: () => u(commands.updateCheck()) as any,
+  updateDownload: () => u(commands.updateDownload()) as any,
+  updateInstall: () => u(commands.updateInstall()) as any,
+  updateSkip: (v) => u(commands.updateSkip(v)) as any,
+  updateUnskip: () => u(commands.updateUnskip()) as any,
+  setAutoUpdate: (on) => u(commands.setAutoUpdate(on)) as any,
   artUrl: (key, size) => protocolUrl("art", `${key}?s=${size}`),
   features: tauriFeatures,
 };

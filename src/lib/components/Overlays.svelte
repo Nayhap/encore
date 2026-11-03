@@ -126,6 +126,10 @@
     <div class="toast" class:long={ui.toast.text.length > 70} class:alert={ui.toast.level !== "info"} role={ui.toast.level === "info" ? "status" : "alert"} style:--toast-ms="{ui.toast.ms}ms">
       {#if ui.toast.level === "info"}<Icon name="check" size={16} />{/if}
       <span>{ui.toast.text}</span>
+      {#if ui.toast.action}
+        {@const act = ui.toast.action}
+        <button class="toast-act" onclick={() => ((ui.toast = null), act.run())}>{act.label}</button>
+      {/if}
       {#if ui.toast.level !== "info"}
         <button class="toast-x" aria-label="Dismiss" onclick={() => (ui.toast = null)}><Icon name="x" size={14} /></button>
       {/if}
@@ -296,6 +300,20 @@
     background: var(--panel);
     color: var(--text);
     border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  }
+  .toast-act {
+    flex: none;
+    height: 26px;
+    margin-left: 4px;
+    padding: 0 11px;
+    border-radius: 99px;
+    font-size: 13px;
+    font-weight: 650;
+    color: inherit;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+  }
+  .toast-act:hover {
+    background: color-mix(in srgb, currentColor 22%, transparent);
   }
   .toast-x {
     flex: none;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Folder } from "$lib/backend";
   import { kindLabel } from "$lib/data";
-  import { account, collectionMenu, downloads, fileIn, folderMenu, importFolder, moveInFolder, nav, needsOnline, newFolder, newPlaylist, player, playlists, saved, setCollapsed, ui, unfile, type View } from "$lib/state.svelte";
+  import { account, collectionMenu, downloads, fileIn, folderMenu, importFolder, moveInFolder, nav, needsOnline, newFolder, newPlaylist, player, playlists, saved, setCollapsed, ui, unfile, updates, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import FolderCover from "./saved/FolderCover.svelte";
   import { isMac, mod } from "$lib/platform";
@@ -47,6 +47,8 @@
     return () => mq.removeEventListener("change", on);
   });
   const tip = (s: string) => (compact ? s : undefined);
+  // In the rail the update dot needs its words too.
+  const settingsTip = $derived(updates.ready ? `Settings · Encore ${updates.version} is ready to install` : "Settings");
 
   function addMenu(e: MouseEvent) {
     ui.openMenu(e, [
@@ -217,8 +219,8 @@
   </ul>
 
   <div class="foot">
-    <button class="account" aria-label={tip("Settings")} title={tip("Settings")} onclick={() => nav.go({ name: "settings" })}>
-      <span class="avatar">{initial}</span>
+    <button class="account" aria-label={tip(settingsTip)} title={tip(settingsTip)} onclick={() => nav.go({ name: "settings" })}>
+      <span class="avatar">{initial}{#if updates.ready}<i class="ready" title="Encore {updates.version} is ready to install"></i>{/if}</span>
       <span class="txt">
         <span class="name ell">{account.name ?? (account.state.state === "expired" ? "Session expired" : account.state.state === "choosingChannel" ? "Choose a channel" : "Not signed in")}</span>
         <span class="sub">Settings</span>
@@ -526,6 +528,7 @@
     color: var(--text);
   }
   .avatar {
+    position: relative;
     display: grid;
     place-items: center;
     width: 30px;
@@ -535,6 +538,18 @@
     color: var(--accent-ink);
     font-weight: 700;
     font-size: 13px;
+  }
+
+  /* An update is ready to install (D24). */
+  .ready {
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text);
+    box-shadow: 0 0 0 2px var(--panel);
   }
 
   @media (max-width: 1000px) {

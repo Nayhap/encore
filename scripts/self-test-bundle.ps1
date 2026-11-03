@@ -1,6 +1,8 @@
 # Installs the NSIS installer silently, runs `encore --self-test` from the
 # installed copy (the way users run it), then uninstalls.
 #   scripts/self-test-bundle.ps1 -Installer path\to\Encore_x.y.z_x64-setup.exe [-Video id] [-Strict]
+# The report must say the install updates as NSIS (D24): the bundler's
+# marker in the binary is what routes an update to the right installer.
 param(
   [Parameter(Mandatory = $true)][string]$Installer,
   [string]$Video = "4D7u5KF7SP8",
@@ -19,6 +21,9 @@ if ($Strict) { $a += "--strict" }
 $run = Start-Process -FilePath $exe -ArgumentList $a -Wait -PassThru
 if (Test-Path $out) { Get-Content $out } else { Write-Host "no report written" }
 $code = $run.ExitCode
+$kind = if (Test-Path $out) { (Get-Content $out -Raw | ConvertFrom-Json).update.install } else { $null }
 $un = Join-Path $env:LOCALAPPDATA "Encore\uninstall.exe"
 if (Test-Path $un) { Start-Process -FilePath $un -ArgumentList "/S" -Wait | Out-Null }
 if ($code -ne 0) { throw "self-test failed with exit code $code" }
+if ($kind -ne "nsis") { throw "this installer's Encore updates as '$kind', expected 'nsis'" }
+Write-Host "self-test: updates as $kind"

@@ -540,6 +540,119 @@ function needsSetupBeforePlay() {
 }
 if (q.has("updating")) setTimeout(rtInstall, 1500);
 
+// ---------- updates (D24) ----------
+// An automatic check runs 3 s after start. `?update` finds Encore 0.5.0 and
+// downloads it over 6 s; `?update-manual` has automatic updates off, so it
+// only says so (Download on request); `?update-deb` is a .deb install, which
+// links to the release page; `?update-fail` makes checks fail;
+// `?update-translocated` runs from a translocated copy on macOS; `?updated`
+// starts just after an update, with its "What's new".
+const UPDATE_NOTES = `## What's new
+
+- **In-app updates.** Encore checks for new versions a few times a day, downloads them in the background and installs them the next time you quit or restart it.
+- **Settings → Updates** shows the version, checks on request and can turn automatic updates off.
+- Press <kbd>⌘K</kbd> and choose **Check for updates** from anywhere.
+
+## Fixes
+
+- Quitting saves the queue and position at once, instead of up to 5 seconds earlier.`;
+const updateInfo = (version: string): T.UpdateInfo => ({
+  version,
+  date: new Date(Date.now() - 2 * 86400_000).toISOString(),
+  notes: UPDATE_NOTES.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2).replace(/\*\*|<\/?kbd>/g, "")),
+  page: `https://github.com/Nayhap/encore/releases/tag/v${version}`,
+});
+const upFound = q.has("update") || q.has("update-manual") || q.has("update-deb") || q.has("update-translocated");
+const up = {
+  rev: 1,
+  current: "0.4.0",
+  auto: !q.has("update-manual"),
+  install: (q.has("update-deb") ? "deb" : "app") as T.InstallKind,
+  reason: q.has("update-deb")
+    ? "You installed Encore from the .deb package, which Encore can't update itself. Download the new .deb from the releases page."
+    : q.has("update-translocated")
+      ? "Move Encore to your Applications folder, then open it from there to let it update itself."
+      : null,
+  phase: "idle" as T.UpdatePhase,
+  available: null as T.UpdateInfo | null,
+  received: 0,
+  total: 0,
+  error: null as string | null,
+  checkedAt: null as number | null,
+  skipped: null as string | null,
+  requested: false,
+  timer: 0,
+  updated: q.has("updated") ? updateInfo("0.4.0") : null,
+};
+function upStatus(): T.UpdateStatus {
+  const dl = up.phase === "downloading";
+  return {
+    revision: String(up.rev),
+    current: up.current,
+    install: up.install,
+    canInstall: !up.reason,
+    reason: up.reason,
+    auto: up.auto,
+    phase: up.phase,
+    available: up.available,
+    received: dl ? up.received : null,
+    total: dl ? up.total : null,
+    error: up.error,
+    checkedAt: up.checkedAt,
+    skipped: up.skipped,
+    atQuit: up.phase === "ready" && (up.auto || up.requested),
+    updated: up.updated,
+  };
+}
+const upEmit = () => {
+  up.rev++;
+  h?.update(upStatus());
+};
+async function upCheck(manual: boolean) {
+  if (up.phase === "downloading" || up.phase === "installing") return upStatus();
+  if (up.phase !== "ready") up.phase = "checking";
+  upEmit();
+  await new Promise((r) => setTimeout(r, 900));
+  if (q.has("update-fail")) {
+    up.error = "GitHub didn't answer";
+    if (up.phase === "checking") up.phase = up.available ? "available" : "failed";
+  } else {
+    up.error = null;
+    up.checkedAt = Date.now() / 1000;
+    if (up.phase === "ready") return (upEmit(), upStatus());
+    if (upFound) {
+      up.available = updateInfo("0.5.0");
+      up.phase = "available";
+      if (up.auto && !up.reason && up.skipped !== "0.5.0") upDownload(false);
+    } else {
+      up.available = null;
+      up.phase = "upToDate";
+    }
+  }
+  void manual;
+  upEmit();
+  return upStatus();
+}
+function upDownload(requested: boolean) {
+  if (!up.available || up.reason || !["available", "failed"].includes(up.phase)) return;
+  up.phase = "downloading";
+  up.requested = requested;
+  up.received = 0;
+  up.total = 28_400_000;
+  clearInterval(up.timer);
+  up.timer = window.setInterval(() => {
+    if (up.phase !== "downloading") return clearInterval(up.timer);
+    up.received = Math.min(up.total, up.received + up.total / 24);
+    if (up.received >= up.total) {
+      clearInterval(up.timer);
+      up.phase = "ready";
+    }
+    upEmit();
+  }, 250);
+  upEmit();
+}
+setTimeout(() => void upCheck(false), 3000);
+
 // ---------- downloads (D23) ----------
 // One simulated worker: a song "downloads" in 1.5 s, at 0.25 s ticks.
 // `?downloaded` starts with "Late night" kept and downloaded, plus one song
@@ -692,6 +805,7 @@ export const mockApi: Api = {
       queue: { revision: String(qrev), entries: P.entries, index: P.index },
       runtimes: rtStatus(),
       online: dl.online,
+      update: upStatus(),
     }, 10);
   },
   runtimesStatus: async () => rtStatus(true),
@@ -1178,6 +1292,43 @@ export const mockApi: Api = {
     return { songs: s.songs, bytes: s.bytes, location: "~/Library/Application Support/app.encore.desktop/downloads" };
   },
   connectivityCheck: async () => dl.online,
+  updateStatus: async () => upStatus(),
+  updateCheck: () => upCheck(true),
+  async updateDownload() {
+    upDownload(true);
+    return upStatus();
+  },
+  // Like a restart into the new version, without reloading the page.
+  async updateInstall() {
+    if (up.phase !== "ready" || !up.available) throw { code: "invalid", message: "No update is ready to install. Check for updates first.", retryable: false, action: null };
+    up.phase = "installing";
+    upEmit();
+    await new Promise((r) => setTimeout(r, 1500));
+    up.updated = up.available;
+    up.current = up.available.version;
+    up.available = null;
+    up.phase = "upToDate";
+    upEmit();
+  },
+  async updateSkip(v) {
+    up.skipped = v;
+    if (up.available?.version === v && (up.phase === "downloading" || up.phase === "ready")) up.phase = "available";
+    upEmit();
+    return upStatus();
+  },
+  async updateUnskip() {
+    up.skipped = null;
+    if (up.auto && up.phase === "available") upDownload(false);
+    upEmit();
+    return upStatus();
+  },
+  async setAutoUpdate(on) {
+    up.auto = on;
+    if (!on && up.phase === "downloading" && !up.requested) up.phase = "available";
+    if (on && up.phase === "available" && up.skipped !== up.available?.version) upDownload(false);
+    upEmit();
+    return upStatus();
+  },
   artUrl: () => "",
   features: mockFeatures,
 };

@@ -110,6 +110,18 @@ install, and nothing else on your computer changes. Encore keeps them up to
 date when it updates. **Settings → Playback** shows them and can remove them
 to free the space.
 
+### Keeping up to date
+
+Encore updates itself from this project's releases. A few times a day it
+asks GitHub whether a new version is out, downloads it in the background
+and installs it the next time you quit Encore, or straight away when you
+choose **Restart to update**. It never restarts by itself. To decide for
+yourself, turn off **Settings → Updates → Install updates automatically**:
+Encore then only tells you when a new version is out. On macOS, each update
+asks once again for access to your saved session in the Keychain; choose
+**Always Allow**. Installs from the `.deb` don't update themselves: Encore
+says when a new version is out and links to it.
+
 Uninstalling keeps Encore's caches, settings and player components (a few
 hundred MB at most), and your downloads, unless you tick **Delete the
 application data** in the Windows uninstaller. [Where Encore keeps things](docs/development.md#where-encore-keeps-things)

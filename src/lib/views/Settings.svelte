@@ -6,6 +6,7 @@
   import Connections from "./settings/Connections.svelte";
   import Playback from "./settings/Playback.svelte";
   import Storage from "./settings/Storage.svelte";
+  import Updates from "./settings/Updates.svelte";
   import { settings } from "./settings/shared.svelte";
 
   settings.err = null;
@@ -17,6 +18,7 @@
     ["playback", "Playback"],
     ["connections", "Connections"],
     ["storage", "Storage"],
+    ["updates", "Updates"],
   ] as const;
   let current = $state<string>("account");
   let page = $state<HTMLDivElement>();
@@ -58,6 +60,7 @@
   <div id="set-playback"><Playback /></div>
   <div id="set-connections"><Connections /></div>
   <div id="set-storage"><Storage /></div>
+  <div id="set-updates"><Updates /></div>
 </div>
 
 <style>

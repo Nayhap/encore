@@ -11,12 +11,13 @@
   import { commands } from "./backend/bindings";
   import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
-  import { account, connect, downloads, nav, player, setup, ui } from "./state.svelte";
+  import { account, connect, downloads, nav, player, setup, ui, updates } from "./state.svelte";
   import Deck from "./components/Deck.svelte";
   import Overlays from "./components/Overlays.svelte";
   import Palette from "./components/Palette.svelte";
   import PlaylistDialog from "./components/PlaylistDialog.svelte";
   import Setup from "./components/Setup.svelte";
+  import UpdateSheet from "./components/UpdateSheet.svelte";
   import Icon from "./components/Icon.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import Stage from "./components/Stage.svelte";
@@ -155,12 +156,13 @@
       if (ui.menu) ui.menu = null;
       else if (ui.confirm) ui.confirm = null;
       else if (ui.sheet) ui.sheet = null;
+      else if (updates.sheet) updates.sheet = null;
       else if (ui.shortcuts) ui.shortcuts = false;
       else if (ui.palette) ui.palette = false;
       else if (ui.theater) ui.theater = false;
       return;
     }
-    if (typing || ui.palette || ui.menu || ui.sheet || ui.confirm || setup.open) return;
+    if (typing || ui.palette || ui.menu || ui.sheet || ui.confirm || setup.open || updates.sheet || updates.installing) return;
 
     if (mod) {
       if (e.key === "ArrowLeft") player.prev();
@@ -293,6 +295,14 @@
 {#if ui.palette}<Palette />{/if}
 {#if ui.sheet}{#key ui.sheet}<PlaylistDialog sheet={ui.sheet} />{/key}{/if}
 {#if setup.open}<Setup />{/if}
+{#if updates.sheet}<UpdateSheet />{/if}
+{#if updates.installing}
+  <!-- Pausing, then handing over to the installer (D24). -->
+  <div class="installing" role="status">
+    <span class="ring" aria-hidden="true"></span>
+    Installing the update…
+  </div>
+{/if}
 {#if setup.installing && !setup.open}
   <!-- Setup or an update running in the background (D22). -->
   <button class="setup-pill" onclick={() => setup.show()} aria-label="Show setup progress">
@@ -383,6 +393,7 @@
   .setup-pill:hover {
     background: color-mix(in srgb, var(--raise) 85%, var(--text));
   }
+  .installing .ring,
   .setup-pill .ring {
     width: 14px;
     height: 14px;
@@ -394,6 +405,18 @@
   .setup-pill .pct {
     color: var(--mute);
     font-variant-numeric: tabular-nums;
+  }
+  .installing {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: color-mix(in srgb, var(--ink) 78%, transparent);
+    font-size: 14px;
+    font-weight: 600;
   }
   @keyframes spin {
     to {

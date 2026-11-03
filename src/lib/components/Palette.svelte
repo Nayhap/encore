@@ -3,7 +3,7 @@
   import { catalog } from "$lib/catalog.svelte";
   import { artistLine, fmt, kindLabel } from "$lib/data";
   import { PREFIXES, parseTime, splitScope, type Scope } from "$lib/features/powerQuery";
-  import { account, downloads, isCommand, nav, needsOnline, newPlaylist, paletteItems, playArtist, player, playlists, power, ui, type PaletteItem, type PowerRecent } from "$lib/state.svelte";
+  import { account, downloads, isCommand, nav, needsOnline, newPlaylist, paletteItems, playArtist, player, playlists, power, ui, updates, type PaletteItem, type PowerRecent } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { mod, shift } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -78,6 +78,8 @@
     { key: "a-repeat", group: "Actions", icon: "repeat", title: "Change repeat mode", sub: "Off, queue, or this song", hint: "R", run: () => player.cycleRepeat() },
     { key: "a-lyrics", group: "Actions", icon: "lyrics", title: "Open full-screen lyrics", sub: "Playback", hint: "F", run: () => (ui.theater = true) },
     { key: "a-stage", group: "Actions", icon: "stage", title: ui.stageOpen ? "Hide now playing panel" : "Show now playing panel", sub: "Layout", hint: mod("\\"), run: () => (ui.stageOpen = !ui.stageOpen) },
+    ...(updates.ready ? [{ key: "a-upd-install", group: "Actions", icon: "download", title: "Restart to update Encore", sub: `Encore ${updates.version} is ready`, run: () => void updates.install() }] : []),
+    { key: "a-upd", group: "Actions", icon: "download", title: "Check for updates", sub: "Settings", run: () => void updates.check() },
     { key: "a-theme", group: "Actions", icon: "moon", title: "Change theme", sub: "System, dark or light", run: () => nav.go({ name: "settings" }) },
     { key: "a-newpl", group: "Actions", icon: "plus", title: "New playlist…", sub: "Create a playlist", run: () => { const why = needsOnline("create a playlist"); if (why) ui.say(why); else newPlaylist(); } },
     { key: "a-lib", group: "Go to", icon: "library", title: "Library", sub: "Playlists, albums, artists", run: () => nav.go({ name: "library" }) },
