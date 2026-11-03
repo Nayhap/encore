@@ -73,6 +73,29 @@ pub fn register(url: &str) -> Option<ArtRef> {
     Some(ArtRef { key, h1: e.hue.map(|h| h.0), h2: e.hue.map(|h| h.1) })
 }
 
+/// The https address of a registered remote cover at 544 px, for things
+/// outside Encore that show it themselves (Discord). `None` for local
+/// covers and unknown keys: their files never leave this computer.
+pub fn public_url(key: &str) -> Option<String> {
+    let e = lookup(key)?;
+    let u = url::Url::parse(&e.base).ok()?;
+    (u.scheme() == "https" && u.host_str().is_some_and(host_allowed)).then(|| sized_url(&e.base, 544))
+}
+
+/// Local covers (D34): images the user chose, kept in app data and served
+/// by the same `art://` protocol under keys of their own: `l-` and 32 hex
+/// digits, random, so a key says nothing about the file and can't name a
+/// path. They never go through the remote registry or its host allow-list.
+pub const LOCAL_PREFIX: &str = "l-";
+
+pub fn new_local_key() -> String {
+    format!("{LOCAL_PREFIX}{}", uuid::Uuid::new_v4().simple())
+}
+
+pub fn is_local_key(key: &str) -> bool {
+    key.strip_prefix(LOCAL_PREFIX).is_some_and(|h| h.len() == 32 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
 pub fn lookup(key: &str) -> Option<ArtEntry> {
     reg().read().get(key).cloned()
 }
@@ -121,6 +144,18 @@ mod tests {
         assert_eq!(a.key, b.key);
         assert_eq!(lookup(&a.key).unwrap().base, "https://lh3.googleusercontent.com/abcDEF");
         assert_eq!(sized_url("https://lh3.googleusercontent.com/abcDEF", 320), "https://lh3.googleusercontent.com/abcDEF=w320-h320-l90-rj");
+    }
+
+    #[test]
+    fn local_keys_are_their_own() {
+        let k = new_local_key();
+        assert!(is_local_key(&k), "{k}");
+        assert!(!is_local_key("l-../../etc/passwd"));
+        assert!(!is_local_key("l-0123456789ABCDEF0123456789abcdef"));
+        assert!(!is_local_key("0123456789abcdef0123"));
+        assert!(lookup(&k).is_none() && public_url(&k).is_none());
+        let a = register("https://lh3.googleusercontent.com/pub=w60-h60").unwrap();
+        assert_eq!(public_url(&a.key).as_deref(), Some("https://lh3.googleusercontent.com/pub=w544-h544-l90-rj"));
     }
 
     #[test]

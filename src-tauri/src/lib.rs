@@ -115,6 +115,25 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             // features: library tools (lane B)
 
             // features: saved (lane C)
+            features::saved::bookmarks_list,
+            features::saved::bookmarks_add,
+            features::saved::bookmarks_remove,
+            features::saved::saved_queues_list,
+            features::saved::saved_queue_save,
+            features::saved::saved_queue_restore,
+            features::saved::saved_queue_remove,
+            features::saved::folders_list,
+            features::saved::folders_create,
+            features::saved::folders_rename,
+            features::saved::folders_remove,
+            features::saved::folders_set_collapsed,
+            features::saved::folders_add,
+            features::saved::folders_remove_item,
+            features::saved::folders_move_item,
+            features::saved::folders_choose_cover,
+            features::saved::folders_clear_cover,
+            features::saved::folders_export,
+            features::saved::folders_import,
 
             // features: taste and stats (lane D)
 
@@ -277,6 +296,7 @@ pub fn run() {
     }));
     let app = app.plugin(tauri_plugin_opener::init());
     // features: plugins, one `let app = app.plugin(...);` line per lane.
+    let app = app.plugin(tauri_plugin_dialog::init()); // lane C: folder covers and files
 
     app.invoke_handler(builder.invoke_handler())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, req, responder| {
