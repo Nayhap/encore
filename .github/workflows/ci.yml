@@ -50,6 +50,13 @@ jobs:
       - run: cargo test --workspace
       - run: git diff --exit-code src/lib/backend/bindings.ts
       - run: bun run check
+      # The release job's update manifest (D24). Bundles here have no
+      # updater packages: tauri.conf.json leaves them to the release build.
+      - name: Test the update manifest script
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y minisign
+          scripts/test-release-manifest.sh
       - name: Bundle
         run: bun run tauri build --bundles ${{ matrix.bundles }}
       # Run the built artifact the way users get it: set up yt-dlp with the
