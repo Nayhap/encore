@@ -11,6 +11,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The release job's manifest script, on the release job's runner: Ubuntu
+  # 22.04 has no minisign package (D24).
+  manifest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y minisign jq
+      - run: scripts/test-release-manifest.sh
   check:
     strategy:
       fail-fast: false
@@ -52,11 +60,6 @@ jobs:
       - run: bun run check
       # The release job's update manifest (D24). Bundles here have no
       # updater packages: tauri.conf.json leaves them to the release build.
-      - name: Test the update manifest script
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get install -y minisign
-          scripts/test-release-manifest.sh
       # Signed with a throwaway key made here, never the release secrets:
       # the updater packages the release workflow uploads are made, under
       # the names it expects (D24).
