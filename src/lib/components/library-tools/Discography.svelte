@@ -8,6 +8,7 @@
   import { Resource } from "$lib/load.svelte";
   import Status from "$lib/components/Status.svelte";
   import Tile from "$lib/components/Tile.svelte";
+  import Glyph from "./Glyph.svelte";
 
   let { links }: { links: PageLink[] } = $props();
 
@@ -34,6 +35,8 @@
     return ys.map((y) => ({ year: y, items: by.get(y)! }));
   });
   const n = (k: number) => k.toLocaleString();
+  // One count for the whole discography, qualified when YouTube stopped early.
+  const total = $derived(res.data ? `${res.data.complete ? "" : "At least "}${n(all.length)} ${all.length === 1 ? "release" : "releases"}` : "");
   const chips: [Kind, string][] = [
     ["all", "All"],
     ["albums", "Albums"],
@@ -47,11 +50,17 @@
     <div class="chips" role="group" aria-label="Show">
       {#each chips as [k, label]}
         {#if k === "all" || counts[k]}
-          <button class="chip" aria-pressed={kind === k} onclick={() => (kind = k)}>{label} <span class="n">{res.data.complete || k !== "all" ? n(counts[k]) : `${n(counts[k])}+`}</span></button>
+          <button class="chip" aria-pressed={kind === k} onclick={() => (kind = k)}>{label}</button>
         {/if}
       {/each}
     </div>
-    <button class="chip order" onclick={() => (newest = !newest)} aria-label={newest ? "Newest first; show oldest first" : "Oldest first; show newest first"}>{newest ? "Newest first" : "Oldest first"}</button>
+    <div class="end">
+      <span class="total">{total}</span>
+      <button class="tool" onclick={() => (newest = !newest)} aria-label={newest ? "Newest first. Show oldest first" : "Oldest first. Show newest first"} title={newest ? "Show oldest first" : "Show newest first"}>
+        <Glyph name={newest ? "sort" : "sortUp"} />
+        <span>{newest ? "Newest first" : "Oldest first"}</span>
+      </button>
+    </div>
   </div>
   {#each years as g (g.year)}
     <section class="year">
@@ -64,7 +73,7 @@
     </section>
   {/each}
   {#if !res.data.complete}
-    <p class="note">YouTube Music stopped listing after {n(all.length)} releases, so there may be more.</p>
+    <p class="note">YouTube Music stopped listing here, so there may be more.</p>
   {/if}
 {/if}
 
@@ -81,17 +90,33 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .n {
-    margin-left: 4px;
-    opacity: 0.6;
+  .end {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .total {
+    font-size: 13px;
+    color: var(--dim);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
-  .order {
-    background: none;
+  .tool {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--mute);
+    white-space: nowrap;
+    transition: color 0.15s, background-color 0.15s;
   }
-  .order:hover {
+  .tool:hover {
     color: var(--text);
+    background: var(--hover);
   }
   .year {
     display: grid;
@@ -100,9 +125,10 @@
     padding: 18px 0;
     border-top: 1px solid var(--line);
   }
+  /* Under the artist page's sticky tabs. */
   h3 {
     position: sticky;
-    top: 12px;
+    top: 58px;
     align-self: start;
     font-family: var(--font-display);
     font-size: 26px;
