@@ -42,6 +42,8 @@ export interface Handlers {
   downloadItem(e: T.DownloadItemEvent): void;
   /** The connection was lost, or came back. */
   connectivity(online: boolean): void;
+  /** In-app updates changed (D24). */
+  update(s: T.UpdateStatus): void;
 }
 
 export interface Api {
@@ -139,6 +141,16 @@ export interface Api {
   downloadsStorage(): Promise<T.DownloadsStorage>;
   /** Check the connection now; true when YouTube answered. */
   connectivityCheck(): Promise<boolean>;
+  updateStatus(): Promise<T.UpdateStatus>;
+  /** Ask GitHub now (shows a skipped version too); resolves with the answer. */
+  updateCheck(): Promise<T.UpdateStatus>;
+  /** Download the update that was found. */
+  updateDownload(): Promise<T.UpdateStatus>;
+  /** Pause, install and restart into the new version; rejects if the install failed. */
+  updateInstall(): Promise<void>;
+  updateSkip(version: string): Promise<T.UpdateStatus>;
+  updateUnskip(): Promise<T.UpdateStatus>;
+  setAutoUpdate(on: boolean): Promise<T.UpdateStatus>;
   /** URL for an art key at a given edge size. */
   artUrl(key: string, size: number): string;
 }

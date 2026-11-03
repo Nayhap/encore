@@ -1,6 +1,6 @@
 <script lang="ts">
   import { kindLabel } from "$lib/data";
-  import { account, collectionMenu, downloads, nav, newPlaylist, player, playlists, ui, type View } from "$lib/state.svelte";
+  import { account, collectionMenu, downloads, nav, newPlaylist, player, playlists, ui, updates, type View } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
   import { isMac, mod } from "$lib/platform";
   import Icon from "./Icon.svelte";
@@ -86,10 +86,10 @@
 
   <div class="foot">
     <button class="account" onclick={() => nav.go({ name: "settings" })}>
-      <span class="avatar">{initial}</span>
+      <span class="avatar">{initial}{#if updates.ready}<i class="ready" title="Encore {updates.version} is ready to install"></i>{/if}</span>
       <span class="txt">
         <span class="name ell">{account.name ?? (account.state.state === "expired" ? "Session expired" : account.state.state === "choosingChannel" ? "Choose a channel" : "Not signed in")}</span>
-        <span class="sub">Settings</span>
+        <span class="sub">{updates.ready ? "Update ready" : "Settings"}</span>
       </span>
       <Icon name="settings" size={17} />
     </button>
@@ -323,6 +323,7 @@
     color: var(--text);
   }
   .avatar {
+    position: relative;
     display: grid;
     place-items: center;
     width: 30px;
@@ -332,6 +333,18 @@
     color: var(--accent-ink);
     font-weight: 700;
     font-size: 13px;
+  }
+
+  /* An update is ready to install (D24). */
+  .ready {
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text);
+    box-shadow: 0 0 0 2px var(--panel);
   }
 
   @media (max-width: 1000px) {

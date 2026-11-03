@@ -68,6 +68,10 @@ export type DownloadRemoved = B.DownloadRemoved_Serialize;
 export type DownloadsStorage = B.DownloadsStorage;
 export type KeptCollection = B.KeptCollection_Serialize;
 export type ActiveDownload = B.ActiveDownload_Serialize;
+export type UpdateStatus = B.UpdateStatus_Serialize;
+export type UpdateInfo = B.UpdateInfo_Serialize;
+export type UpdatePhase = B.UpdatePhase;
+export type InstallKind = B.InstallKind;
 
 /** Mock-only procedural artwork (dev without Tauri). */
 export type Motif = "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks";
