@@ -143,7 +143,13 @@ either:
     app-bound encryption and lock them while running, so other apps can't read
     them. Use **Sign in** for those.
 
-Then pick the channel to use. Your session is stored in the system's
+Then pick the channel to use. Encore keeps the session alive the way a
+browser does: a session from **Sign in** is refreshed every few minutes,
+and an imported one follows the browser it came from: when that browser
+refreshes the session, Encore reads it again. You only need to sign in or
+import again after signing out of Google in that browser.
+
+Your session is stored in the system's
 credential store and nowhere else: the macOS Keychain, the Secret Service on
 Linux, or Windows Credential Manager (which holds the key to a sealed session
 file, since a session is larger than it allows). Encore has no servers and sends no

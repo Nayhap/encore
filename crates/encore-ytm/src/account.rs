@@ -7,7 +7,8 @@
 //! a channel and a private surface loads as that channel (D7, Meiro #1).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use encore_auth::import::{self, ImportError};
 use encore_auth::store::{SecretStore, load_session, save_session};
@@ -23,6 +24,52 @@ pub struct Accounts {
     store: Arc<dyn SecretStore>,
     channels: Mutex<Vec<(Channel, ChannelSelection)>>,
     expired: Mutex<Option<String>>,
+    /// When the cookies were last rotated or re-read from the browser (D38).
+    refreshed: Mutex<Option<Instant>>,
+    refreshing: tokio::sync::Mutex<()>,
+    /// A scheduled re-read couldn't get the browser's key without asking:
+    /// only a session that stopped working asks again (D38).
+    follow_paused: AtomicBool,
+    /// The user didn't let a forced re-read have the key either: nothing
+    /// asks again until they import or sign in (D38).
+    follow_denied: AtomicBool,
+}
+
+/// How a session's cookies are kept current (D38).
+#[derive(Clone, Debug, PartialEq)]
+enum Upkeep {
+    /// An in-app sign-in: Encore alone holds it, so it rotates it as a
+    /// browser would.
+    Rotate,
+    /// Imported from this browser profile, which keeps rotating the same
+    /// session: Encore follows it by reading its cookies again.
+    Follow(String),
+}
+
+fn upkeep(source: &str) -> Option<Upkeep> {
+    if source == "webview" {
+        return Some(Upkeep::Rotate);
+    }
+    let (browser, profile) = source.split_once(':')?;
+    (import::Browser::from_key(browser).is_some() && !profile.is_empty()).then(|| Upkeep::Follow(source.to_string()))
+}
+
+/// Rotate an in-app sign-in this often, as a browser tab does.
+const ROTATE_EVERY: Duration = Duration::from_secs(10 * 60);
+/// Read an imported session from its browser again this often.
+const FOLLOW_EVERY: Duration = Duration::from_secs(15 * 60);
+/// A forced refresh (something was refused) at most this often.
+const FORCED_GAP: Duration = Duration::from_secs(60);
+
+/// What checking a refused session found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Refreshed, and a private page loads again.
+    Working,
+    /// YouTube Music says it is signed out.
+    Expired,
+    /// Couldn't tell (no connection, a bot check, no session).
+    Unknown,
 }
 
 fn store_err(e: encore_auth::store::StoreError) -> AppError {
@@ -31,7 +78,7 @@ fn store_err(e: encore_auth::store::StoreError) -> AppError {
 
 impl Accounts {
     pub fn new(ytm: Arc<YtMusic>, store: Arc<dyn SecretStore>) -> Arc<Self> {
-        let a = Arc::new(Self { ytm, store, channels: Mutex::new(vec![]), expired: Mutex::new(None) });
+        let a = Arc::new(Self { ytm, store, channels: Mutex::new(vec![]), expired: Mutex::new(None), refreshed: Mutex::new(None), refreshing: tokio::sync::Mutex::new(()), follow_paused: AtomicBool::new(false), follow_denied: AtomicBool::new(false) });
         // Persist rotated cookies (only for sessions that have a channel or are pending).
         let w = Arc::downgrade(&a);
         a.it().on_session_change(move |s| {
@@ -104,6 +151,9 @@ impl Accounts {
     pub async fn adopt(&self, session: Session) -> Result<AuthState> {
         let previous = self.it().session();
         let was_expired = self.expired.lock().take();
+        *self.refreshed.lock() = Some(Instant::now());
+        self.follow_paused.store(false, Ordering::Relaxed);
+        self.follow_denied.store(false, Ordering::Relaxed);
         self.it().set_session(Some(session));
         // D8: sync rotated cookies right away, before the first InnerTube call.
         // (Rotated cookies are saved as they arrive, see `new`.)
@@ -196,14 +246,22 @@ impl Accounts {
         self.it().set_session(None);
         self.channels.lock().clear();
         *self.expired.lock() = None;
+        *self.refreshed.lock() = None;
+        self.follow_paused.store(false, Ordering::Relaxed);
+        self.follow_denied.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    /// One keep-alive round (D8): verify_session + rotation.
+    /// One keep-alive round (D8, D38): bring the cookies up to date when
+    /// due (rotate an in-app sign-in, follow the browser an import came
+    /// from), then `verify_session`. A refusal is checked with a forced
+    /// refresh before the session counts as expired, and an expired session
+    /// that works again (the browser signed in anew) is taken back.
     pub async fn keepalive(&self) -> Result<bool> {
         if !self.it().has_cookies() {
             return Ok(false);
         }
+        let refreshed = self.refresh(false).await;
         match self.it().verify_session().await {
             Ok(changed) => {
                 if changed {
@@ -211,13 +269,121 @@ impl Accounts {
                         let _ = save_session(self.store.as_ref(), &s);
                     }
                 }
-                Ok(changed)
+                let expired = self.expired.lock().clone();
+                if let Some(reason) = expired {
+                    self.recover(&reason).await;
+                }
+                Ok(changed || refreshed)
             }
-            Err(e) if e.code == ErrorCode::SessionExpired => {
-                self.mark_expired("YouTube Music signed this session out.");
-                Err(e)
-            }
+            // `recover` marks the session expired when it is; no answer
+            // marks nothing.
+            Err(e) if e.code == ErrorCode::SessionExpired => match self.recover("YouTube Music signed this session out.").await {
+                Recovery::Working => Ok(true),
+                _ => Err(e),
+            },
             Err(e) => Err(e),
         }
+    }
+
+    /// Bring the session's cookies up to date (D38). Scheduled, it runs when
+    /// the last refresh is older than its interval; `force` (a request was
+    /// refused) runs it unless one ran in the last minute. Returns whether
+    /// the cookies changed.
+    pub async fn refresh(&self, force: bool) -> bool {
+        let _one = self.refreshing.lock().await;
+        let epoch = self.it().epoch();
+        let Some(s) = self.it().session() else { return false };
+        let Some(how) = upkeep(&s.source) else { return false };
+        let every = match how {
+            Upkeep::Rotate => ROTATE_EVERY,
+            Upkeep::Follow(_) if self.follow_denied.load(Ordering::Relaxed) => return false,
+            Upkeep::Follow(_) if !force && self.follow_paused.load(Ordering::Relaxed) => return false,
+            Upkeep::Follow(_) => FOLLOW_EVERY,
+        };
+        let last = *self.refreshed.lock();
+        if last.is_some_and(|t| t.elapsed() < if force { FORCED_GAP } else { every }) {
+            return false;
+        }
+        *self.refreshed.lock() = Some(Instant::now());
+        match how {
+            Upkeep::Rotate => match self.it().rotate_cookies().await {
+                Ok(changed) => changed,
+                Err(e) => {
+                    tracing::info!(code = ?e.code, "session rotation failed");
+                    false
+                }
+            },
+            Upkeep::Follow(profile) => {
+                // Scheduled, don't wait on a Keychain prompt; a forced one
+                // gives the user time to answer it.
+                let wait = Duration::from_secs(if force { 60 } else { 5 });
+                let r = tokio::task::spawn_blocking(move || import::import(&profile, wait)).await;
+                match r {
+                    Ok(Ok(jar)) => {
+                        self.follow_paused.store(false, Ordering::Relaxed);
+                        let changed = self.it().replace_jar(jar, epoch);
+                        tracing::info!(changed, "session read again from the browser");
+                        changed
+                    }
+                    Ok(Err(e)) => {
+                        if matches!(e, ImportError::KeychainDenied(_) | ImportError::KeyUnavailable(_)) {
+                            let flag = if force { &self.follow_denied } else { &self.follow_paused };
+                            flag.store(true, Ordering::Relaxed);
+                            // Nothing was read, so a forced read may follow
+                            // at once.
+                            *self.refreshed.lock() = last;
+                        }
+                        tracing::info!(error = %e, "reading the session from the browser again failed");
+                        false
+                    }
+                    Err(_) => false,
+                }
+            }
+        }
+    }
+
+    /// A signed-in request was refused, or the session was marked expired:
+    /// refresh it and try a private page before telling the user (D38).
+    /// Working clears the expired mark; Expired sets it with `reason`. When
+    /// the identity changed meanwhile (a sign-out, a new import or channel)
+    /// the answer is about a session that is gone: Unknown, nothing marked.
+    pub async fn recover(&self, reason: &str) -> Recovery {
+        let epoch = self.it().epoch();
+        if !self.it().signed_in() {
+            return Recovery::Unknown;
+        }
+        self.refresh(true).await;
+        let _ = self.it().verify_session().await;
+        let r = self.ytm.validate().await;
+        let mut expired = self.expired.lock();
+        if self.it().epoch() != epoch {
+            return Recovery::Unknown;
+        }
+        match r {
+            Ok(_) => {
+                *expired = None;
+                Recovery::Working
+            }
+            Err(e) if e.code == ErrorCode::SessionExpired => {
+                *expired = Some(reason.to_string());
+                Recovery::Expired
+            }
+            Err(_) => Recovery::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upkeep_follows_the_source() {
+        assert_eq!(upkeep("webview"), Some(Upkeep::Rotate));
+        assert_eq!(upkeep("edge:Default"), Some(Upkeep::Follow("edge:Default".into())));
+        assert_eq!(upkeep("firefox:abc.default-release"), Some(Upkeep::Follow("firefox:abc.default-release".into())));
+        assert_eq!(upkeep("chrome:"), None);
+        assert_eq!(upkeep("netscape:Default"), None);
+        assert_eq!(upkeep("test"), None);
     }
 }

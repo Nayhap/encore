@@ -261,9 +261,22 @@ fn forward_player_events(app: tauri::AppHandle, core: Arc<Core>) {
                     let _ = NoticeEvent { text, level: "warn".into(), action: None }.emit(&app);
                 }
                 PlayerEvent::SessionExpired => {
-                    core.accounts.mark_expired("YouTube refused the signed-in stream.");
-                    let _ = AuthEvent(core.accounts.state()).emit(&app);
-                    let _ = NoticeEvent { text: "Your YouTube Music session expired. Import it again from Settings.".into(), level: "error".into(), action: Some("reimport".into()) }.emit(&app);
+                    // Refresh the session and check it before saying it
+                    // expired; when it works again, play the song again (D38).
+                    let (core, app) = (core.clone(), app.clone());
+                    tauri::async_runtime::spawn(async move {
+                        match core.accounts.recover("YouTube refused the signed-in stream.").await {
+                            encore_ytm::account::Recovery::Working => {
+                                let _ = AuthEvent(core.accounts.state()).emit(&app);
+                                core.player.retry_failed();
+                            }
+                            encore_ytm::account::Recovery::Expired => {
+                                let _ = AuthEvent(core.accounts.state()).emit(&app);
+                                let _ = NoticeEvent { text: "Your YouTube Music session expired. Import it again from Settings.".into(), level: "error".into(), action: Some("reimport".into()) }.emit(&app);
+                            }
+                            encore_ytm::account::Recovery::Unknown => {}
+                        }
+                    });
                 }
             }
         }
@@ -304,8 +317,9 @@ fn keepalive(app: tauri::AppHandle, core: Arc<Core>) {
             }
             first = false;
             let before = core.accounts.state();
-            let r = core.accounts.keepalive().await;
-            if r.is_err() && core.accounts.state() != before {
+            let _ = core.accounts.keepalive().await;
+            // Expired, or working again (D38).
+            if core.accounts.state() != before {
                 let _ = AuthEvent(core.accounts.state()).emit(&app);
             }
         }

@@ -1808,6 +1808,19 @@ impl Player {
         }
     }
 
+    /// Try the current song again if it stopped on an error (after the
+    /// session was refreshed, D38); otherwise nothing.
+    pub fn retry_failed(self: &Arc<Self>) {
+        let pos = {
+            let st = self.st.lock();
+            if st.phase != Phase::Error || st.queue.current().is_none() {
+                return;
+            }
+            st.pending_pos
+        };
+        self.play_current(pos);
+    }
+
     pub fn pause(&self) {
         self.engine.pause();
         {
