@@ -197,6 +197,10 @@ impl ArtCache {
             return Err("artwork dimensions not allowed".into());
         }
         let tmp = path.with_extension("tmp");
+        // The folder may have gone while Encore ran (macOS purges caches).
+        if let Some(dir) = path.parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
         if tokio::fs::write(&tmp, &b).await.is_ok() {
             let _ = tokio::fs::rename(&tmp, path).await;
         }

@@ -42,12 +42,7 @@ pub fn sanitize_key(key: &str) -> Option<String> {
 impl AudioCache {
     pub fn new(dir: impl Into<PathBuf>, limit: u64) -> std::io::Result<Self> {
         let dir = dir.into();
-        fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-        }
+        make_dir(&dir)?;
         // Crash cleanup: partial files are never valid media.
         if let Ok(rd) = fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -67,7 +62,14 @@ impl AudioCache {
         self.inner.dir.join(format!("{key}.audio"))
     }
 
+    /// Where a new download goes. The folder is made again if it went away
+    /// while Encore ran: macOS deletes `~/Library/Caches` folders when the
+    /// disk runs low, and cleaner apps do too, after which every song failed
+    /// with "No such file or directory" until a restart.
     pub fn part_path(&self, key: &str) -> PathBuf {
+        if !self.inner.dir.is_dir() {
+            let _ = make_dir(&self.inner.dir);
+        }
         self.inner.dir.join(format!("{key}.{}.part", std::process::id()))
     }
 
@@ -174,6 +176,16 @@ impl AudioCache {
     }
 }
 
+fn make_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 fn touch(p: &Path) {
     if let Ok(f) = fs::OpenOptions::new().append(true).open(p) {
         let _ = f.set_modified(SystemTime::now());
@@ -183,6 +195,18 @@ fn touch(p: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deleted_folder_is_made_again() {
+        let base = std::env::temp_dir().join(format!("encore-cache-gone-{}", std::process::id()));
+        let c = AudioCache::new(base.join("audio"), 1 << 30).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+        let part = c.part_path("abc-140");
+        fs::write(&part, b"x").unwrap();
+        assert!(c.install("abc-140", &part).is_ok());
+        assert!(c.lookup("abc-140").is_some());
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn keys_cannot_escape() {
