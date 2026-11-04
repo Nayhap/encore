@@ -276,8 +276,8 @@ fn chromium_keys(b: Browser, user_data: &Path, timeout: Duration) -> Result<Chro
     #[cfg(target_os = "macos")]
     {
         let (svc, acct) = b.safe_storage();
-        let password = safe_storage_password(svc, acct, timeout).ok_or_else(|| ImportError::KeychainDenied(b.name().into()))?;
-        Ok(ChromiumKeys::Cbc { v10: derive_key(password.as_bytes(), 1003), v11: None })
+        let password = remembered(b, || safe_storage_password(svc, acct, timeout).map(String::into_bytes)).ok_or_else(|| ImportError::KeychainDenied(b.name().into()))?;
+        Ok(ChromiumKeys::Cbc { v10: derive_key(&password, 1003), v11: None })
     }
     #[cfg(windows)]
     {
@@ -293,9 +293,28 @@ fn chromium_keys(b: Browser, user_data: &Path, timeout: Duration) -> Result<Chro
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let v11 = linux_keys::password(b).map(|p| derive_key(&p, 1));
+        let v11 = remembered(b, || linux_keys::password(b)).map(|p| derive_key(&p, 1));
         Ok(ChromiumKeys::Cbc { v10: derive_key(b"peanuts", 1), v11 })
     }
+}
+
+/// A browser's Safe Storage password, kept in memory once read, so that
+/// following a browser's session (D38) asks the Keychain or Secret Service
+/// at most once per launch, not at every re-read. Never written anywhere.
+#[allow(dead_code)]
+fn remembered(b: Browser, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KEYS: OnceLock<Mutex<HashMap<&'static str, Vec<u8>>>> = OnceLock::new();
+    let keys = KEYS.get_or_init(Default::default);
+    if let Some(p) = keys.lock().ok().and_then(|k| k.get(b.key()).cloned()) {
+        return Some(p);
+    }
+    let p = read()?;
+    if let Ok(mut k) = keys.lock() {
+        k.insert(b.key(), p.clone());
+    }
+    Some(p)
 }
 
 /// Read the Safe Storage password with `/usr/bin/security`. The child is

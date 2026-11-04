@@ -127,6 +127,33 @@ impl InnerTube {
         self.state.read().session.clone()
     }
 
+    /// Take newer cookies for the same Google login (a browser that rotated
+    /// them, D38). The identity stays the same, so nothing in flight is
+    /// dropped and caches keep their scope; a different login, or a read
+    /// begun under another `epoch`, is refused.
+    /// Returns whether anything changed.
+    pub fn replace_jar(&self, jar: encore_auth::CookieJar, epoch: u64) -> bool {
+        let changed = {
+            let mut st = self.state.write();
+            // Read for an identity that has since changed (a sign-out, a new
+            // import): its cookies may be older than the session's now.
+            if self.epoch() != epoch {
+                return false;
+            }
+            let Some(s) = st.session.as_mut() else { return false };
+            if jar.login_fingerprint().is_none() || jar.login_fingerprint() != s.jar.login_fingerprint() || jar.login_marks() == s.jar.login_marks() {
+                return false;
+            }
+            s.jar = jar;
+            s.clone()
+        };
+        self.signed_out_strikes.store(0, Ordering::Relaxed);
+        if let Some(f) = self.on_session.lock().as_ref() {
+            f(&changed);
+        }
+        true
+    }
+
     pub fn signed_in(&self) -> bool {
         self.state.read().session.as_ref().is_some_and(|s| s.jar.has_login() && s.channel.is_some())
     }
@@ -430,6 +457,67 @@ impl InnerTube {
         }
         Ok(self.session().map(|s| s.jar) != before)
     }
+
+    /// Rotate the session's `__Secure-1PSIDTS` / `__Secure-3PSIDTS` the way
+    /// a browser does (D38): the `RotateCookiesPage` frame YouTube and
+    /// Google pages load posts to `/RotateCookies` on `accounts.youtube.com`
+    /// (the `.youtube.com` cookies InnerTube uses) and `accounts.google.com`
+    /// (the `.google.com` ones). Google stops honouring a session whose
+    /// timestamps never move, which is how an in-app sign-in used to expire.
+    /// Only for a session Encore alone holds: rotating a browser's copy
+    /// would fork it from the browser's own.
+    ///
+    /// Returns whether a cookie changed. `SessionExpired` only when both
+    /// hosts answer 401; a single refusal or another status is logged and
+    /// left to `verify_session`, which decides whether the session is gone.
+    pub async fn rotate_cookies(&self) -> Result<bool> {
+        let epoch = self.epoch();
+        let before = self.session().map(|s| s.jar);
+        if before.is_none() {
+            return Err(AppError::auth_required());
+        }
+        let mut refused = 0;
+        for host in ["accounts.youtube.com", "accounts.google.com"] {
+            let url = url::Url::parse(&format!("https://{host}/RotateCookies")).unwrap();
+            let page = format!("https://{host}/RotateCookiesPage?origin={ORIGIN}&yt_pid=1");
+            let req = {
+                let st = self.state.read();
+                let Some(s) = st.session.as_ref() else { return Err(AppError::auth_required()) };
+                let cookie = s.jar.header_for(&url);
+                if cookie.is_empty() {
+                    continue;
+                }
+                self.stats_http
+                    .post(url.clone())
+                    .header("User-Agent", WEB_UA)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "*/*")
+                    .header("Origin", format!("https://{host}"))
+                    .header("Referer", page)
+                    .header("Cookie", cookie)
+                    .body(r#"[000,"-0000000000000000000"]"#)
+            };
+            let t0 = Instant::now();
+            let Ok(resp) = req.send().await else {
+                return Err(AppError::network("Could not reach Google to refresh the session."));
+            };
+            let status = resp.status().as_u16();
+            tracing::info!(host, status, ms = t0.elapsed().as_millis() as u64, "rotate cookies");
+            // Cookies belong to the identity that asked (a sign-out or switch
+            // in between drops them).
+            if self.epoch() != epoch {
+                return Err(AppError::stale());
+            }
+            self.merge_cookies(&url, resp.headers());
+            if status == 401 {
+                refused += 1;
+            }
+        }
+        if refused == 2 {
+            return Err(AppError::session_expired());
+        }
+        Ok(self.session().map(|s| s.jar) != before)
+    }
 }
 
 /// Stats pings carry the session, so they only go to YouTube's own stats paths.
@@ -457,6 +545,33 @@ fn scrape(body: &str, marker: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(sapisid: &str, ts: &str, sidcc: &str) -> Session {
+        let c = |n: &str, v: &str| encore_core::service::CookieRecord { name: n.into(), value: v.into(), domain: ".youtube.com".into(), path: "/".into(), secure: true, http_only: false, expires: None };
+        Session::new(encore_auth::CookieJar::new(vec![c("SAPISID", sapisid), c("__Secure-3PSIDTS", ts), c("SIDCC", sidcc)]), "edge:Default")
+    }
+
+    #[test]
+    fn newer_cookies_of_the_same_login_replace_without_a_new_identity() {
+        let it = InnerTube::new("en", "US");
+        it.set_session(Some(session("a", "t1", "x")));
+        let saved = Arc::new(AtomicU64::new(0));
+        let n = saved.clone();
+        it.on_session_change(move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+        });
+        let epoch = it.epoch();
+        // Only a per-request cookie differs: nothing to take.
+        assert!(!it.replace_jar(session("a", "t1", "y").jar, epoch));
+        // Another Google login: refused.
+        assert!(!it.replace_jar(session("b", "t2", "x").jar, epoch));
+        // The browser rotated the timestamp: taken, saved, same identity.
+        assert!(!it.replace_jar(session("a", "t2", "z").jar, epoch - 1));
+        assert!(it.replace_jar(session("a", "t2", "z").jar, epoch));
+        assert_eq!(it.session().unwrap().jar.get("__Secure-3PSIDTS", "music.youtube.com"), Some("t2"));
+        assert_eq!(it.epoch(), epoch);
+        assert_eq!(saved.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn stats_urls_are_restricted() {

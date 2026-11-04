@@ -100,8 +100,10 @@ Sessions come from one of two places:
    cookies, then closes it.
 
 Either way, the user then picks a channel, which may be a brand channel. The session is
-saved as one Keychain item and is kept alive by periodic refreshes. Nothing secret is
-written to disk or to the log.
+saved as one Keychain item and kept alive (D38): an in-app sign-in is rotated
+as a browser tab rotates it, and an import follows its browser by reading the
+profile's cookies again. A refused request refreshes and checks the session
+before it counts as expired. Nothing secret is written to disk or to the log.
 
 ## Offline
 

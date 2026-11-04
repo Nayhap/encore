@@ -167,6 +167,18 @@ impl CookieJar {
         &self.cookies
     }
 
+    /// The cookies that carry the Google login itself (the SID family and
+    /// its rotating timestamps), as `(domain, name, value)` sorted. Two jars
+    /// with the same marks hold the same session state; the per-request
+    /// `SIDCC`s and visitor cookies are left out, since they change on every
+    /// answer (D38).
+    pub fn login_marks(&self) -> Vec<(&str, &str, &str)> {
+        const LOGIN: &[&str] = &["SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID", "__Secure-1PSIDTS", "__Secure-3PSIDTS"];
+        let mut v: Vec<(&str, &str, &str)> = self.cookies.iter().filter(|c| LOGIN.contains(&c.name.as_str())).map(|c| (c.domain.as_str(), c.name.as_str(), c.value.as_str())).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Short non-secret fingerprint of the login, for cache scoping: changes
     /// when the user logs into a different Google account.
     pub fn login_fingerprint(&self) -> Option<String> {
@@ -223,6 +235,28 @@ mod tests {
         // Unreadable: kept for the session.
         assert!(j.apply_set_cookie(&u, "Y=1; Domain=.youtube.com; Expires=someday"));
         assert_eq!(j.get("Y", "www.youtube.com"), Some("1"));
+    }
+
+    #[test]
+    fn login_marks_skip_per_request_cookies() {
+        let a = CookieJar::new(vec![c("SAPISID", "s", ".youtube.com"), c("__Secure-3PSIDTS", "t1", ".youtube.com"), c("SIDCC", "x", ".youtube.com")]);
+        let mut b = a.clone();
+        let u = url::Url::parse("https://music.youtube.com/verify_session").unwrap();
+        b.apply_set_cookie(&u, "SIDCC=y; Domain=.youtube.com; Path=/");
+        assert_eq!(a.login_marks(), b.login_marks());
+        // The rotation endpoint on accounts.youtube.com sets the .youtube.com timestamp.
+        let r = url::Url::parse("https://accounts.youtube.com/RotateCookies").unwrap();
+        assert!(b.apply_set_cookie(&r, "__Secure-3PSIDTS=t2; Domain=.youtube.com; Path=/; Secure; HttpOnly"));
+        assert_ne!(a.login_marks(), b.login_marks());
+        assert_eq!(b.get("__Secure-3PSIDTS", "music.youtube.com"), Some("t2"));
+    }
+
+    #[test]
+    fn rotation_hosts_get_their_own_cookies() {
+        let j = CookieJar::new(vec![c("__Secure-1PSID", "g", ".google.com"), c("__Secure-1PSID", "y", ".youtube.com")]);
+        let g = j.header_for(&url::Url::parse("https://accounts.google.com/RotateCookies").unwrap());
+        let y = j.header_for(&url::Url::parse("https://accounts.youtube.com/RotateCookies").unwrap());
+        assert_eq!((g.as_str(), y.as_str()), ("__Secure-1PSID=g", "__Secure-1PSID=y"));
     }
 
     #[test]
