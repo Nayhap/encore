@@ -74,24 +74,52 @@
     inset: 0;
     overflow: hidden;
   }
+  /* Two soft lights. Each is the 80vmax disc, blurred by 90px, that it once
+     was, drawn as the radial gradient a Gaussian blur makes of a disc (the
+     normal CDF across its edge: 50 % at the rim, out to 3σ = 270px), so the
+     compositor has no full-screen blur to redo while the theater is open. */
   .blob {
+    --r: 40vmax;
+    --spread: 270px;
     position: absolute;
-    width: 80vmax;
-    height: 80vmax;
+    width: calc(2 * (var(--r) + var(--spread)));
+    height: calc(2 * (var(--r) + var(--spread)));
+    margin: calc(-1 * var(--spread));
     border-radius: 50%;
-    filter: blur(90px);
     opacity: 0.9;
   }
   .blob.a {
     left: -25vmax;
     top: -35vmax;
-    background: var(--tint-a);
+    background: radial-gradient(
+      circle closest-side,
+      var(--tint-a) calc(var(--r) - 180px),
+      color-mix(in srgb, var(--tint-a) 84.1%, transparent) calc(var(--r) - 90px),
+      color-mix(in srgb, var(--tint-a) 69.1%, transparent) calc(var(--r) - 45px),
+      color-mix(in srgb, var(--tint-a) 50%, transparent) var(--r),
+      color-mix(in srgb, var(--tint-a) 30.9%, transparent) calc(var(--r) + 45px),
+      color-mix(in srgb, var(--tint-a) 15.9%, transparent) calc(var(--r) + 90px),
+      color-mix(in srgb, var(--tint-a) 6.7%, transparent) calc(var(--r) + 135px),
+      color-mix(in srgb, var(--tint-a) 2.3%, transparent) calc(var(--r) + 180px),
+      transparent calc(var(--r) + 270px)
+    );
     animation: drift 28s ease-in-out infinite alternate;
   }
   .blob.b {
     right: -30vmax;
     bottom: -40vmax;
-    background: var(--tint-b);
+    background: radial-gradient(
+      circle closest-side,
+      var(--tint-b) calc(var(--r) - 180px),
+      color-mix(in srgb, var(--tint-b) 84.1%, transparent) calc(var(--r) - 90px),
+      color-mix(in srgb, var(--tint-b) 69.1%, transparent) calc(var(--r) - 45px),
+      color-mix(in srgb, var(--tint-b) 50%, transparent) var(--r),
+      color-mix(in srgb, var(--tint-b) 30.9%, transparent) calc(var(--r) + 45px),
+      color-mix(in srgb, var(--tint-b) 15.9%, transparent) calc(var(--r) + 90px),
+      color-mix(in srgb, var(--tint-b) 6.7%, transparent) calc(var(--r) + 135px),
+      color-mix(in srgb, var(--tint-b) 2.3%, transparent) calc(var(--r) + 180px),
+      transparent calc(var(--r) + 270px)
+    );
     animation: drift 34s ease-in-out infinite alternate-reverse;
   }
   @keyframes drift {
@@ -104,10 +132,9 @@
       animation: none;
     }
   }
-  /* WebKitGTK redraws large blurs on the CPU every frame: on Linux the same
-     glow comes from plain gradients that hold still. */
+  /* Linux keeps its own still, plainer glow (D17). */
   :global(:root[data-os="linux"]) .blob {
-    filter: none;
+    --spread: 0px;
     animation: none;
   }
   :global(:root[data-os="linux"]) .blob.a {
