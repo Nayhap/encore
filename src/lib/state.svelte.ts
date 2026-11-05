@@ -66,7 +66,20 @@ class Player {
   #anchor = { pos: 0, at: 0, playing: false };
 
   constructor() {
-    if (typeof window !== "undefined") setInterval(this.#tick, TICK_MS);
+    if (typeof window === "undefined") return;
+    setInterval(this.#tick, TICK_MS);
+    // A hidden window keeps the anchors but writes no position, so nothing
+    // is restyled for it; it catches up once when it is shown again.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) this.#show();
+    });
+  }
+
+  /** The position the anchor gives for now. */
+  #show() {
+    const a = this.#anchor;
+    if (a.playing) this.#tick();
+    else this.position = a.pos;
   }
 
   #tick = () => {
@@ -121,7 +134,7 @@ class Player {
       this.#setAnchor(s.position ?? 0, s.playing && s.phase === "playing");
     } else {
       this.#anchor.playing = s.playing && s.phase === "playing";
-      if (!this.#anchor.playing) this.position = this.#anchor.pos;
+      if (!this.#anchor.playing && !document.hidden) this.position = this.#anchor.pos;
     }
     this.ready = true;
   }
@@ -140,7 +153,7 @@ class Player {
 
   #setAnchor(pos: number, playing: boolean) {
     this.#anchor = { pos, at: performance.now(), playing };
-    this.position = pos;
+    if (!document.hidden) this.position = pos;
   }
 
   applySplice(q: QueueSplice) {

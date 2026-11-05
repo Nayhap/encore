@@ -1,7 +1,7 @@
 // `bun test src/lib`: the library tools' finding, sorting and duplicates.
 import { describe, expect, test } from "bun:test";
 import type { Entry, Track } from "$lib/backend";
-import { bareTitle, duplicates, find, fold, known, noFacts, playCount, sortEntries } from "./logic";
+import { bareTitle, duplicates, find, fold, known, noFacts, playCount, sortEntries, uniqueKeys } from "./logic";
 
 const track = (id: string, title: string, artist: string, extra: Partial<Track> = {}): Track => ({
   id,
@@ -34,6 +34,21 @@ describe("find", () => {
   });
   test("an empty query is everything", () => {
     expect(find(es, "   ")).toBe(es);
+  });
+});
+
+describe("row keys", () => {
+  test("unique ids stay as they are", () => {
+    expect(uniqueKeys(["a#0", "b#1", "c#2"])).toEqual(["a#0", "b#1", "c#2"]);
+  });
+  test("the same song twice gets two keys", () => {
+    const k = uniqueKeys(["a", "b", "a", "a"]);
+    expect(new Set(k).size).toBe(4);
+    expect(k.slice(0, 2)).toEqual(["a", "b"]);
+  });
+  test("a key doesn't follow its row's place", () => {
+    // Finding drops the first row: the others keep theirs.
+    expect(uniqueKeys(["b#1", "c#2"])).toEqual(uniqueKeys(["a#0", "b#1", "c#2"]).slice(1));
   });
 });
 

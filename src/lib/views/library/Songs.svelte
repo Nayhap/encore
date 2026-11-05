@@ -28,7 +28,7 @@
   </div>
 {/if}
 {#if view.length}
-  <TrackTable tracks={view.map((e) => e.track)} label="Liked music" collectionId="ytm:VLLM" {select} />
+  <TrackTable tracks={view.map((e) => e.track)} keys={view.map((e) => e.entryId)} label="Liked music" collectionId="ytm:VLLM" {select} />
 {:else}
   <Status empty={`No songs match “${tools.query.trim()}”.`} />
 {/if}

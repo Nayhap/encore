@@ -87,6 +87,7 @@
   });
   const view = $derived(tools.view);
   const shown = $derived(view.map((e) => e.track));
+  const shownKeys = $derived(view.map((e) => e.entryId));
   $effect(() => {
     if (entries.length) tools.refreshFacts();
   });
@@ -337,7 +338,7 @@
         </div>
       {/if}
       {#if view.length}
-        <TrackTable tracks={shown} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum || tools.key === "youtube"} {metric} {select} {tag} {groupStart} onremove={c.editable && account.signedIn && ui.online ? remove : undefined} endMenu={moveMenu} reorder={canReorder && !tools.changed ? move : undefined} />
+        <TrackTable tracks={shown} keys={shownKeys} label={c.title} collectionId={id} showAlbum={!isAlbum} showArt={!isAlbum} showPlays={isAlbum || tools.key === "youtube"} {metric} {select} {tag} {groupStart} onremove={c.editable && account.signedIn && ui.online ? remove : undefined} endMenu={moveMenu} reorder={canReorder && !tools.changed ? move : undefined} />
       {:else}
         <Status empty={cursor ? `No songs match “${tools.query.trim()}” in the ${entries.length.toLocaleString()} loaded so far.` : `No songs match “${tools.query.trim()}”.`} />
       {/if}

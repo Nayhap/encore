@@ -96,9 +96,19 @@ export const abLoop = new Loop();
 
 // ---------- the sleep timer ----------
 
-/** A clock for counting down between snapshots. */
+/** A clock for counting down between snapshots. It ticks only while a
+ *  timed sleep is being read, and stops by itself once there is none. */
 const clock = $state({ now: Date.now() });
-if (typeof window !== "undefined") setInterval(() => (clock.now = Date.now()), 1000);
+let ticking: ReturnType<typeof setInterval> | undefined;
+function tickClock() {
+  if (ticking) return;
+  ticking = setInterval(() => {
+    if (player.sleep?.mode !== "timer") {
+      clearInterval(ticking);
+      ticking = undefined;
+    } else clock.now = Date.now();
+  }, 1000);
+}
 /** When each snapshot's timer arrived (its `remaining` is from then). */
 const arrived = new WeakMap<object, number>();
 
@@ -124,7 +134,9 @@ class SleepTimer {
     if (!s || s.mode !== "timer" || s.remaining == null) return null;
     let at = arrived.get(s);
     if (at == null) arrived.set(s, (at = Date.now()));
-    return Math.max(0, s.remaining - (clock.now - at) / 1000);
+    tickClock();
+    // The clock may not have ticked since the timer arrived.
+    return Math.max(0, s.remaining - Math.max(0, clock.now - at) / 1000);
   }
 
   /** The session control's short text: "23 min", "End of song". */
