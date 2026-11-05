@@ -456,12 +456,17 @@ impl Core {
             self.connectivity.check();
             return Ok(v);
         }
-        let flight = format!("{scope}\u{1f}{key}\u{1f}{}\u{1f}{}\u{1f}{}", std::any::type_name::<T>(), self.ytm.context().epoch, self.writes.load(std::sync::atomic::Ordering::SeqCst));
+        let writes = self.writes.load(std::sync::atomic::Ordering::SeqCst);
+        let flight = format!("{scope}\u{1f}{key}\u{1f}{}\u{1f}{}\u{1f}{writes}", std::any::type_name::<T>(), self.ytm.context().epoch);
         let shared = self
             .pages
             .run(flight, || async {
                 let v = fetch().await?;
-                let _ = self.store.put(&scope, key, &v, Some(7 * 24 * 3600));
+                // Saved only when no write happened while it was fetched:
+                // an answer from before a write isn't kept for later.
+                if self.writes.load(std::sync::atomic::Ordering::SeqCst) == writes {
+                    let _ = self.store.put(&scope, key, &v, Some(7 * 24 * 3600));
+                }
                 // An answer while marked offline: the connection is back.
                 if !self.connectivity.online() {
                     self.connectivity.check();

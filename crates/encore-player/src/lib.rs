@@ -1148,8 +1148,9 @@ impl Player {
                 None => {
                     // Another song chosen meanwhile stops this one's resolve
                     // (its requests and any challenge solve), not just its
-                    // result. A resolve another caller waits on for the same
-                    // song goes on there (the resolver's single flight).
+                    // result. Another caller waiting on the same song's
+                    // resolve then runs its own (the resolver's single flight
+                    // hands the turn on; nothing is shared from a stopped one).
                     let gone = |st: &State| st.track_gen != my_gen;
                     let res = {
                         let _busy = me.gate.enter();

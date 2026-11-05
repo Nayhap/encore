@@ -354,7 +354,20 @@ impl ArtCache {
         if tokio::fs::write(&tmp, &png).await.is_ok() {
             let _ = tokio::fs::rename(&tmp, &path).await;
         }
+        self.wrote();
         Ok((png, "image/png"))
+    }
+
+    /// A file was added: every 50th keeps the cache under its limit.
+    fn wrote(&self) {
+        let evict = {
+            let mut w = self.writes.lock();
+            *w += 1;
+            *w % 50 == 0
+        };
+        if evict {
+            self.evict();
+        }
     }
 
     /// A cached file that is an image, its time touched for the LRU.
@@ -425,14 +438,7 @@ impl ArtCache {
                 }
             });
         }
-        let evict = {
-            let mut w = self.writes.lock();
-            *w += 1;
-            *w % 50 == 0
-        };
-        if evict {
-            self.evict();
-        }
+        self.wrote();
         Ok((b.to_vec(), mime))
     }
 
