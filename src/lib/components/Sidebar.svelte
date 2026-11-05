@@ -485,6 +485,7 @@
     height: 100%;
     border-radius: 1px;
     background: currentColor;
+    transform-origin: bottom;
     animation: eq 0.9s ease-in-out infinite alternate;
   }
   .eq i:nth-child(2) {
@@ -494,15 +495,27 @@
     animation-delay: -0.6s;
   }
   .eq.paused i {
-    animation-play-state: paused;
-    height: 40%;
+    animation: none;
+    transform: scaleY(0.4);
   }
+  /* Without GPU compositing (WebKitGTK, D17) even a transform animation is
+     painted every frame: still bars on Linux. */
+  :global(:root[data-os="linux"]) .eq i {
+    animation: none;
+  }
+  :global(:root[data-os="linux"]) .eq i:nth-child(1) {
+    transform: scaleY(0.55);
+  }
+  :global(:root[data-os="linux"]) .eq i:nth-child(3) {
+    transform: scaleY(0.75);
+  }
+  /* Scaled, not resized, so the bars never cost a layout. */
   @keyframes eq {
     from {
-      height: 25%;
+      transform: scaleY(0.25);
     }
     to {
-      height: 100%;
+      transform: scaleY(1);
     }
   }
 

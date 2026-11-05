@@ -169,7 +169,7 @@
             <i style:transform="scaleX({fill})"></i>
           </div>
         {/each}
-        <div class="played" style:width={pct(shown)}></div>
+        <div class="played" style:transform="scaleX({shown / track.dur})"></div>
       {:else}
         <div class="seg plain" style:left="0" style:width="100%">
           <i style:transform="scaleX({shown / track.dur})"></i>
@@ -266,6 +266,8 @@
     background: color-mix(in srgb, var(--text) 10%, transparent);
   }
   .played {
+    width: 100%;
+    transform-origin: left;
     background: color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .seg {

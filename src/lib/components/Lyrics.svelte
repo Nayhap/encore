@@ -152,7 +152,10 @@
     background-clip: text;
     --lit: color-mix(in srgb, var(--text) 38%, transparent);
     --unlit: color-mix(in srgb, var(--text) 38%, transparent);
-    transition: --p 0.12s linear, transform 0.4s var(--ease), filter 0.4s var(--ease);
+    /* No transition on --p: WebKit would recompute the line's style every
+       frame. The player writes the position ten times a second, which is
+       smooth enough for the fill. */
+    transition: transform 0.4s var(--ease), filter 0.4s var(--ease);
     transform-origin: left center;
     border-radius: var(--r-sm);
   }
