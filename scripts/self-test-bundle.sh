@@ -65,7 +65,7 @@ case "$kind" in
       dnf install -y -q --nogpgcheck ca-certificates shadow-utils util-linux /encore.rpm >/dev/null
       rpm -qp --requires /encore.rpm >&2
       useradd -m qa && cd /home/qa
-      runuser -u qa -- encore --self-test $v ${SELF_TEST_ARGS:-}
+      runuser -u qa -- env HOME=/home/qa encore --self-test $v ${SELF_TEST_ARGS:-}
     "
     ;;
   app)
