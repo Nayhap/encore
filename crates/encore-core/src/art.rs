@@ -9,6 +9,7 @@
 //! written there first, so a cover still on screen never loses its address.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
@@ -31,47 +32,67 @@ const CAP: usize = 20_000;
 /// cache keeps the ones it saves.
 const SPILL_TTL: i64 = 180 * 24 * 3600;
 
-/// Key → entry, each with the tick it was last used at.
+/// Key → entry, each with the tick it was last used at, and the keys
+/// pushed out of memory whose index write hasn't landed yet: those still
+/// answer, so a cover on screen never loses its address meanwhile.
 struct Registry {
     map: HashMap<String, (ArtEntry, u64)>,
+    pending: HashMap<String, ArtEntry>,
+    /// A thread is writing `pending` to the index.
+    spilling: bool,
     tick: u64,
     cap: usize,
 }
 
 impl Registry {
     fn new(cap: usize) -> Self {
-        Registry { map: HashMap::new(), tick: 0, cap }
+        Registry { map: HashMap::new(), pending: HashMap::new(), spilling: false, tick: 0, cap }
     }
 
     fn touch(&mut self, key: &str) -> Option<ArtEntry> {
         self.tick += 1;
         let t = self.tick;
-        self.map.get_mut(key).map(|(e, at)| {
+        if let Some((e, at)) = self.map.get_mut(key) {
             *at = t;
-            e.clone()
-        })
+            return Some(e.clone());
+        }
+        // On its way to the index: back in memory (the write is harmless).
+        let e = self.pending.get(key)?.clone();
+        self.map.insert(key.to_string(), (e.clone(), t));
+        Some(e)
     }
 
-    /// Inserts unless there; returns the entry and what was pushed out.
-    fn insert(&mut self, key: String, e: ArtEntry) -> (ArtEntry, Vec<(String, ArtEntry)>) {
+    /// Inserts unless there. Past the cap (and only with an index to write
+    /// to) the least recently used quarter moves to `pending`; returns the
+    /// entry and whether a spill should start.
+    fn insert(&mut self, key: String, e: ArtEntry, spillable: bool) -> (ArtEntry, bool) {
         self.tick += 1;
         let t = self.tick;
         let e = self.map.entry(key).or_insert((e, t)).0.clone();
-        (e, self.trim())
-    }
-
-    fn trim(&mut self) -> Vec<(String, ArtEntry)> {
-        if self.map.len() <= self.cap {
-            return Vec::new();
+        if !spillable || self.map.len() <= self.cap {
+            return (e, false);
         }
         let mut ages: Vec<u64> = self.map.values().map(|v| v.1).collect();
         let cut = self.map.len() / 4;
         let (_, nth, _) = ages.select_nth_unstable(cut);
         let oldest = *nth;
         let gone: Vec<String> = self.map.iter().filter(|(_, v)| v.1 < oldest).map(|(k, _)| k.clone()).collect();
-        let out = gone.into_iter().filter_map(|k| self.map.remove(&k).map(|v| (k, v.0))).collect();
+        for k in gone {
+            if let Some((e, _)) = self.map.remove(&k) {
+                self.pending.insert(k, e);
+            }
+        }
         self.map.shrink_to(self.cap);
-        out
+        // An index that keeps failing: keep memory bounded all the same.
+        if self.pending.len() > self.cap {
+            let extra: Vec<String> = self.pending.keys().take(self.pending.len() - self.cap).cloned().collect();
+            for k in extra {
+                self.pending.remove(&k);
+            }
+        }
+        let start = !self.spilling;
+        self.spilling = true;
+        (e, start)
     }
 }
 
@@ -96,15 +117,35 @@ pub fn attach(store: Arc<Store>) {
 /// A key from the index, if there is one there.
 fn from_index(key: &str) -> Option<ArtEntry> {
     let store = index().get()?;
-    let (base, hue) = store.get::<(String, Option<(u16, u16)>)>("art", key).ok()??;
+    let (base, hue) = store.get::<Row>("art", key).ok()??;
     valid(key, &base).then_some(ArtEntry { base, hue })
 }
 
+/// Milliseconds since the first call.
+fn now_ms() -> u64 {
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// While the database was found busy (a backup holds it), parsing doesn't
+/// ask the index until this time (`now_ms`).
+static BUSY_UNTIL: AtomicU64 = AtomicU64::new(0);
+
 /// The same while parsing a page: only a known hue is wanted, so it never
-/// waits on a busy database (a backup) for long.
+/// waits on a busy database for long, and once it found it busy it doesn't
+/// ask again for a second (a page has hundreds of covers).
 fn hue_from_index(key: &str) -> Option<(u16, u16)> {
     let store = index().get()?;
-    store.get_quick::<(String, Option<(u16, u16)>)>("art", key, std::time::Duration::from_millis(20))?.1
+    if now_ms() < BUSY_UNTIL.load(Ordering::Relaxed) {
+        return None;
+    }
+    match store.get_quick::<Row>("art", key, std::time::Duration::from_millis(20)) {
+        Some(row) => row?.1,
+        None => {
+            BUSY_UNTIL.store(now_ms() + 1000, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 fn valid(key: &str, base: &str) -> bool {
@@ -113,24 +154,44 @@ fn valid(key: &str, base: &str) -> bool {
 
 /// Keep `e` under `key` in memory, writing out what that pushes out.
 fn keep(key: String, e: ArtEntry) -> ArtEntry {
-    let (e, gone) = reg().write().insert(key, e);
-    if !gone.is_empty() {
-        spill(gone);
+    let spillable = index().get().is_some();
+    let (e, start) = reg().write().insert(key, e, spillable);
+    if start {
+        spill();
     }
     e
 }
 
-/// Writes keys pushed out of memory to the index, off the caller's thread.
-/// Rows already there (a downloaded song's cover never expires) stay as
-/// they are.
-fn spill(gone: Vec<(String, ArtEntry)>) {
+/// Writes the keys pushed out of memory to the index, off the caller's
+/// thread, then forgets them; until then they still answer. Rows already
+/// there (a downloaded song's cover never expires) stay as they are. A
+/// failed write leaves them for the next spill.
+fn spill() {
     let Some(store) = index().get().cloned() else { return };
-    let rows: Vec<(String, Row)> = gone.into_iter().map(|(k, e)| (k, (e.base, e.hue))).collect();
-    let _ = std::thread::Builder::new().name("encore-art-index".into()).spawn(move || {
-        if let Err(e) = store.put_absent("art", &rows, Some(SPILL_TTL)) {
-            tracing::warn!(error = %e.message, "couldn't save artwork keys");
+    let run = move || {
+        loop {
+            let rows: Vec<(String, Row)> = {
+                let mut r = reg().write();
+                if r.pending.is_empty() {
+                    r.spilling = false;
+                    return;
+                }
+                r.pending.iter().map(|(k, e)| (k.clone(), (e.base.clone(), e.hue))).collect()
+            };
+            if let Err(e) = store.put_absent("art", &rows, Some(SPILL_TTL)) {
+                tracing::warn!(error = %e.message, "couldn't save artwork keys");
+                reg().write().spilling = false;
+                return;
+            }
+            let mut r = reg().write();
+            for (k, _) in rows {
+                r.pending.remove(&k);
+            }
         }
-    });
+    };
+    if std::thread::Builder::new().name("encore-art-index".into()).spawn(run).is_err() {
+        reg().write().spilling = false;
+    }
 }
 
 pub fn host_allowed(host: &str) -> bool {
@@ -216,7 +277,11 @@ pub fn lookup(key: &str) -> Option<ArtEntry> {
 }
 
 pub fn set_hue(key: &str, h1: u16, h2: u16) {
-    if let Some((e, _)) = reg().write().map.get_mut(key) {
+    let mut r = reg().write();
+    if let Some((e, _)) = r.map.get_mut(key) {
+        e.hue = Some((h1, h2));
+    }
+    if let Some(e) = r.pending.get_mut(key) {
         e.hue = Some((h1, h2));
     }
 }
@@ -270,14 +335,26 @@ mod tests {
         let mut r = Registry::new(8);
         let e = |i: u32| ArtEntry { base: format!("https://i.ytimg.com/{i}"), hue: None };
         for i in 0..8 {
-            assert!(r.insert(format!("k{i}"), e(i)).1.is_empty());
+            assert!(!r.insert(format!("k{i}"), e(i), true).1);
         }
         r.touch("k0");
-        let (_, gone) = r.insert("k8".into(), e(8));
-        let mut gone: Vec<String> = gone.into_iter().map(|g| g.0).collect();
+        let (_, start) = r.insert("k8".into(), e(8), true);
+        assert!(start, "a spill starts");
+        let mut gone: Vec<String> = r.pending.keys().cloned().collect();
         gone.sort();
         assert_eq!(gone, ["k1", "k2"], "the oldest, not the one just used");
-        assert!(r.map.contains_key("k0") && r.map.contains_key("k8"));
+        assert!(r.map.contains_key("k0") && r.map.contains_key("k8") && !r.map.contains_key("k1"));
+        // Until written, a key pushed out still answers (and is back).
+        assert_eq!(r.touch("k1").map(|e| e.base), Some("https://i.ytimg.com/1".into()));
+        assert!(r.map.contains_key("k1"));
+        // No second spill while one runs; without an index, nothing goes.
+        let (_, again) = r.insert("k9".into(), e(9), true);
+        assert!(!again);
+        let mut no_index = Registry::new(2);
+        for i in 0..5 {
+            no_index.insert(format!("k{i}"), e(i), false);
+        }
+        assert_eq!(no_index.map.len(), 5);
     }
 
     #[test]
@@ -295,9 +372,14 @@ mod tests {
         assert_eq!((e.base.as_str(), e.hue), (base.as_str(), Some((10, 20))));
         let a = register(&format!("{base}=w60-h60")).unwrap();
         assert_eq!((a.h1, a.h2), (Some(10), Some(20)), "registering finds the hue the index kept");
-        // A row the index has is never replaced by a spill (its expiry stays).
+        // A row the index has is never replaced by a spill (its expiry stays),
+        // unless it expired.
         store.put_absent("art", &[(key.clone(), (String::from("https://i.ytimg.com/x"), None::<(u16, u16)>))], Some(5)).unwrap();
-        assert_eq!(store.get::<(String, Option<(u16, u16)>)>("art", &key).unwrap().unwrap().0, base);
+        assert_eq!(store.get::<Row>("art", &key).unwrap().unwrap().0, base);
+        let old = "https://i.ytimg.com/expired".to_string();
+        store.put("art", "e", &(old, None::<(u16, u16)>), Some(-1)).unwrap();
+        store.put_absent("art", &[("e".to_string(), (base.clone(), None::<(u16, u16)>))], Some(60)).unwrap();
+        assert_eq!(store.get::<Row>("art", "e").unwrap().map(|r| r.0), Some(base.clone()), "an expired row is replaced");
     }
 
     #[test]

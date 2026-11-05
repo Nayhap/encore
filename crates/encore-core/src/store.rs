@@ -333,15 +333,16 @@ impl Store {
     }
 
     /// Like `get`, but gives up (`None`) rather than wait longer than
-    /// `wait` for the connection, which a backup can hold for a while.
-    pub fn get_quick<T: DeserializeOwned>(&self, scope: &str, key: &str, wait: std::time::Duration) -> Option<T> {
+    /// `wait` for the connection, which a backup can hold for a while;
+    /// `Some(None)` when there is no such row.
+    pub fn get_quick<T: DeserializeOwned>(&self, scope: &str, key: &str, wait: std::time::Duration) -> Option<Option<T>> {
         let c = self.conn.try_lock_for(wait)?;
         let v: Option<String> = c
             .query_row("SELECT value FROM kv WHERE scope = ?1 AND key = ?2 AND (expires IS NULL OR expires > ?3)", params![scope, key, now()], |r| r.get(0))
             .optional()
             .ok()
             .flatten();
-        v.and_then(|v| serde_json::from_str(&v).ok())
+        Some(v.and_then(|v| serde_json::from_str(&v).ok()))
     }
 
     pub fn put<T: Serialize>(&self, scope: &str, key: &str, value: &T, ttl_secs: Option<i64>) -> Result<()> {
@@ -384,14 +385,21 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Adds rows that aren't there yet, in one transaction; rows already
-    /// there (and their expiry) are left as they are.
+    /// Adds rows that aren't there yet (or have expired), in one
+    /// transaction; rows still there (and their expiry) are left as they
+    /// are.
     pub fn put_absent<T: Serialize>(&self, scope: &str, rows: &[(String, T)], ttl_secs: Option<i64>) -> Result<()> {
         let n = now();
         let mut c = self.conn.lock();
         let tx = c.transaction().map_err(db_err)?;
         {
-            let mut st = tx.prepare("INSERT OR IGNORE INTO kv (scope, key, value, updated, expires) VALUES (?1, ?2, ?3, ?4, ?5)").map_err(db_err)?;
+            let mut st = tx
+                .prepare(
+                    "INSERT INTO kv (scope, key, value, updated, expires) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value, updated = excluded.updated, expires = excluded.expires
+                     WHERE kv.expires IS NOT NULL AND kv.expires <= excluded.updated",
+                )
+                .map_err(db_err)?;
             for (k, v) in rows {
                 let v = serde_json::to_string(v).map_err(|e| AppError::internal(e.to_string()))?;
                 st.execute(params![scope, k, v, n, ttl_secs.map(|t| n + t)]).map_err(db_err)?;
@@ -412,6 +420,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quick_read_gives_up_on_a_busy_database() {
+        let s = Store::open_memory().unwrap();
+        s.put("art", "k", &1, None).unwrap();
+        assert_eq!(s.get_quick::<i32>("art", "k", std::time::Duration::from_millis(5)), Some(Some(1)));
+        assert_eq!(s.get_quick::<i32>("art", "none", std::time::Duration::from_millis(5)), Some(None));
+        let held = s.conn.lock();
+        let t = std::time::Instant::now();
+        assert_eq!(s.get_quick::<i32>("art", "k", std::time::Duration::from_millis(20)), None, "busy");
+        assert!(t.elapsed() < std::time::Duration::from_millis(200));
+        drop(held);
+    }
 
     #[test]
     fn damaged_database_is_set_aside() {
