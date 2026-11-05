@@ -89,9 +89,9 @@ impl SolvedCache {
 const SCHEMA: u32 = 1;
 /// Preprocessed players kept on disk, newest first.
 pub const PREPROCESSED_FILES: usize = 3;
-/// A preprocessed player is at most about 3.7 MB in the solver corpus
-/// (tests/ejs_players.rs prints it); one larger than this isn't written or
-/// read.
+/// A preprocessed player is about 4.2 MB for the players YouTube serves
+/// now, 3.7 MB at most in the solver corpus (tests/ejs_players.rs prints
+/// it); one larger than this isn't written or read.
 pub const PREPROCESSED_MAX_BYTES: u64 = 8 << 20;
 /// All of them together.
 const PREPROCESSED_TOTAL_BYTES: u64 = 24 << 20;
