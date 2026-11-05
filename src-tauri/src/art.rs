@@ -72,13 +72,9 @@ fn mime_of(b: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Two dominant hues (0..360) weighted by saturation and brightness.
-pub fn hues(bytes: &[u8]) -> Option<(u16, u16)> {
-    decoded_hues(bytes).flatten()
-}
-
-/// The same, telling a cover with no hue (`Some(None)`) from one that
-/// couldn't be decoded (`None`).
+/// Two dominant hues (0..360) weighted by saturation and brightness:
+/// `Some(None)` for a cover with none, `None` for one that couldn't be
+/// decoded.
 fn decoded_hues(bytes: &[u8]) -> Option<Option<(u16, u16)>> {
     let img = image::load_from_memory(bytes).ok()?;
     Some(hues_of(&img))
@@ -458,7 +454,7 @@ mod tests {
         }
         let mut buf = std::io::Cursor::new(Vec::new());
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
-        let (h1, _) = hues(buf.get_ref()).unwrap();
+        let (h1, _) = decoded_hues(buf.get_ref()).flatten().unwrap();
         assert!((215..=235).contains(&h1), "{h1}");
     }
 
