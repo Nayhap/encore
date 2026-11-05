@@ -71,6 +71,10 @@ encore-wiki = { path = "../crates/encore-wiki" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The web process's crash signal (D17); the version Tauri already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_40"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString", "NSObject"] }

@@ -315,8 +315,13 @@ Linux:
 - Without a Secret Service, Encore can't keep a session and says so when you
   sign in.
 - If the window goes blank or closes by itself at start, WebKit's DMA-BUF
-  renderer may be failing on your graphics driver. The AppImage turns it off
-  already; for the `.deb`, start Encore with
-  `WEBKIT_DISABLE_DMABUF_RENDERER=1 encore`. If it still happens, add
+  renderer may be failing on your graphics driver. The AppImage hands frames
+  over through shared memory, and if WebKit still crashes it restarts once
+  with the renderer off, until the next version (the log's `webkit renderer`
+  line says which; delete `webkit-software` in the data folder to try
+  again). For the `.deb`, start Encore with
+  `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 encore`, and if that doesn't help,
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1 encore` (slower: everything is painted
+  on the CPU). If it still happens, add
   `WEBKIT_DISABLE_COMPOSITING_MODE=1` and tell us.
 - Closing the window quits Encore.

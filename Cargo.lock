@@ -1458,6 +1458,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "webkit2gtk",
  "windows-sys 0.61.2",
 ]
 

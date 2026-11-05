@@ -11,6 +11,7 @@ mod media;
 mod selftest;
 mod signin;
 mod updates;
+pub mod webkit;
 mod window;
 
 use std::sync::Arc;
@@ -330,6 +331,8 @@ fn keepalive(app: tauri::AppHandle, core: Arc<Core>) {
 pub fn run() {
     let paths = core::Paths::new();
     logging::init(&paths.logs);
+    #[cfg(target_os = "linux")]
+    webkit::log_mode();
     if selftest::wanted() {
         selftest::run();
     }
@@ -379,7 +382,9 @@ pub fn run() {
         .setup(move |app| {
             // Off macOS the window is built here, with the chosen title bar.
             #[cfg(not(target_os = "macos"))]
-            window::create_main(app.handle())?;
+            let _main = window::create_main(app.handle())?;
+            #[cfg(target_os = "linux")]
+            webkit::watch(&_main);
             builder.mount_events(app);
             let t0 = std::time::Instant::now();
             let core = match tauri::async_runtime::block_on(async { Core::new() }) {
