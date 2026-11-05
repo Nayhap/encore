@@ -12,6 +12,7 @@
 
 pub mod history;
 pub mod plays;
+mod saver;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use encore_audio::{AudioCache, Engine, EngineEvent, HttpSpec, SourceSpec};
 use encore_core::error::{AppError, ErrorCode, Result};
 use encore_core::model::*;
-use encore_core::queue::{Checkpoint, Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
+use encore_core::queue::{Origin, Queue, QueueEntry, QueueSource, Repeat, Step};
 use encore_core::redact::Secret;
 use encore_core::local::Owner;
 use encore_core::local::playback::{ShuffleCycle, ShuffleCycles};
@@ -33,6 +34,8 @@ use encore_core::service::{Admission, LocalAudio, MusicService, PlayFailure, Pla
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
+pub use saver::SaveQueue;
+use saver::{Job, Planned, Saver, Slot, Write};
 pub use types::*;
 
 pub const PRELOAD_LEAD: f64 = 20.0;
@@ -49,7 +52,6 @@ pub const SLEEP_FADE: f64 = 10.0;
 const SLEPT: &str = "Paused by the sleep timer.";
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
-type PersistHook = Box<dyn Fn(SaveQueue<'_>) -> bool + Send + Sync>;
 
 struct Loaded {
     load_id: u64,
@@ -102,34 +104,6 @@ struct State {
     /// When a song was last chosen (`play_current`), to tell a run of
     /// skips from one choice.
     chosen_at: Option<Instant>,
-    /// Where the queue is saved, and what was last written there.
-    slot: Option<Slot>,
-    /// Bumped whenever `slot` is replaced.
-    slot_gen: u64,
-}
-
-/// Where the app saves the queue (an opaque scope: the account) and what
-/// is there now. The whole queue is written only when its content changed
-/// (`Queue::content`); a move to another entry or along the song is a
-/// small checkpoint naming that write (`stamp`); nothing at all is written
-/// while neither changed (paused, or stopped).
-struct Slot {
-    scope: String,
-    /// The last whole write; `None` until there is one to name.
-    stamp: Option<String>,
-    content: u64,
-    revision: u64,
-    position: f64,
-}
-
-/// One write of the queue, for the app's `on_persist`.
-pub enum SaveQueue<'a> {
-    /// The whole queue and the position in its song; checkpoints after it
-    /// carry its `stamp`.
-    Full { scope: &'a str, stamp: &'a str, queue: &'a Queue, position: f64 },
-    /// Only the entry playing and the position, for the whole write named
-    /// `stamp`.
-    Checkpoint { scope: &'a str, stamp: &'a str, at: &'a Checkpoint, position: f64 },
 }
 
 /// The position, length and playing flag at one engine read.
@@ -137,32 +111,6 @@ struct Now {
     position: f64,
     duration: Option<f64>,
     playing: bool,
-}
-
-/// A position that moved less than this since the last write isn't
-/// written again.
-const CHECKPOINT_MOVE: f64 = 0.5;
-
-#[derive(Debug, PartialEq)]
-enum Write {
-    Nothing,
-    Full,
-    Checkpoint,
-}
-
-impl Slot {
-    /// What a queue now at `content`, `revision` and `position` needs
-    /// written; `checkpoint`: it has an entry playing to name.
-    fn write(&self, content: u64, revision: u64, position: f64, checkpoint: bool) -> Write {
-        if content != self.content {
-            return Write::Full;
-        }
-        if revision == self.revision && (position - self.position).abs() < CHECKPOINT_MOVE {
-            return Write::Nothing;
-        }
-        // A checkpoint names a whole write: without one, write that first.
-        if self.stamp.is_some() && checkpoint { Write::Checkpoint } else { Write::Full }
-    }
 }
 
 struct AbLoop {
@@ -199,9 +147,8 @@ pub struct Player {
     tx: broadcast::Sender<PlayerEvent>,
     next_load: AtomicU64,
     rt: tokio::runtime::Handle,
-    on_persist: Mutex<Option<PersistHook>>,
-    /// Held through a write of the queue, so two never cross.
-    persisting: Mutex<()>,
+    /// Where the queue is saved, and how (D6).
+    saver: Saver,
     preloaded_streams: Mutex<HashMap<u64, ResolvedStream>>,
     cache: Option<AudioCache>,
     /// Report plays to the service's history (a user setting, D18).
@@ -278,14 +225,11 @@ impl Player {
                 ab_loop: None,
                 sleep: None,
                 chosen_at: None,
-                slot: None,
-                slot_gen: 0,
             }),
             tx,
             next_load: AtomicU64::new(1),
             rt: tokio::runtime::Handle::current(),
-            on_persist: Mutex::new(None),
-            persisting: Mutex::new(()),
+            saver: Saver::default(),
             preloaded_streams: Mutex::new(HashMap::new()),
             cache: cache_for_player,
             reporting: Arc::new(AtomicBool::new(false)),
@@ -577,17 +521,44 @@ impl Player {
     /// How the queue is saved. `f` returns whether the write was made; one
     /// that wasn't is tried again on the next tick.
     pub fn on_persist(&self, f: impl Fn(SaveQueue<'_>) -> bool + Send + Sync + 'static) {
-        *self.on_persist.lock() = Some(Box::new(f));
+        self.saver.set_hook(Box::new(f));
     }
 
     /// Save the queue, as it is now, under `scope` from now on (`None`:
     /// nowhere, as while signing out). What is there is taken to be this
-    /// queue already, so nothing is written until it changes.
+    /// queue already, so nothing is written until it changes. Returns once
+    /// a write on its way has landed: after `save_to(None)` nothing is
+    /// written anywhere, so the old place can be purged.
     pub fn save_to(&self, scope: Option<String>) {
-        let mut st = self.st.lock();
-        let slot = scope.map(|scope| Slot { scope, stamp: None, content: st.queue.content(), revision: st.queue.revision(), position: self.position_locked(&st) });
-        st.slot = slot;
-        st.slot_gen += 1;
+        self.saver.replace(|| {
+            let st = self.st.lock();
+            (scope.map(|scope| Slot { scope, stamp: None, content: st.queue.content(), revision: st.queue.revision(), position: self.position_locked(&st) }), ())
+        });
+    }
+
+    /// Restore the queue saved under `scope`, paused, and save it there from
+    /// now on. `load` reads it (the queue, the position in its song and the
+    /// stamp of its whole write) after any write on its way has landed and
+    /// before another can start, so what it reads is the last one written.
+    /// With nothing saved, an empty queue (`empty`) or the queue as it is.
+    pub fn restore_saved(&self, scope: String, empty: bool, load: impl FnOnce() -> Option<(Queue, f64, Option<String>)>) {
+        let restored = self.saver.replace(|| {
+            let (queue, position, stamp) = match load() {
+                Some(saved) => saved,
+                None if empty => (Queue::default(), 0.0, None),
+                None => {
+                    let st = self.st.lock();
+                    let slot = Slot { scope, stamp: None, content: st.queue.content(), revision: st.queue.revision(), position: self.position_locked(&st) };
+                    return (Some(slot), false);
+                }
+            };
+            let slot = Slot { scope, stamp, content: queue.content(), revision: queue.revision(), position: position.max(0.0) };
+            self.install(queue, position);
+            (Some(slot), true)
+        });
+        if restored {
+            self.restored();
+        }
     }
 
     /// Before Encore quits or installs an update (D24): pause, drop what
@@ -626,72 +597,38 @@ impl Player {
 
     /// Write what changed since the last write (see `Slot`).
     fn persist(&self) {
-        enum Job {
-            Full(Queue),
-            Checkpoint(Checkpoint),
-        }
-        let _one = self.persisting.lock();
-        let (job, scope, stamp, slot_gen, content, revision, position) = {
+        self.saver.persist(|slot| {
             let st = self.st.lock();
-            let Some(slot) = &st.slot else { return };
             let position = self.position_locked(&st);
             let (content, revision) = (st.queue.content(), st.queue.revision());
             let at = st.queue.checkpoint();
             let job = match (slot.write(content, revision, position, at.is_some()), at) {
-                (Write::Nothing, _) => return,
+                (Write::Nothing, _) => return None,
                 (Write::Checkpoint, Some(c)) => Job::Checkpoint(c),
                 _ => Job::Full(st.queue.clone()),
             };
-            let stamp = match (&job, &slot.stamp) {
-                (Job::Checkpoint(_), Some(s)) => s.clone(),
-                _ => uuid::Uuid::new_v4().to_string(),
-            };
-            (job, slot.scope.clone(), stamp, st.slot_gen, content, revision, position)
-        };
-        let saved = match self.on_persist.lock().as_ref() {
-            Some(f) => match &job {
-                Job::Full(queue) => f(SaveQueue::Full { scope: &scope, stamp: &stamp, queue, position }),
-                Job::Checkpoint(at) => f(SaveQueue::Checkpoint { scope: &scope, stamp: &stamp, at, position }),
-            },
-            None => false,
-        };
-        let mut st = self.st.lock();
-        // A restore in between put another queue in another place.
-        if saved
-            && st.slot_gen == slot_gen
-            && let Some(slot) = st.slot.as_mut()
-        {
-            *slot = Slot { scope, stamp: Some(stamp), content, revision, position };
-        }
+            Some(Planned { job, content, revision, position })
+        });
     }
 
     /// Restore a saved queue, paused at `position` (never auto-plays).
     pub fn restore(&self, queue: Queue, position: f64) {
-        self.restore_locked(queue, position, None);
+        self.install(queue, position);
+        self.restored();
     }
 
-    /// Restore the queue saved under `scope`, paused at `position`, and save
-    /// it there from now on. `stamp` names the whole write it came from
-    /// (`SaveQueue::Full`), if it has one.
-    pub fn restore_saved(&self, queue: Queue, position: f64, scope: String, stamp: Option<String>) {
-        self.restore_locked(queue, position, Some((scope, stamp)));
+    fn install(&self, queue: Queue, position: f64) {
+        let mut st = self.st.lock();
+        st.queue = queue;
+        st.pending_pos = position.max(0.0);
+        st.last_duration = st.queue.current().and_then(|c| c.track.duration);
+        st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
+        st.track_gen += 1;
+        st.radio_gen += 1;
+        st.cycle = None;
     }
 
-    fn restore_locked(&self, queue: Queue, position: f64, to: Option<(String, Option<String>)>) {
-        {
-            let mut st = self.st.lock();
-            if let Some((scope, stamp)) = to {
-                st.slot = Some(Slot { scope, stamp, content: queue.content(), revision: queue.revision(), position: position.max(0.0) });
-                st.slot_gen += 1;
-            }
-            st.queue = queue;
-            st.pending_pos = position.max(0.0);
-            st.last_duration = st.queue.current().and_then(|c| c.track.duration);
-            st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
-            st.track_gen += 1;
-            st.radio_gen += 1;
-            st.cycle = None;
-        }
+    fn restored(&self) {
         self.publish(true);
         let cur = self.st.lock().queue.current().cloned();
         let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
@@ -2310,29 +2247,4 @@ impl Player {
 /// A seed from the system's random source (v4 UUIDs come from it).
 fn rand_seed() -> u64 {
     uuid::Uuid::new_v4().as_u64_pair().0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn slot(stamp: Option<&str>) -> Slot {
-        Slot { scope: "account:a".into(), stamp: stamp.map(str::to_string), content: 7, revision: 3, position: 40.0 }
-    }
-
-    #[test]
-    fn nothing_is_written_while_nothing_changed() {
-        assert_eq!(slot(Some("s")).write(7, 3, 40.0, true), Write::Nothing);
-        assert_eq!(slot(Some("s")).write(7, 3, 40.3, true), Write::Nothing, "less than half a second");
-        assert_eq!(slot(None).write(7, 3, 40.0, true), Write::Nothing, "a queue restored from 0.6 isn't written again for nothing");
-    }
-
-    #[test]
-    fn a_move_is_a_checkpoint_and_a_change_the_whole_queue() {
-        assert_eq!(slot(Some("s")).write(7, 3, 45.0, true), Write::Checkpoint, "playing on");
-        assert_eq!(slot(Some("s")).write(7, 4, 0.0, true), Write::Checkpoint, "next");
-        assert_eq!(slot(Some("s")).write(8, 4, 40.0, true), Write::Full, "an edit");
-        assert_eq!(slot(None).write(7, 3, 45.0, true), Write::Full, "no whole write to point at yet");
-        assert_eq!(slot(Some("s")).write(7, 4, 0.0, false), Write::Full, "no entry to name");
-    }
 }

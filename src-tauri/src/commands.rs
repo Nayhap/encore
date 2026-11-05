@@ -813,8 +813,9 @@ pub async fn sign_out(app: AppHandle, core: S<'_>) -> Result<()> {
     core.player.stop();
     let scope = core.account_scope();
     core.accounts.sign_out()?;
-    // Nothing is saved under the scope being purged, or under the next one,
-    // until switch_queue gives the player the next account's queue.
+    // Once a write on its way has landed, nothing is saved under the scope
+    // being purged, or under the next one, until switch_queue gives the
+    // player the next account's queue.
     core.player.save_to(None);
     let _ = core.store.purge_scope(&scope);
     core.resolver_forget_all();

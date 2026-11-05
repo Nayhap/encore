@@ -283,21 +283,16 @@ impl Core {
     /// there from now on.
     pub fn restore_queue(&self) {
         let scope = self.account_scope();
-        match saved_queue(&self.store, &scope) {
-            Some((queue, position, stamp)) => self.player.restore_saved(queue, position, scope, stamp),
-            None => self.player.save_to(Some(scope)),
-        }
+        self.player.restore_saved(scope.clone(), false, || saved_queue(&self.store, &scope));
     }
 
     /// After an account change: that account's saved queue, or an empty one
     /// (another account's queue never stays visible). The queue that was
     /// showing was saved under its own account, never this one.
     pub fn switch_queue(&self) {
+        // Read once the old account's last write has landed (D6).
         let scope = self.account_scope();
-        match saved_queue(&self.store, &scope) {
-            Some((queue, position, stamp)) => self.player.restore_saved(queue, position, scope, stamp),
-            None => self.player.restore_saved(Queue::default(), 0.0, scope, None),
-        }
+        self.player.restore_saved(scope.clone(), true, || saved_queue(&self.store, &scope));
     }
 
     pub fn install_persistence(self: &Arc<Self>) {
