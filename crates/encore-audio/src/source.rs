@@ -6,7 +6,8 @@
 //! filling the rest. Each range is streamed to the file as it arrives and its
 //! received bytes can be read at once, so the decoder starts on the first
 //! few KiB rather than the whole MiB; a seek to a chunk not yet there leaves
-//! the rest of the current one for later. Reads block until the bytes they
+//! the rest of the current one for later. A range counts only when its
+//! `Content-Range` names it and its body ends exactly there. Reads block until the bytes they
 //! need are present. When every chunk is whole the file is installed in the
 //! [`AudioCache`] and later plays from disk.
 //!
@@ -319,47 +320,49 @@ fn next_missing(st: &State) -> Option<usize> {
     (start..st.have.len()).chain(0..start.min(st.have.len())).find(|&i| !st.have[i])
 }
 
-/// Records `upto` bytes received from the start of chunk `ci`.
-fn received(st: &mut State, ci: usize, upto: u64) {
-    let whole = ((ci as u64 + 1) * CHUNK).min(st.len) - ci as u64 * CHUNK;
-    if upto >= whole {
+/// Records `upto` bytes received from the start of chunk `ci`: readable at
+/// once. The chunk counts as whole only when its response checked out to
+/// the end (`whole`), so a body that turns out wrong is never installed.
+fn received(st: &mut State, ci: usize, upto: u64, whole: bool) {
+    let size = ((ci as u64 + 1) * CHUNK).min(st.len) - ci as u64 * CHUNK;
+    st.got[ci] = st.got[ci].max(upto.min(size) as u32);
+    if whole && upto >= size {
         st.have[ci] = true;
-        st.got[ci] = whole as u32;
-    } else {
-        st.got[ci] = st.got[ci].max(upto as u32);
     }
 }
 
-/// A 206's `Content-Range` names the bytes asked for (and the file's
-/// length, when it says). A whole chunk without one is checked by its
-/// length alone, as before; the rest of a chunk needs it, since its bytes
-/// go after what is already there.
-fn range_matches(headers: &reqwest::header::HeaderMap, a: u64, b: u64, len: u64, resumed: bool) -> bool {
-    let Some(cr) = headers.get("content-range") else { return !resumed };
+/// A 206 names the bytes asked for in its `Content-Range` (and the file's
+/// length, when it says), and its `Content-Length`, when given, is theirs:
+/// no byte of it is used otherwise.
+fn range_matches(headers: &reqwest::header::HeaderMap, a: u64, b: u64, len: u64) -> bool {
+    let Some(cr) = headers.get("content-range") else { return false };
     let Some(spec) = cr.to_str().ok().and_then(|v| v.strip_prefix("bytes ")) else { return false };
     let Some((range, total)) = spec.split_once('/') else { return false };
     let Some((x, y)) = range.split_once('-') else { return false };
     let total_ok = total == "*" || total.parse::<u64>().is_ok_and(|t| t == len);
-    x.trim().parse::<u64>().is_ok_and(|x| x == a) && y.trim().parse::<u64>().is_ok_and(|y| y == b) && total_ok
+    let length_ok = headers.get("content-length").and_then(|v| v.to_str().ok()).is_none_or(|l| l.trim().parse::<u64>().is_ok_and(|l| l == b - a + 1));
+    x.trim().parse::<u64>().is_ok_and(|x| x == a) && y.trim().parse::<u64>().is_ok_and(|y| y == b) && total_ok && length_ok
 }
 
 /// What a range response ended with.
 enum Streamed {
-    /// Every byte asked for.
+    /// Every byte asked for, and the body ended there.
     Whole,
     /// The decoder wants a chunk elsewhere: the rest of this one later.
     Left,
     /// Cancelled.
     Cancelled,
-    /// The body ended early or broke off.
-    Short(Option<io::ErrorKind>),
+    /// The body ended early or broke off; `progress` when it brought at
+    /// least `PROGRESS` new bytes first.
+    Short { kind: Option<io::ErrorKind>, progress: bool },
+    /// More bytes than asked for: nothing of this response is kept.
+    Long,
 }
 
 fn fetch_ranges(sh: &Shared, wf: &File, mut spec: HttpSpec) -> Result<(), String> {
     let c = client();
     let mut refreshed = false;
     let mut failures = 0u32;
-    let mut buf = vec![0u8; 64 * 1024];
     loop {
         if sh.cancel.load(Ordering::Relaxed) {
             return Ok(());
@@ -408,9 +411,10 @@ fn fetch_ranges(sh: &Shared, wf: &File, mut spec: HttpSpec) -> Result<(), String
             }
             return Err(format!("media server refused the request ({status})"));
         }
-        if status != 206 || !range_matches(resp.headers(), a, b, len, from > 0) {
-            // A 200 means the server ignored Range: fall back to sequential.
-            if status == 200 && a == 0 {
+        if status != 206 || !range_matches(resp.headers(), a, b, len) {
+            // A 200, or a 206 that doesn't say which bytes it holds, from
+            // the start: the server doesn't do ranges, so one plain GET.
+            if a == 0 && (status == 200 || (status == 206 && resp.headers().get("content-range").is_none())) {
                 drop(resp);
                 return fetch_sequential(sh, wf, spec);
             }
@@ -421,12 +425,14 @@ fn fetch_ranges(sh: &Shared, wf: &File, mut spec: HttpSpec) -> Result<(), String
             std::thread::sleep(Duration::from_millis(500 * failures as u64));
             continue;
         }
-        match stream_range(sh, wf, resp, ci, a, b, &mut buf)? {
+        match stream_range(sh, wf, resp, ci, a, b)? {
             Streamed::Whole => failures = 0,
             Streamed::Left => {}
             Streamed::Cancelled => return Ok(()),
-            Streamed::Short(kind) => {
-                // What did arrive is kept; the next request asks for the rest.
+            // What did arrive is kept; the next request asks for the rest.
+            // A response that got further isn't counted against the song.
+            Streamed::Short { progress: true, .. } => failures = 0,
+            Streamed::Short { kind, progress: false } => {
                 failures += 1;
                 if failures > 4 {
                     return Err(match kind {
@@ -435,42 +441,103 @@ fn fetch_ranges(sh: &Shared, wf: &File, mut spec: HttpSpec) -> Result<(), String
                     });
                 }
             }
+            Streamed::Long => {
+                failures += 1;
+                if failures > 4 {
+                    return Err("media server sent more than it was asked for".into());
+                }
+            }
         }
     }
 }
 
+/// How long the fetch waits on a body before looking at what the decoder
+/// wants again.
+const BODY_POLL: Duration = Duration::from_millis(100);
+/// A response cut short after this much isn't held against the song: a
+/// server that sends a few bytes and hangs up still fails it.
+const PROGRESS: u64 = 64 * 1024;
+
 /// Streams one validated range response into the file, publishing each
-/// piece as it lands. Never reads past `b`.
-fn stream_range(sh: &Shared, wf: &File, mut r: reqwest::blocking::Response, ci: usize, a: u64, b: u64, buf: &mut [u8]) -> Result<Streamed, String> {
+/// piece as it lands. The body is read on a thread of its own, so a seek
+/// elsewhere leaves a read that is waiting on the network (and its
+/// connection) behind at once. The chunk is whole only when the body ended
+/// exactly at `b`; a longer one takes back what it wrote.
+fn stream_range(sh: &Shared, wf: &File, r: reqwest::blocking::Response, ci: usize, a: u64, b: u64) -> Result<Streamed, String> {
     let base = ci as u64 * CHUNK;
+    let asked = b - a + 1;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(4);
+    let mut r = r;
+    std::thread::Builder::new()
+        .name("encore-body".into())
+        .spawn(move || {
+            // Up to one byte past what was asked: enough to see a long body.
+            let mut total = 0u64;
+            loop {
+                let mut buf = vec![0u8; 64 * 1024];
+                match r.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(Ok(Vec::new()));
+                        return;
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        total += n as u64;
+                        if tx.send(Ok(buf)).is_err() || total > asked {
+                            return;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+        })
+        .map_err(|e| format!("could not start a download: {}", e.kind()))?;
     let mut off = a;
-    while off <= b {
+    loop {
         if sh.cancel.load(Ordering::Relaxed) {
             return Ok(Streamed::Cancelled);
         }
-        let room = ((b + 1 - off) as usize).min(buf.len());
-        let n = match r.read(&mut buf[..room]) {
-            Ok(0) => return Ok(Streamed::Short(None)),
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Ok(Streamed::Short(Some(e.kind()))),
-        };
-        wf.write_all_at(&buf[..n], off).map_err(|e| format!("cache write failed: {}", e.kind()))?;
-        sh.stats.bytes.fetch_add(n as u64, Ordering::Relaxed);
-        off += n as u64;
-        let mut st = sh.st.lock();
-        received(&mut st, ci, off - base);
-        sh.cv.notify_all();
+        match rx.recv_timeout(BODY_POLL) {
+            Ok(Ok(piece)) if piece.is_empty() => {
+                // The end of the body.
+                if off == b + 1 {
+                    let mut st = sh.st.lock();
+                    received(&mut st, ci, off - base, true);
+                    sh.cv.notify_all();
+                    return Ok(Streamed::Whole);
+                }
+                return Ok(Streamed::Short { kind: None, progress: off - a >= PROGRESS });
+            }
+            Ok(Ok(piece)) => {
+                if off + piece.len() as u64 > b + 1 {
+                    // Not the bytes asked for after all: take back what this
+                    // response wrote; the chunk is fetched again.
+                    let mut st = sh.st.lock();
+                    st.got[ci] = (a - base) as u32;
+                    return Ok(Streamed::Long);
+                }
+                wf.write_all_at(&piece, off).map_err(|e| format!("cache write failed: {}", e.kind()))?;
+                sh.stats.bytes.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                off += piece.len() as u64;
+                let mut st = sh.st.lock();
+                received(&mut st, ci, off - base, false);
+                sh.cv.notify_all();
+            }
+            Ok(Err(e)) => return Ok(Streamed::Short { kind: Some(e.kind()), progress: off - a >= PROGRESS }),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Streamed::Short { kind: None, progress: off - a >= PROGRESS }),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
         // The decoder went to a chunk that isn't here: fetch that first.
+        let st = sh.st.lock();
         let wanted = (st.want / CHUNK) as usize;
         if off <= b && wanted != ci && st.have.get(wanted).is_some_and(|h| !h) {
             return Ok(Streamed::Left);
         }
     }
-    // Everything asked for: read the end of the body so the connection can
-    // be used again.
-    let _ = r.read(&mut buf[..1]);
-    Ok(Streamed::Whole)
 }
 
 fn fetch_sequential(sh: &Shared, wf: &File, spec: HttpSpec) -> Result<(), String> {
@@ -498,7 +565,7 @@ fn fetch_sequential(sh: &Shared, wf: &File, spec: HttpSpec) -> Result<(), String
         let mut st = sh.st.lock();
         for ci in (before / CHUNK)..=(off.min(len) / CHUNK) {
             if (ci as usize) < st.have.len() {
-                received(&mut st, ci as usize, off.min(len).saturating_sub(ci * CHUNK));
+                received(&mut st, ci as usize, off.min(len).saturating_sub(ci * CHUNK), true);
             }
         }
         sh.cv.notify_all();
@@ -585,6 +652,10 @@ mod tests {
         Cut(usize),
         /// A 206 for other bytes than asked, naming them.
         Other,
+        /// The whole file labelled 206, saying nothing of a range.
+        Unlabelled,
+        /// The right range, then 100 bytes more, ended by closing.
+        Long,
     }
 
     struct Server {
@@ -618,7 +689,12 @@ mod tests {
                         }
                     }
                     let mut s = s;
-                    let Some((a, b)) = range else { return };
+                    let Some((a, b)) = range else {
+                        // A plain GET: the whole file.
+                        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {LEN}\r\nConnection: close\r\n\r\n").as_bytes());
+                        let _ = s.write_all(&body);
+                        return;
+                    };
                     r2.lock().push((a, b));
                     let n = count.fetch_add(1, Ordering::SeqCst);
                     let (from, to) = match plan(n) {
@@ -626,9 +702,18 @@ mod tests {
                         _ => (a, b),
                     };
                     let part = &body[from as usize..=(to as usize).min(LEN - 1)];
-                    let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mp4\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{to}/{LEN}\r\nConnection: close\r\n\r\n", part.len());
+                    let head = match plan(n) {
+                        Answer::Unlabelled => format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {LEN}\r\nConnection: close\r\n\r\n"),
+                        Answer::Long => format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {from}-{to}/{LEN}\r\nConnection: close\r\n\r\n"),
+                        _ => format!("HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mp4\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{to}/{LEN}\r\nConnection: close\r\n\r\n", part.len()),
+                    };
                     let _ = s.write_all(head.as_bytes());
                     match plan(n) {
+                        Answer::Unlabelled => drop(s.write_all(&body)),
+                        Answer::Long => {
+                            let _ = s.write_all(part);
+                            let _ = s.write_all(&[0xee; 100]);
+                        }
                         Answer::Normal | Answer::Other => drop(s.write_all(part)),
                         Answer::Trickle(ms) => {
                             let k = part.len().min(64 * 1024);
@@ -728,13 +813,71 @@ mod tests {
     #[test]
     fn content_ranges_are_checked() {
         let mut h = reqwest::header::HeaderMap::new();
-        assert!(range_matches(&h, 0, 9, 100, false), "a whole chunk without one, as before");
-        assert!(!range_matches(&h, 5, 9, 100, true), "the rest of a chunk needs one");
+        assert!(!range_matches(&h, 0, 9, 100), "a 206 must say which bytes it holds");
         h.insert("content-range", "bytes 5-9/100".parse().unwrap());
-        assert!(range_matches(&h, 5, 9, 100, true));
-        assert!(!range_matches(&h, 0, 9, 100, false));
-        assert!(!range_matches(&h, 5, 9, 200, false), "another file's length");
+        assert!(range_matches(&h, 5, 9, 100));
+        assert!(!range_matches(&h, 0, 9, 100));
+        assert!(!range_matches(&h, 5, 9, 200), "another file's length");
         h.insert("content-range", "bytes 5-9/*".parse().unwrap());
-        assert!(range_matches(&h, 5, 9, 100, true));
+        assert!(range_matches(&h, 5, 9, 100));
+        h.insert("content-length", "5".parse().unwrap());
+        assert!(range_matches(&h, 5, 9, 100));
+        h.insert("content-length", "100".parse().unwrap());
+        assert!(!range_matches(&h, 5, 9, 100), "a body longer than the range");
+    }
+
+    /// Reads the whole source and checks it, then that the file the cache
+    /// kept (if any) is the file.
+    fn read_through_cache(srv: &Server, key: &str) -> (io::Result<Vec<u8>>, Option<Vec<u8>>) {
+        let dir = std::env::temp_dir().join(format!("encore-src-{key}-{}", rand_suffix()));
+        let cache = AudioCache::new(&dir, 1 << 30).unwrap();
+        let spec = HttpSpec { url: srv.url.clone(), headers: vec![], content_length: Some(LEN as u64), cache_key: key.into(), range_safe: true, refresher: None };
+        let mut src = HttpSource::open(spec, Some(cache.clone())).unwrap();
+        let mut all = Vec::new();
+        let r = src.read_to_end(&mut all).map(|_| all);
+        drop(src);
+        std::thread::sleep(Duration::from_millis(400));
+        let kept = cache.lookup(key).map(|p| std::fs::read(p).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        (r, kept)
+    }
+
+    #[test]
+    fn a_206_without_a_range_is_read_as_one_plain_download() {
+        let srv = serve(|_| Answer::Unlabelled);
+        let (r, kept) = read_through_cache(&srv, "unlabelled-140");
+        assert!(r.unwrap() == data());
+        assert!(kept.is_some_and(|k| k == data()), "the cached file is the file");
+    }
+
+    #[test]
+    fn a_body_longer_than_its_range_is_never_kept() {
+        let srv = serve(|n| if n == 0 { Answer::Long } else { Answer::Normal });
+        let (r, kept) = read_through_cache(&srv, "long-140");
+        assert!(r.unwrap() == data());
+        assert!(kept.is_some_and(|k| k == data()));
+        let ranges = srv.ranges.lock().clone();
+        assert_eq!(ranges[1], (0, CHUNK - 1), "the chunk is asked for again, whole");
+        // Always too long: the song fails and nothing is cached.
+        let srv = serve(|_| Answer::Long);
+        let (r, kept) = read_through_cache(&srv, "longer-140");
+        assert!(r.is_err() || kept.is_none());
+        assert!(kept.is_none());
+    }
+
+    #[test]
+    fn a_seek_leaves_a_read_already_waiting_on_the_network() {
+        let srv = serve(|n| if n == 0 { Answer::Trickle(3000) } else { Answer::Normal });
+        let mut src = open(&srv.url);
+        let mut b = [0u8; 16];
+        src.read_exact(&mut b).unwrap();
+        // The fetch is now blocked on the rest of the first range.
+        std::thread::sleep(Duration::from_millis(400));
+        let far = CHUNK + 1000;
+        let t = Instant::now();
+        src.seek(SeekFrom::Start(far)).unwrap();
+        src.read_exact(&mut b).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(1000), "waited {:?}", t.elapsed());
+        assert_eq!(&b[..], &data()[far as usize..far as usize + 16]);
     }
 }
