@@ -2,14 +2,20 @@
 //! opaque key; the `art://` protocol resolves keys back to URLs. Only
 //! allow-listed hosts are accepted, so the protocol can never be used as a
 //! general fetch proxy.
+//!
+//! The registry in memory is bounded. The artwork index in SQLite (scope
+//! `art`) backs it: a key not in memory is looked up there (and kept again),
+//! nothing is read in bulk at launch, and keys pushed out of memory are
+//! written there first, so a cover still on screen never loses its address.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
 use crate::model::ArtRef;
+use crate::store::Store;
 
 #[derive(Clone, Debug)]
 pub struct ArtEntry {
@@ -18,9 +24,110 @@ pub struct ArtEntry {
     pub hue: Option<(u16, u16)>,
 }
 
-fn reg() -> &'static RwLock<HashMap<String, ArtEntry>> {
-    static R: OnceLock<RwLock<HashMap<String, ArtEntry>>> = OnceLock::new();
-    R.get_or_init(|| RwLock::new(HashMap::new()))
+/// Keys kept in memory; past this the least recently used quarter is
+/// written to the index and dropped.
+const CAP: usize = 20_000;
+/// How long a key written out that way is kept in the index, as the art
+/// cache keeps the ones it saves.
+const SPILL_TTL: i64 = 180 * 24 * 3600;
+
+/// Key → entry, each with the tick it was last used at.
+struct Registry {
+    map: HashMap<String, (ArtEntry, u64)>,
+    tick: u64,
+    cap: usize,
+}
+
+impl Registry {
+    fn new(cap: usize) -> Self {
+        Registry { map: HashMap::new(), tick: 0, cap }
+    }
+
+    fn touch(&mut self, key: &str) -> Option<ArtEntry> {
+        self.tick += 1;
+        let t = self.tick;
+        self.map.get_mut(key).map(|(e, at)| {
+            *at = t;
+            e.clone()
+        })
+    }
+
+    /// Inserts unless there; returns the entry and what was pushed out.
+    fn insert(&mut self, key: String, e: ArtEntry) -> (ArtEntry, Vec<(String, ArtEntry)>) {
+        self.tick += 1;
+        let t = self.tick;
+        let e = self.map.entry(key).or_insert((e, t)).0.clone();
+        (e, self.trim())
+    }
+
+    fn trim(&mut self) -> Vec<(String, ArtEntry)> {
+        if self.map.len() <= self.cap {
+            return Vec::new();
+        }
+        let mut ages: Vec<u64> = self.map.values().map(|v| v.1).collect();
+        let cut = self.map.len() / 4;
+        let (_, nth, _) = ages.select_nth_unstable(cut);
+        let oldest = *nth;
+        let gone: Vec<String> = self.map.iter().filter(|(_, v)| v.1 < oldest).map(|(k, _)| k.clone()).collect();
+        let out = gone.into_iter().filter_map(|k| self.map.remove(&k).map(|v| (k, v.0))).collect();
+        self.map.shrink_to(self.cap);
+        out
+    }
+}
+
+fn reg() -> &'static RwLock<Registry> {
+    static R: OnceLock<RwLock<Registry>> = OnceLock::new();
+    R.get_or_init(|| RwLock::new(Registry::new(CAP)))
+}
+
+fn index() -> &'static OnceLock<Arc<Store>> {
+    static S: OnceLock<Arc<Store>> = OnceLock::new();
+    &S
+}
+
+/// The artwork index that backs the registry. Set once at startup.
+pub fn attach(store: Arc<Store>) {
+    let _ = index().set(store);
+}
+
+/// A key from the index, if there is one there.
+fn from_index(key: &str) -> Option<ArtEntry> {
+    let store = index().get()?;
+    let (base, hue) = store.get::<(String, Option<(u16, u16)>)>("art", key).ok()??;
+    valid(key, &base).then_some(ArtEntry { base, hue })
+}
+
+/// The same while parsing a page: only a known hue is wanted, so it never
+/// waits on a busy database (a backup) for long.
+fn hue_from_index(key: &str) -> Option<(u16, u16)> {
+    let store = index().get()?;
+    store.get_quick::<(String, Option<(u16, u16)>)>("art", key, std::time::Duration::from_millis(20))?.1
+}
+
+fn valid(key: &str, base: &str) -> bool {
+    url::Url::parse(base).is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(host_allowed)) && key_for(base) == key
+}
+
+/// Keep `e` under `key` in memory, writing out what that pushes out.
+fn keep(key: String, e: ArtEntry) -> ArtEntry {
+    let (e, gone) = reg().write().insert(key, e);
+    if !gone.is_empty() {
+        spill(gone);
+    }
+    e
+}
+
+/// Writes keys pushed out of memory to the index, off the caller's thread.
+/// Rows already there (a downloaded song's cover never expires) stay as
+/// they are.
+fn spill(gone: Vec<(String, ArtEntry)>) {
+    let Some(store) = index().get().cloned() else { return };
+    let rows: Vec<(String, (String, Option<(u16, u16)>))> = gone.into_iter().map(|(k, e)| (k, (e.base, e.hue))).collect();
+    let _ = std::thread::Builder::new().name("encore-art-index".into()).spawn(move || {
+        if let Err(e) = store.put_absent("art", &rows, Some(SPILL_TTL)) {
+            tracing::warn!(error = %e.message, "couldn't save artwork keys");
+        }
+    });
 }
 
 pub fn host_allowed(host: &str) -> bool {
@@ -68,8 +175,12 @@ pub fn register(url: &str) -> Option<ArtRef> {
     }
     let base = strip_size(&url);
     let key = key_for(&base);
-    let mut r = reg().write();
-    let e = r.entry(key.clone()).or_insert(ArtEntry { base, hue: None });
+    let known = reg().write().touch(&key);
+    // Not in memory: the index may know its hue already.
+    let e = known.unwrap_or_else(|| {
+        let hue = hue_from_index(&key);
+        keep(key.clone(), ArtEntry { base, hue })
+    });
     Some(ArtRef { key, h1: e.hue.map(|h| h.0), h2: e.hue.map(|h| h.1) })
 }
 
@@ -97,11 +208,12 @@ pub fn is_local_key(key: &str) -> bool {
 }
 
 pub fn lookup(key: &str) -> Option<ArtEntry> {
-    reg().read().get(key).cloned()
+    let known = reg().write().touch(key);
+    known.or_else(|| from_index(key).map(|e| keep(key.to_string(), e)))
 }
 
 pub fn set_hue(key: &str, h1: u16, h2: u16) {
-    if let Some(e) = reg().write().get_mut(key) {
+    if let Some((e, _)) = reg().write().map.get_mut(key) {
         e.hue = Some((h1, h2));
     }
 }
@@ -116,18 +228,10 @@ pub fn refresh(a: &mut ArtRef) {
     }
 }
 
-/// For persistence across restarts (artwork index in SQLite).
-pub fn snapshot() -> Vec<(String, ArtEntry)> {
-    reg().read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-}
-
 pub fn restore(key: String, base: String, hue: Option<(u16, u16)>) {
-    let u = match url::Url::parse(&base) {
-        Ok(u) => u,
-        Err(_) => return,
-    };
-    if u.host_str().is_some_and(host_allowed) && key_for(&base) == key {
-        reg().write().entry(key).or_insert(ArtEntry { base, hue });
+    let known = reg().read().map.contains_key(&key);
+    if valid(&key, &base) && !known {
+        keep(key, ArtEntry { base, hue });
     }
 }
 
@@ -156,6 +260,41 @@ mod tests {
         assert!(lookup(&k).is_none() && public_url(&k).is_none());
         let a = register("https://lh3.googleusercontent.com/pub=w60-h60").unwrap();
         assert_eq!(public_url(&a.key).as_deref(), Some("https://lh3.googleusercontent.com/pub=w544-h544-l90-rj"));
+    }
+
+    #[test]
+    fn the_least_recently_used_quarter_goes_past_the_cap() {
+        let mut r = Registry::new(8);
+        let e = |i: u32| ArtEntry { base: format!("https://i.ytimg.com/{i}"), hue: None };
+        for i in 0..8 {
+            assert!(r.insert(format!("k{i}"), e(i)).1.is_empty());
+        }
+        r.touch("k0");
+        let (_, gone) = r.insert("k8".into(), e(8));
+        let mut gone: Vec<String> = gone.into_iter().map(|g| g.0).collect();
+        gone.sort();
+        assert_eq!(gone, ["k1", "k2"], "the oldest, not the one just used");
+        assert!(r.map.contains_key("k0") && r.map.contains_key("k8"));
+    }
+
+    #[test]
+    fn keys_out_of_memory_come_back_from_the_index() {
+        let store = Arc::new(Store::open_memory().unwrap());
+        let base = "https://lh3.googleusercontent.com/indexed".to_string();
+        let key = key_for(&base);
+        store.put("art", &key, &(base.clone(), Some((10u16, 20u16))), None).unwrap();
+        attach(store.clone());
+        let Some(s) = index().get() else { return };
+        if !Arc::ptr_eq(s, &store) {
+            return; // another test attached its own first
+        }
+        let e = lookup(&key).unwrap();
+        assert_eq!((e.base.as_str(), e.hue), (base.as_str(), Some((10, 20))));
+        let a = register(&format!("{base}=w60-h60")).unwrap();
+        assert_eq!((a.h1, a.h2), (Some(10), Some(20)), "registering finds the hue the index kept");
+        // A row the index has is never replaced by a spill (its expiry stays).
+        store.put_absent("art", &[(key.clone(), (String::from("https://i.ytimg.com/x"), None::<(u16, u16)>))], Some(5)).unwrap();
+        assert_eq!(store.get::<(String, Option<(u16, u16)>)>("art", &key).unwrap().unwrap().0, base);
     }
 
     #[test]

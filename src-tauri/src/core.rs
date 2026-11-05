@@ -141,12 +141,9 @@ impl Core {
         let paths = Paths::new();
         std::fs::create_dir_all(&paths.data).map_err(|e| AppError::internal(format!("cannot create data dir: {}", e.kind())))?;
         let store = Arc::new(Store::open(&paths.data.join("encore.sqlite"))?);
-        // Artwork keys survive restarts (queue restore shows covers).
-        for (k, v) in store.list("art").unwrap_or_default() {
-            if let Ok(e) = serde_json::from_str::<(String, Option<(u16, u16)>)>(&v) {
-                encore_core::art::restore(k, e.0, e.1);
-            }
-        }
+        // Artwork keys survive restarts (queue restore shows covers): the
+        // index is read a key at a time, as covers are asked for.
+        encore_core::art::attach(store.clone());
         let it = InnerTube::new("en", "US");
         let ytm = Arc::new(YtMusic::new(it.clone()));
         let accounts = Accounts::new(ytm.clone(), encore_auth::store::session_store());
@@ -308,8 +305,13 @@ impl Core {
             if c.store.put(scope, "queue", &SavedQueueRef { queue: q, position, stamp }, None).is_err() {
                 return false;
             }
-            // Restored queues need their artwork keys after a restart.
+            // Restored queues need their artwork keys after a restart. Saving
+            // one twice is harmless, so the record of what was saved is
+            // simply started again when it grows large.
             let mut done = saved_art.lock();
+            if done.len() > 20_000 {
+                *done = Default::default();
+            }
             for e in q.entries() {
                 let Some(a) = &e.track.art else { continue };
                 if done.contains(&a.key) {

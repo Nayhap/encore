@@ -332,6 +332,18 @@ impl Store {
             .map_err(db_err)
     }
 
+    /// Like `get`, but gives up (`None`) rather than wait longer than
+    /// `wait` for the connection, which a backup can hold for a while.
+    pub fn get_quick<T: DeserializeOwned>(&self, scope: &str, key: &str, wait: std::time::Duration) -> Option<T> {
+        let c = self.conn.try_lock_for(wait)?;
+        let v: Option<String> = c
+            .query_row("SELECT value FROM kv WHERE scope = ?1 AND key = ?2 AND (expires IS NULL OR expires > ?3)", params![scope, key, now()], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        v.and_then(|v| serde_json::from_str(&v).ok())
+    }
+
     pub fn put<T: Serialize>(&self, scope: &str, key: &str, value: &T, ttl_secs: Option<i64>) -> Result<()> {
         let s = serde_json::to_string(value).map_err(|e| AppError::internal(e.to_string()))?;
         self.put_raw(scope, key, &s, ttl_secs)
@@ -370,6 +382,22 @@ impl Store {
         let mut st = c.prepare("SELECT key, value FROM kv WHERE scope = ?1").map_err(db_err)?;
         let rows = st.query_map(params![scope], |r| Ok((r.get(0)?, r.get(1)?))).map_err(db_err)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Adds rows that aren't there yet, in one transaction; rows already
+    /// there (and their expiry) are left as they are.
+    pub fn put_absent<T: Serialize>(&self, scope: &str, rows: &[(String, T)], ttl_secs: Option<i64>) -> Result<()> {
+        let n = now();
+        let mut c = self.conn.lock();
+        let tx = c.transaction().map_err(db_err)?;
+        {
+            let mut st = tx.prepare("INSERT OR IGNORE INTO kv (scope, key, value, updated, expires) VALUES (?1, ?2, ?3, ?4, ?5)").map_err(db_err)?;
+            for (k, v) in rows {
+                let v = serde_json::to_string(v).map_err(|e| AppError::internal(e.to_string()))?;
+                st.execute(params![scope, k, v, n, ttl_secs.map(|t| n + t)]).map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)
     }
 
     pub fn purge_expired(&self) {
