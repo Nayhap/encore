@@ -857,7 +857,8 @@ mod tests {
         assert!(r.unwrap() == data());
         assert!(kept.is_some_and(|k| k == data()));
         let ranges = srv.ranges.lock().clone();
-        assert_eq!(ranges[1], (0, CHUNK - 1), "the chunk is asked for again, whole");
+        // Asked for again, whole; the next chunk may be fetched first.
+        assert!(ranges[1..].contains(&(0, CHUNK - 1)), "the chunk is asked for again, whole: {ranges:?}");
         // Always too long: the song fails and nothing is cached.
         let srv = serve(|_| Answer::Long);
         let (r, kept) = read_through_cache(&srv, "longer-140");
