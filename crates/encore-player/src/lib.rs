@@ -92,6 +92,8 @@ struct State {
     queue_loading: bool,
     last_queue: Vec<QueueEntry>,
     last_queue_rev: u64,
+    /// The queue's `content` when `last_queue` was taken.
+    last_queue_content: u64,
     last_duration: Option<f64>,
     /// Bumped whenever radio results would no longer be wanted (Autoplay
     /// turned off, the queue replaced): a response for an older value is
@@ -221,6 +223,7 @@ impl Player {
                 queue_loading: false,
                 last_queue: vec![],
                 last_queue_rev: 0,
+                last_queue_content: 0,
                 last_duration: None,
                 radio_gen: 0,
                 cycle: None,
@@ -1021,12 +1024,20 @@ impl Player {
             st.revision += 1;
             let snap = self.snapshot_locked(&st);
             let qrev = st.queue.revision();
-            let splice = if force_queue || qrev != st.last_queue_rev {
+            let splice = if !force_queue && qrev != st.last_queue_rev && st.queue.content() == st.last_queue_content {
+                // Only another entry playing (next, previous, a jump, a song
+                // ending): the entries are as last sent, so the splice is
+                // empty and nothing is copied or compared.
+                let sp = QueueSplice { base: s(st.last_queue_rev), revision: s(qrev), start: st.last_queue.len() as u32, delete: 0, insert: vec![], index: st.queue.index().map(|i| i as u32) };
+                st.last_queue_rev = qrev;
+                Some(sp)
+            } else if force_queue || qrev != st.last_queue_rev {
                 let new = st.queue.entries().to_vec();
                 let (start, delete, insert) = diff(&st.last_queue, &new);
                 let sp = QueueSplice { base: s(st.last_queue_rev), revision: s(qrev), start: start as u32, delete: delete as u32, insert, index: st.queue.index().map(|i| i as u32) };
                 st.last_queue = new;
                 st.last_queue_rev = qrev;
+                st.last_queue_content = st.queue.content();
                 Some(sp)
             } else {
                 None
