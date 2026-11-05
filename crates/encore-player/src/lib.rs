@@ -131,6 +131,13 @@ pub enum SaveQueue<'a> {
     Checkpoint { scope: &'a str, stamp: &'a str, at: &'a Checkpoint, position: f64 },
 }
 
+/// The position, length and playing flag at one engine read.
+struct Now {
+    position: f64,
+    duration: Option<f64>,
+    playing: bool,
+}
+
 /// A position that moved less than this since the last write isn't
 /// written again.
 const CHECKPOINT_MOVE: f64 = 0.5;
@@ -994,21 +1001,33 @@ impl Player {
         }
     }
 
+    /// Position, length and whether it plays, from one engine status read.
+    fn now_locked(st: &State, es: &encore_audio::engine::EngineStatus) -> Now {
+        let loaded_now = st.loaded.as_ref().is_some_and(|l| l.load_id == es.id);
+        Now {
+            position: if loaded_now { es.position } else { st.pending_pos },
+            duration: if loaded_now { es.duration.or(st.last_duration) } else { st.last_duration }.or_else(|| st.queue.current().and_then(|c| c.track.duration)),
+            playing: matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading) && !es.paused,
+        }
+    }
+
+    fn anchor_locked(st: &State, now: &Now) -> PositionAnchor {
+        PositionAnchor { track_gen: s(st.track_gen), seek_gen: s(st.seek_gen), position: now.position, duration: now.duration, playing: now.playing && st.phase == Phase::Playing }
+    }
+
     fn snapshot_locked(&self, st: &State) -> PlayerSnapshot {
         let es = self.engine.status();
-        let cur = st.queue.current().cloned();
-        let loaded_now = st.loaded.as_ref().is_some_and(|l| l.load_id == es.id);
-        let duration = if loaded_now { es.duration.or(st.last_duration) } else { st.last_duration }.or_else(|| cur.as_ref().and_then(|c| c.track.duration));
+        let now = Self::now_locked(st, &es);
         PlayerSnapshot {
             revision: s(st.revision),
             track_gen: s(st.track_gen),
             seek_gen: s(st.seek_gen),
             phase: st.phase,
-            playing: matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading) && !es.paused,
-            current: cur,
+            playing: now.playing,
+            current: st.queue.current().cloned(),
             index: st.queue.index().map(|i| i as u32),
-            position: self.position_locked(st),
-            duration,
+            position: now.position,
+            duration: now.duration,
             shuffle: st.queue.shuffle,
             repeat: st.queue.repeat,
             autoplay: st.queue.autoplay,
@@ -1049,8 +1068,8 @@ impl Player {
 
     pub fn anchor(&self) -> PositionAnchor {
         let st = self.st.lock();
-        let snap = self.snapshot_locked(&st);
-        PositionAnchor { track_gen: snap.track_gen, seek_gen: snap.seek_gen, position: snap.position, duration: snap.duration, playing: snap.playing && st.phase == Phase::Playing }
+        let now = Self::now_locked(&st, &self.engine.status());
+        Self::anchor_locked(&st, &now)
     }
 
     /// Emit state (and a queue splice if the queue changed).
@@ -1427,19 +1446,23 @@ impl Player {
         }
         self.expire_private();
         self.sleep_tick();
-        let (phase, pos, dur, upcoming, need_radio) = {
+        // One engine read and no snapshot: the anchor and every decision
+        // below come from the same moment.
+        let (phase, anchor, now, upcoming, need_radio) = {
             let st = self.st.lock();
-            let snap = self.snapshot_locked(&st);
+            let now = Self::now_locked(&st, &self.engine.status());
             let ok = self.avail();
             // Nothing is preloaded while a loop runs or the sleep timer
             // stops after this song (D26).
-            let up = if snap.ab_loop.is_some() || Self::sleep_holds(&st) { None } else { st.queue.upcoming_where(&ok).cloned() };
+            let looping = st.ab_loop.as_ref().is_some_and(|l| l.track_gen == st.track_gen);
+            let up = if looping || Self::sleep_holds(&st) { None } else { st.queue.upcoming_where(&ok).cloned() };
             let until_end = matches!(st.sleep, Some(Sleep::EndOfQueue));
             let need_radio = st.queue.autoplay && !until_end && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading && self.online();
-            (st.phase, snap.position, snap.duration, up, need_radio)
+            (st.phase, Self::anchor_locked(&st, &now), now, up, need_radio)
         };
+        let (pos, dur) = (now.position, now.duration);
         if matches!(phase, Phase::Playing | Phase::Buffering) {
-            self.send_anchor();
+            let _ = self.tx.send(PlayerEvent::Position(anchor));
         }
         if need_radio && matches!(phase, Phase::Playing) {
             let me = self.clone();
