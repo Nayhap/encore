@@ -204,8 +204,9 @@ $C play 4D7u5KF7SP8 --offline        # from the downloads only, no YouTube
 `resolve` runs signed out unless given `--auth session`; `play` and
 `downloads` use the stored session unless given `--auth anonymous`, which
 never reads the Keychain. `ENCORE_DATA_DIR` and `ENCORE_CACHE_DIR` point the
-CLI's database, downloads and audio cache somewhere else, so a test leaves
-the app's own alone (and a running Encore's cache untouched):
+CLI's database, downloads, audio cache and the resolver's player scripts
+somewhere else, so a test leaves the app's own alone (and a running
+Encore's cache untouched):
 
 ```sh
 ENCORE_DATA_DIR=/tmp/e ENCORE_CACHE_DIR=/tmp/e $C --auth anonymous downloads add 52fNscjkST4
