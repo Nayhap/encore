@@ -74,7 +74,17 @@ fn mime_of(b: &[u8]) -> Option<&'static str> {
 
 /// Two dominant hues (0..360) weighted by saturation and brightness.
 pub fn hues(bytes: &[u8]) -> Option<(u16, u16)> {
+    decoded_hues(bytes).flatten()
+}
+
+/// The same, telling a cover with no hue (`Some(None)`) from one that
+/// couldn't be decoded (`None`).
+fn decoded_hues(bytes: &[u8]) -> Option<Option<(u16, u16)>> {
     let img = image::load_from_memory(bytes).ok()?;
+    Some(hues_of(&img))
+}
+
+fn hues_of(img: &image::DynamicImage) -> Option<(u16, u16)> {
     let small = img.thumbnail(32, 32).to_rgb8();
     let mut bins = [0f64; 36];
     for p in small.pixels() {
@@ -236,16 +246,22 @@ impl ArtCache {
         }
         // Hue once per key (none found counts too), worked out after the
         // image is answered; then the key → URL mapping and hue are saved.
+        // A decode or a save that failed is tried again on the next fetch.
         if entry.hue.is_none() && self.hues.done.lock().insert(key.to_string()) {
             let (hs, key, base, bytes) = (self.hues.clone(), key.to_string(), entry.base.clone(), b.clone());
             let ttl = if self.is_kept(&key) { None } else { Some(180 * 24 * 3600) };
             tauri::async_runtime::spawn(async move {
-                let h = hs.work_out(bytes).await;
+                let Some(h) = hs.work_out(bytes).await else {
+                    hs.done.lock().remove(&key);
+                    return;
+                };
                 if let Some((h1, h2)) = h {
                     art::set_hue(&key, h1, h2);
                     hs.tell(&key, h1, h2);
                 }
-                let _ = hs.store.put("art", &key, &(base, h), ttl);
+                if hs.store.put("art", &key, &(base, h), ttl).is_err() {
+                    hs.done.lock().remove(&key);
+                }
             });
         }
         let evict = {
@@ -266,8 +282,10 @@ impl ArtCache {
         if self.hues.done.lock().insert(key.to_string()) {
             let (hs, key, bytes) = (self.hues.clone(), key.to_string(), b.clone());
             tauri::async_runtime::spawn(async move {
-                if let Some((h1, h2)) = hs.work_out(bytes).await {
-                    hs.tell(&key, h1, h2);
+                match hs.work_out(bytes).await {
+                    Some(Some((h1, h2))) => hs.tell(&key, h1, h2),
+                    Some(None) => {}
+                    None => drop(hs.done.lock().remove(&key)),
                 }
             });
         }
@@ -318,10 +336,11 @@ impl ArtCache {
 }
 
 impl Hues {
-    /// A cover's hues, decoded off the async runtime, a few at a time.
-    async fn work_out(&self, bytes: impl AsRef<[u8]> + Send + 'static) -> Option<(u16, u16)> {
+    /// A cover's hues, decoded off the async runtime, a few at a time;
+    /// `None` when it couldn't be decoded.
+    async fn work_out(&self, bytes: impl AsRef<[u8]> + Send + 'static) -> Option<Option<(u16, u16)>> {
         let _turn = self.decodes.acquire().await.ok()?;
-        tokio::task::spawn_blocking(move || hues(bytes.as_ref())).await.ok().flatten()
+        tokio::task::spawn_blocking(move || decoded_hues(bytes.as_ref())).await.ok().flatten()
     }
 
     fn tell(&self, key: &str, h1: u16, h2: u16) {
@@ -491,7 +510,8 @@ mod tests {
         let grey = image::RgbImage::from_pixel(8, 8, image::Rgb([120, 120, 120]));
         let mut buf = std::io::Cursor::new(Vec::new());
         grey.write_to(&mut buf, image::ImageFormat::Png).unwrap();
-        assert_eq!(hs.work_out(buf.into_inner()).await, None);
+        assert_eq!(hs.work_out(buf.into_inner()).await, Some(None), "decoded, no hue");
+        assert_eq!(hs.work_out(b"not an image".to_vec()).await, None, "not decoded: tried again later");
         let held = hs.decodes.acquire().await.unwrap();
         let waiting = hs.work_out(vec![0u8; 4]);
         assert!(tokio::time::timeout(Duration::from_millis(20), waiting).await.is_err());
