@@ -150,6 +150,14 @@
   .row:hover {
     background: var(--hover);
   }
+  /* A long queue costs only the rows on screen (as TrackTable's rows). */
+  .row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 46px;
+  }
+  .row.over {
+    content-visibility: visible;
+  }
   .row.over::before {
     content: "";
     position: absolute;

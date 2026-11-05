@@ -286,6 +286,19 @@
     padding: 0 8px;
     border-radius: 8px;
   }
+  /* Rows off screen skip style, layout and paint: a long list costs what is
+     on screen, its last measured height kept for the scrollbar. They stay
+     focusable and in the accessibility tree. */
+  .row:not(.head) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 56px;
+  }
+  /* That containment clips what a row draws outside itself: the drop line
+     while dragging, a group's separator. Those rows are drawn as usual. */
+  .row.over,
+  .row.group-start {
+    content-visibility: visible;
+  }
   .row.head {
     min-height: 34px;
     font-size: 12px;
