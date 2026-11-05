@@ -40,6 +40,7 @@ const RELEASES: &str = "https://github.com/Nayhap/encore/releases";
 
 const DEV: &str = "Updates are off in development builds.";
 const DEB: &str = "You installed Encore from the .deb package, which Encore can't update itself. Download the new .deb from the releases page.";
+const RPM: &str = "You installed Encore from the .rpm package, which Encore can't update itself. Download the new .rpm from the releases page.";
 const OTHER: &str = "This copy of Encore wasn't installed by its installer, so it can't update itself. Download the new version from the releases page.";
 const TRANSLOCATED: &str = "Move Encore to your Applications folder, then open it from there to let it update itself.";
 const DISK_IMAGE: &str = "Encore is running from its disk image. Drag it to your Applications folder, then open it from there to let it update itself.";
@@ -58,6 +59,8 @@ pub enum InstallKind {
     AppImage,
     /// Linux `.deb`: never updated by Encore, which links to the release instead.
     Deb,
+    /// Linux `.rpm`: never updated by Encore either, the same as the `.deb`.
+    Rpm,
     /// A development build.
     Dev,
     /// Not from an installer Encore knows.
@@ -546,6 +549,10 @@ pub fn classify() -> (InstallKind, Option<String>) {
             None => (InstallKind::AppImage, Some(OTHER.into())),
         },
         Some(BundleType::Deb) => (InstallKind::Deb, Some(DEB.into())),
+        // The manifest has no rpm entry, so the plugin would fall back to
+        // `linux-x86_64`, the AppImage: refusing here keeps it from ever
+        // being downloaded or installed over an RPM install.
+        Some(BundleType::Rpm) => (InstallKind::Rpm, Some(RPM.into())),
         _ => (InstallKind::Other, Some(OTHER.into())),
     }
 }

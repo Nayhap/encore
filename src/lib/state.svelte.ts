@@ -562,7 +562,7 @@ class Updates {
 
   #out(s: UpdateStatus) {
     const a = s.available!;
-    if (s.install === "deb") ui.say(`Encore ${a.version} is out. Download it from the releases page.`, "info", { label: "Open page", run: () => openExternal(a.page) });
+    if (s.install === "deb" || s.install === "rpm") ui.say(`Encore ${a.version} is out. Download it from the releases page.`, "info", { label: "Open page", run: () => openExternal(a.page) });
     else if (!s.canInstall) ui.say(`Encore ${a.version} is out.`, "info", { label: "What's new", run: () => (this.sheet = "update") });
     else ui.say(`Encore ${a.version} is out.`, "info", { label: "Download", run: () => void this.download() });
   }

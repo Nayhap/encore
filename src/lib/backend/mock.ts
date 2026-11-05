@@ -464,7 +464,8 @@ function engineStatus(): T.EngineStatus {
 // An automatic check runs 3 s after start. `?update` finds Encore 0.5.0 and
 // downloads it over 6 s; `?update-manual` has automatic updates off, so it
 // only says so (Download on request); `?update-deb` is a .deb install, which
-// links to the release page; `?update-fail` makes checks fail;
+// links to the release page, as does `?update-rpm` for an .rpm install;
+// `?update-fail` makes checks fail;
 // `?update-translocated` runs from a translocated copy on macOS; `?updated`
 // starts just after an update, with its "What's new".
 const UPDATE_NOTES = `## What's new
@@ -482,17 +483,19 @@ const updateInfo = (version: string): T.UpdateInfo => ({
   notes: UPDATE_NOTES.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2).replace(/\*\*|<\/?kbd>/g, "")),
   page: `https://github.com/Nayhap/encore/releases/tag/v${version}`,
 });
-const upFound = q.has("update") || q.has("update-manual") || q.has("update-deb") || q.has("update-translocated");
+const upFound = q.has("update") || q.has("update-manual") || q.has("update-deb") || q.has("update-rpm") || q.has("update-translocated");
 const up = {
   rev: 1,
   current: "0.4.0",
   auto: !q.has("update-manual"),
-  install: (q.has("update-deb") ? "deb" : "app") as T.InstallKind,
+  install: (q.has("update-deb") ? "deb" : q.has("update-rpm") ? "rpm" : "app") as T.InstallKind,
   reason: q.has("update-deb")
     ? "You installed Encore from the .deb package, which Encore can't update itself. Download the new .deb from the releases page."
-    : q.has("update-translocated")
-      ? "Move Encore to your Applications folder, then open it from there to let it update itself."
-      : null,
+    : q.has("update-rpm")
+      ? "You installed Encore from the .rpm package, which Encore can't update itself. Download the new .rpm from the releases page."
+      : q.has("update-translocated")
+        ? "Move Encore to your Applications folder, then open it from there to let it update itself."
+        : null,
   phase: "idle" as T.UpdatePhase,
   available: null as T.UpdateInfo | null,
   received: 0,
