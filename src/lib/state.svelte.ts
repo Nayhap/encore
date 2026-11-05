@@ -6,7 +6,12 @@ import { collectionMenuItems, grouped, loadFeatures, subscribeFeatures, trackMen
 
 // The player is a mirror of the Rust playback state (D6, D13). Its public
 // methods are the UI contract; each one becomes a backend command. Position
-// arrives as 2 Hz anchors and is interpolated with requestAnimationFrame.
+// arrives as 2 Hz anchors and is interpolated ten times a second: the seek
+// bar then moves less than a pixel a step, and the window isn't redrawn every
+// frame (on Linux, WebKitGTK may paint every frame on the CPU).
+
+/** How often the interpolated position is written while playing. */
+const TICK_MS = 100;
 
 export type RepeatMode = Repeat;
 
@@ -59,14 +64,12 @@ class Player {
   #seekGen = 0n;
   #localSeek = -1n;
   #anchor = { pos: 0, at: 0, playing: false };
-  #raf = 0;
 
   constructor() {
-    if (typeof window !== "undefined") this.#tick();
+    if (typeof window !== "undefined") setInterval(this.#tick, TICK_MS);
   }
 
   #tick = () => {
-    this.#raf = requestAnimationFrame(this.#tick);
     if (document.hidden) return;
     const a = this.#anchor;
     if (!a.playing) return;

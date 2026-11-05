@@ -134,6 +134,7 @@ impl QuickJsSolver {
                     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job.input, job.limits, job.cold, &job.cancel)))
                         .unwrap_or_else(|_| Err(SolveError::Engine("the solver failed".into())));
                     let _ = job.reply.send(out);
+                    release_freed_memory();
                 }
             })
             .map_err(|e| SolveError::Engine(format!("could not start: {}", e.kind())))?;
@@ -211,6 +212,20 @@ impl Solver for QuickJsSolver {
         }
     }
 }
+
+/// A solve allocates a few hundred MB and frees it with its runtime, but
+/// glibc keeps freed pages for reuse, so the process would stay that large
+/// between songs. Give them back once the solve has answered.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_freed_memory() {
+    // SAFETY: malloc_trim only returns free heap pages to the system.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_freed_memory() {}
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(300).collect()

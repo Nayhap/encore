@@ -1645,6 +1645,7 @@ dependencies = [
  "encore-auth",
  "encore-core",
  "hex",
+ "libc",
  "parking_lot 0.13.0",
  "regex",
  "reqwest",

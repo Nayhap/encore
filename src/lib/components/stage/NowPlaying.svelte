@@ -77,6 +77,24 @@
   :global([data-theme="light"]) .card.lyrics .card-art {
     filter: blur(28px) saturate(1.2) brightness(1.25) contrast(0.7);
   }
+  /* WebKitGTK may redo a blur this large on the CPU for every lyric repaint:
+     a tint of the cover's colour instead (D17). */
+  :global(:root[data-os="linux"]) .card.lyrics {
+    background: color-mix(in srgb, var(--accent) 30%, #111);
+  }
+  :global(:root[data-os="linux"][data-theme="light"]) .card.lyrics {
+    background: color-mix(in srgb, var(--accent) 22%, #fff);
+  }
+  :global(:root[data-os="linux"]) .card.lyrics .card-art {
+    opacity: 0;
+    filter: none;
+  }
+  :global(:root[data-os="linux"]) .card-tabs,
+  :global(:root[data-os="linux"]) .card-expand {
+    background: rgb(0 0 0 / 0.55);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
   .card-lyrics {
     position: absolute;
     inset: 48px 0 0;
