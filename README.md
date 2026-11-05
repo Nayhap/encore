@@ -95,8 +95,12 @@ Download the latest build from
   needs an administrator. Builds are not code-signed
   yet: SmartScreen warns on first run (choose **More info**, then **Run
   anyway**), and if Smart App Control is on, Windows blocks them.
-- **Linux**: the `.deb` for Debian 12 and Ubuntu 22.04 or newer, or the
-  `.AppImage` for other distributions with glibc 2.35 or newer. The AppImage
+- **Linux**: the `.deb` for Debian 12 and Ubuntu 22.04 or newer, the `.rpm`
+  for Fedora 40 or newer, or the `.AppImage` for other distributions with
+  glibc 2.35 or newer. Install the `.rpm` with
+  `sudo dnf install ./Encore-<version>-1.x86_64.rpm`, which also installs
+  what it needs. The `.deb` and `.rpm` draw with your system's own WebKit,
+  made for your graphics drivers, so prefer them where they fit. The AppImage
   uses the system's OpenGL and sound libraries, which desktops have; on a
   minimal system install them first (`libegl1 libgl1 libgles2 libgbm1
   libasound2` on Debian and Ubuntu, `libglvnd-gles alsa-lib` on Fedora). To
@@ -116,8 +120,8 @@ choose **Restart to update**. It never restarts by itself. To decide for
 yourself, turn off **Settings → Updates → Install updates automatically**:
 Encore then only tells you when a new version is out. On macOS, each update
 asks once again for access to your saved session in the Keychain; choose
-**Always Allow**. Installs from the `.deb` don't update themselves: Encore
-says when a new version is out and links to it.
+**Always Allow**. Installs from the `.deb` or `.rpm` don't update
+themselves: Encore says when a new version is out and links to it.
 
 Uninstalling keeps Encore's caches and settings (a few hundred MB at
 most), and your downloads, unless you tick **Delete the
