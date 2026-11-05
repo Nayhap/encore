@@ -1,5 +1,6 @@
 //! `art://localhost/<key>?s=<size>` (D14): opaque keys, allow-listed hosts,
-//! size/MIME limits, disk LRU, dominant hue computed once. The same cached
+//! size/MIME limits, disk LRU, one fetch per key and size at a time, dominant
+//! hue worked out once per key after the image is answered. The same cached
 //! file feeds macOS Now Playing. Covers of downloaded songs are kept apart,
 //! out of the LRU, and answer every size when the network can't (D23).
 //! Covers the user chose for folders are local art (D34): checked and
@@ -25,6 +26,23 @@ const LOCAL_MAX_PIXELS: u64 = 64_000_000;
 const LOCAL_EDGE: u32 = 640;
 
 type HueHook = Box<dyn Fn(&str, u16, u16) + Send + Sync>;
+/// Covers decoded for their hue at once, at most: a decode of a large one
+/// holds tens of MB for a moment.
+const HUE_DECODES: usize = 2;
+
+/// Fetches in flight, one per key and size: a second request for the same
+/// cover waits for the first and reads its file.
+type Inflight = Mutex<std::collections::HashMap<(String, u32), Arc<tokio::sync::Mutex<()>>>>;
+
+/// The hue side of the cache, shared with the tasks that work hues out
+/// after the image has been answered.
+struct Hues {
+    store: Arc<Store>,
+    on_hue: Mutex<Option<HueHook>>,
+    /// Keys whose hue was worked out (or found to have none) this run.
+    done: Mutex<std::collections::HashSet<String>>,
+    decodes: tokio::sync::Semaphore,
+}
 
 pub struct ArtCache {
     dir: PathBuf,
@@ -32,9 +50,9 @@ pub struct ArtCache {
     kept: Option<PathBuf>,
     /// Offline, a kept cover answers at once, at every size (D23).
     online: AtomicBool,
-    store: Arc<Store>,
     http: reqwest::Client,
-    on_hue: Mutex<Option<HueHook>>,
+    hues: Arc<Hues>,
+    inflight: Inflight,
     writes: Mutex<u32>,
 }
 
@@ -97,11 +115,12 @@ impl ArtCache {
             // Follow only redirects that stay on allow-listed hosts.
             if a.previous().len() < 3 && a.url().scheme() == "https" && a.url().host_str().is_some_and(art::host_allowed) { a.follow() } else { a.stop() }
         })).build().expect("http");
-        Self { dir, kept, online: AtomicBool::new(true), store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
+        let hues = Arc::new(Hues { store, on_hue: Mutex::new(None), done: Mutex::new(Default::default()), decodes: tokio::sync::Semaphore::new(HUE_DECODES) });
+        Self { dir, kept, online: AtomicBool::new(true), http, hues, inflight: Mutex::new(Default::default()), writes: Mutex::new(0) }
     }
 
     pub fn on_hue(&self, f: impl Fn(&str, u16, u16) + Send + Sync + 'static) {
-        *self.on_hue.lock() = Some(Box::new(f));
+        *self.hues.on_hue.lock() = Some(Box::new(f));
     }
 
     fn valid_key(key: &str) -> bool {
@@ -147,13 +166,14 @@ impl ArtCache {
         }
         let size = snap_size(size);
         let path = self.dir.join(format!("{key}-{size}"));
-        if let Ok(b) = tokio::fs::read(&path).await {
-            if let Some(m) = mime_of(&b) {
-                if let Ok(f) = std::fs::OpenOptions::new().append(true).open(&path) {
-                    let _ = f.set_modified(SystemTime::now());
-                }
-                return Ok((b, m));
-            }
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        // One fetch per cover and size: the others wait, then read its file.
+        let flight = Flight::join(&self.inflight, (key.to_string(), size));
+        let _one = flight.lock.lock().await;
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
         }
         // A downloaded song's cover: enough for anything up to 544 px, and
         // for every size when the network can't answer.
@@ -171,6 +191,16 @@ impl ArtCache {
             Ok(x) => Ok(x),
             Err(e) => kept.ok_or(e),
         }
+    }
+
+    /// A cached file that is an image, its time touched for the LRU.
+    async fn read_cached(path: &std::path::Path) -> Option<(Vec<u8>, &'static str)> {
+        let b = tokio::fs::read(path).await.ok()?;
+        let m = mime_of(&b)?;
+        if let Ok(f) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+        Some((b, m))
     }
 
     async fn fetch(&self, key: &str, size: u32, path: &std::path::Path) -> Result<(Vec<u8>, &'static str), String> {
@@ -204,18 +234,19 @@ impl ArtCache {
         if tokio::fs::write(&tmp, &b).await.is_ok() {
             let _ = tokio::fs::rename(&tmp, path).await;
         }
-        // Hue once per key; persist the key → URL mapping and hue.
-        if entry.hue.is_none() {
-            let bytes = b.to_vec();
-            let h = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten();
-            if let Some((h1, h2)) = h {
-                art::set_hue(key, h1, h2);
-                if let Some(f) = self.on_hue.lock().as_ref() {
-                    f(key, h1, h2);
+        // Hue once per key (none found counts too), worked out after the
+        // image is answered; then the key → URL mapping and hue are saved.
+        if entry.hue.is_none() && self.hues.done.lock().insert(key.to_string()) {
+            let (hs, key, base, bytes) = (self.hues.clone(), key.to_string(), entry.base.clone(), b.clone());
+            let ttl = if self.is_kept(&key) { None } else { Some(180 * 24 * 3600) };
+            tauri::async_runtime::spawn(async move {
+                let h = hs.work_out(bytes).await;
+                if let Some((h1, h2)) = h {
+                    art::set_hue(&key, h1, h2);
+                    hs.tell(&key, h1, h2);
                 }
-            }
-            let ttl = if self.is_kept(key) { None } else { Some(180 * 24 * 3600) };
-            let _ = self.store.put("art", key, &(entry.base.clone(), h), ttl);
+                let _ = hs.store.put("art", &key, &(base, h), ttl);
+            });
         }
         let evict = {
             let mut w = self.writes.lock();
@@ -232,14 +263,13 @@ impl ArtCache {
     async fn get_local(&self, key: &str) -> Result<(Vec<u8>, &'static str), String> {
         let b = tokio::fs::read(local_path(&local_dir(), key)).await.map_err(|_| "no such cover".to_string())?;
         let mime = mime_of(&b).ok_or("cover is not an image")?;
-        let first = LOCAL_HUES.get_or_init(Default::default).lock().insert(key.to_string());
-        if first {
-            let bytes = b.clone();
-            if let Some((h1, h2)) = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten()
-                && let Some(f) = self.on_hue.lock().as_ref()
-            {
-                f(key, h1, h2);
-            }
+        if self.hues.done.lock().insert(key.to_string()) {
+            let (hs, key, bytes) = (self.hues.clone(), key.to_string(), b.clone());
+            tauri::async_runtime::spawn(async move {
+                if let Some((h1, h2)) = hs.work_out(bytes).await {
+                    hs.tell(&key, h1, h2);
+                }
+            });
         }
         Ok((b, mime))
     }
@@ -287,7 +317,44 @@ impl ArtCache {
     }
 }
 
-static LOCAL_HUES: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+impl Hues {
+    /// A cover's hues, decoded off the async runtime, a few at a time.
+    async fn work_out(&self, bytes: impl AsRef<[u8]> + Send + 'static) -> Option<(u16, u16)> {
+        let _turn = self.decodes.acquire().await.ok()?;
+        tokio::task::spawn_blocking(move || hues(bytes.as_ref())).await.ok().flatten()
+    }
+
+    fn tell(&self, key: &str, h1: u16, h2: u16) {
+        if let Some(f) = self.on_hue.lock().as_ref() {
+            f(key, h1, h2);
+        }
+    }
+}
+
+/// One request's share of a fetch in flight; the last one out removes it.
+struct Flight<'a> {
+    map: &'a Inflight,
+    key: (String, u32),
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<'a> Flight<'a> {
+    fn join(map: &'a Inflight, key: (String, u32)) -> Self {
+        let lock = map.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        Flight { map, key, lock }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        // Copies are taken under this lock: the map's and this one left
+        // means no one else waits.
+        if Arc::strong_count(&self.lock) == 2 && m.get(&self.key).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
+            m.remove(&self.key);
+        }
+    }
+}
 
 /// `<app data>/covers`, beside the database: durable, unlike the art cache.
 fn local_dir() -> PathBuf {
@@ -400,6 +467,35 @@ mod tests {
         std::fs::write(&text, b"hello").unwrap();
         assert!(import_local_into(&dir, &text).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn one_fetch_per_cover_and_size() {
+        let map: Inflight = Mutex::new(Default::default());
+        let a = Flight::join(&map, ("k".into(), 120));
+        let b = Flight::join(&map, ("k".into(), 120));
+        let other = Flight::join(&map, ("k".into(), 544));
+        assert!(Arc::ptr_eq(&a.lock, &b.lock));
+        assert!(!Arc::ptr_eq(&a.lock, &other.lock), "another size is another fetch");
+        let g = a.lock.lock().await;
+        assert!(b.lock.try_lock().is_err(), "the second waits for the first");
+        drop(g);
+        drop((a, b, other));
+        assert!(map.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn grey_covers_have_no_hue_and_decodes_wait_their_turn() {
+        let store = Arc::new(Store::open_memory().unwrap());
+        let hs = Hues { store, on_hue: Mutex::new(None), done: Mutex::new(Default::default()), decodes: tokio::sync::Semaphore::new(1) };
+        let grey = image::RgbImage::from_pixel(8, 8, image::Rgb([120, 120, 120]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        grey.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        assert_eq!(hs.work_out(buf.into_inner()).await, None);
+        let held = hs.decodes.acquire().await.unwrap();
+        let waiting = hs.work_out(vec![0u8; 4]);
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting).await.is_err());
+        drop(held);
     }
 
     #[test]
