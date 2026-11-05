@@ -8,7 +8,13 @@ use encore_core::model::*;
 use encore_core::service::{Capabilities, MusicService, RequestContext};
 use encore_lyrics::LyricsService;
 
-struct Fake(Option<Lyrics>);
+/// The lyrics it has, and how often it was asked (each answer takes a
+/// moment, as a request would).
+struct Fake(Option<Lyrics>, Arc<std::sync::atomic::AtomicUsize>);
+
+fn fake(l: Option<Lyrics>) -> Arc<Fake> {
+    Arc::new(Fake(l, Default::default()))
+}
 
 fn track() -> Track {
     Track { id: ItemId::ytm("abc"), title: "Song".into(), artists: vec![Credit { name: "Artist".into(), id: None }], album: None, duration: Some(200.0), explicit: false, art: None, kind: TrackKind::Song, plays: None, liked: None, playable: true, counterpart: None }
@@ -26,6 +32,8 @@ impl MusicService for Fake {
         RequestContext { account: "test".into(), epoch: 1 }
     }
     async fn lyrics(&self, _ctx: &RequestContext, _id: &ItemId) -> Result<Option<Lyrics>> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         Ok(self.0.clone())
     }
     async fn home(&self, _ctx: &RequestContext) -> Result<Page> {
@@ -95,10 +103,10 @@ fn line(t: f64, s: &str) -> LyricLine {
 async fn youtube_timed_wins_and_is_cached() {
     let timed = Lyrics { track_id: ItemId::ytm("abc"), sync: LyricsSync::Line, lines: vec![line(1.0, "a"), line(2.0, "b")], plain: None, source: "YouTube Music".into(), attribution: None };
     let store = Arc::new(encore_core::store::Store::open_memory().unwrap());
-    let s = LyricsService::with_base(Arc::new(Fake(Some(timed.clone()))), Some(store.clone()), "http://127.0.0.1:9");
+    let s = LyricsService::with_base(fake(Some(timed.clone())), Some(store.clone()), "http://127.0.0.1:9");
     assert_eq!(s.get(&track()).await, Some(timed.clone()));
     // Second call is served from the cache even with a service that has nothing.
-    let s2 = LyricsService::with_base(Arc::new(Fake(None)), Some(store), "http://127.0.0.1:9");
+    let s2 = LyricsService::with_base(fake(None), Some(store), "http://127.0.0.1:9");
     assert_eq!(s2.get(&track()).await, Some(timed));
 }
 
@@ -106,14 +114,31 @@ async fn youtube_timed_wins_and_is_cached() {
 async fn plain_fallback_when_lrclib_is_down() {
     let plain = Lyrics { track_id: ItemId::ytm("abc"), sync: LyricsSync::None, lines: vec![], plain: Some("words".into()), source: "YouTube Music".into(), attribution: None };
     let store = Arc::new(encore_core::store::Store::open_memory().unwrap());
-    let s = LyricsService::with_base(Arc::new(Fake(Some(plain.clone()))), Some(store.clone()), "http://127.0.0.1:9");
+    let s = LyricsService::with_base(fake(Some(plain.clone())), Some(store.clone()), "http://127.0.0.1:9");
     assert_eq!(s.get(&track()).await, Some(plain));
 }
 
 #[tokio::test]
 async fn misses_are_not_cached_when_providers_fail() {
     let store = Arc::new(encore_core::store::Store::open_memory().unwrap());
-    let s = LyricsService::with_base(Arc::new(Fake(None)), Some(store.clone()), "http://127.0.0.1:9");
+    let s = LyricsService::with_base(fake(None), Some(store.clone()), "http://127.0.0.1:9");
     assert_eq!(s.get(&track()).await, None);
     assert_eq!(store.count("lyrics"), 0, "a transport failure must not be negative-cached");
+}
+
+#[tokio::test]
+async fn lookups_of_one_song_at_once_share_one_walk() {
+    let timed = Lyrics { track_id: ItemId::ytm("abc"), sync: LyricsSync::Line, lines: vec![line(1.0, "a"), line(2.0, "b")], plain: None, source: "YouTube Music".into(), attribution: None };
+    let f = fake(Some(timed.clone()));
+    let s = Arc::new(LyricsService::with_base(f.clone(), None, "http://127.0.0.1:9"));
+    let t = track();
+    let (a, b) = tokio::join!(s.get(&t), s.fetch_for_download(&t));
+    assert_eq!((a, b), (Some(timed.clone()), Ok(Some(timed.clone()))));
+    assert_eq!(f.1.load(std::sync::atomic::Ordering::SeqCst), 1, "asked once");
+    // One that gives up doesn't stop the other.
+    let s2 = s.clone();
+    let quitter = tokio::spawn(async move { s2.get(&track()).await });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    quitter.abort();
+    assert_eq!(s.get(&track()).await, Some(timed));
 }

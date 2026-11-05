@@ -133,12 +133,29 @@ impl Default for Http {
     }
 }
 
+/// A JSON body read to its end but never past `max` bytes; `None` when
+/// it was interrupted, larger or not JSON.
+async fn json_capped(mut r: reqwest::Response, max: usize) -> Option<Value> {
+    if r.content_length().is_some_and(|l| l as usize > max) {
+        return None;
+    }
+    let mut out = Vec::new();
+    while let Some(c) = r.chunk().await.ok()? {
+        if out.len() + c.len() > max {
+            return None;
+        }
+        out.extend_from_slice(&c);
+    }
+    serde_json::from_slice(&out).ok()
+}
+
 #[async_trait]
 impl Transport for Http {
     async fn post(&self, form: Vec<(String, String)>) -> Result<Value, Error> {
         let r = self.client.post(API_URL).form(&form).send().await.map_err(|_| Error::Network)?;
         let status = r.status();
-        let body: Value = r.json().await.map_err(|_| if status.is_success() { Error::Unexpected } else { Error::Network })?;
+        // A page of 1,000 top tracks is well under 1 MB.
+        let body: Value = json_capped(r, 8 * 1024 * 1024).await.ok_or(if status.is_success() { Error::Unexpected } else { Error::Network })?;
         // Errors come as `{ "error": 9, "message": "…" }`, often with a 4xx.
         api_error(&body).map_or(Ok(body), Err)
     }

@@ -1613,6 +1613,7 @@ version = "0.6.2"
 dependencies = [
  "async-trait",
  "encore-core",
+ "parking_lot 0.13.0",
  "reqwest",
  "serde",
  "serde_json",

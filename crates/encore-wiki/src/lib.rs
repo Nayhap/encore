@@ -96,6 +96,23 @@ where
     Ok(None)
 }
 
+/// A JSON body read to its end but never past `max` bytes; `None` when
+/// it was interrupted, larger or not JSON.
+async fn json_capped(mut r: reqwest::Response, max: usize) -> Option<Value> {
+    if r.content_length().is_some_and(|l| l as usize > max) {
+        return None;
+    }
+    let mut out = Vec::new();
+    while let Some(c) = r.chunk().await.ok()? {
+        if out.len() + c.len() > max {
+            return None;
+        }
+        out.extend_from_slice(&c);
+    }
+    serde_json::from_slice(&out).ok()
+}
+
+
 /// [`lookup_with`] over HTTPS.
 pub async fn lookup(http: &reqwest::Client, name: &str) -> Result<Option<WikiExtract>, Error> {
     lookup_with(name, |title| async move {
@@ -104,7 +121,8 @@ pub async fn lookup(http: &reqwest::Client, name: &str) -> Result<Option<WikiExt
         u.set_query(Some("redirect=true"));
         let r = http.get(u).send().await.map_err(|_| Error::Network)?;
         match r.status().as_u16() {
-            200 => r.json::<Value>().await.map(Some).map_err(|_| Error::Network),
+            // A summary is a few KB.
+            200 => json_capped(r, 1024 * 1024).await.map(Some).ok_or(Error::Network),
             404 => Ok(None),
             // Busy or down: no answer now, so nothing is remembered.
             _ => Err(Error::Network),

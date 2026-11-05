@@ -32,6 +32,9 @@ type HueHook = Box<dyn Fn(&str, u16, u16) + Send + Sync>;
 /// Covers decoded for their hue at once, at most: a decode of a large one
 /// holds tens of MB for a moment.
 const HUE_DECODES: usize = 2;
+/// Covers downloaded at once, at most: a long list scrolled fast asks for
+/// hundreds; the rest wait their turn (each answers when its file lands).
+const FETCHES: usize = 6;
 
 /// Fetches in flight, one per key and size: a second request for the same
 /// cover waits for the first and reads its file.
@@ -56,6 +59,7 @@ pub struct ArtCache {
     http: reqwest::Client,
     hues: Arc<Hues>,
     inflight: Inflight,
+    fetches: tokio::sync::Semaphore,
     writes: Mutex<u32>,
 }
 
@@ -245,7 +249,7 @@ impl ArtCache {
             if a.previous().len() < 3 && a.url().scheme() == "https" && a.url().host_str().is_some_and(art::host_allowed) { a.follow() } else { a.stop() }
         })).build().expect("http");
         let hues = Arc::new(Hues { store, on_hue: Mutex::new(None), done: Mutex::new(Default::default()), decodes: tokio::sync::Semaphore::new(HUE_DECODES) });
-        Self { dir, kept, online: AtomicBool::new(true), http, hues, inflight: Mutex::new(Default::default()), writes: Mutex::new(0) }
+        Self { dir, kept, online: AtomicBool::new(true), http, hues, inflight: Mutex::new(Default::default()), fetches: tokio::sync::Semaphore::new(FETCHES), writes: Mutex::new(0) }
     }
 
     pub fn on_hue(&self, f: impl Fn(&str, u16, u16) + Send + Sync + 'static) {
@@ -370,6 +374,7 @@ impl ArtCache {
         if u.scheme() != "https" || !u.host_str().is_some_and(art::host_allowed) {
             return Err("art host not allowed".into());
         }
+        let _turn = self.fetches.acquire().await.map_err(|_| "closing")?;
         let r = self.http.get(u).send().await.map_err(|_| "artwork download failed".to_string())?;
         if !r.status().is_success() {
             return Err(format!("artwork server answered {}", r.status().as_u16()));
@@ -377,10 +382,16 @@ impl ArtCache {
         if r.content_length().is_some_and(|l| l as usize > MAX_BYTES) {
             return Err("artwork too large".into());
         }
-        let b = r.bytes().await.map_err(|_| "artwork download interrupted".to_string())?;
-        if b.len() > MAX_BYTES {
-            return Err("artwork too large".into());
+        // Read up to the limit, whatever the length said.
+        let mut r = r;
+        let mut b = Vec::new();
+        while let Some(c) = r.chunk().await.map_err(|_| "artwork download interrupted".to_string())? {
+            if b.len() + c.len() > MAX_BYTES {
+                return Err("artwork too large".into());
+            }
+            b.extend_from_slice(&c);
         }
+        let b: Arc<[u8]> = b.into();
         let mime = mime_of(&b).ok_or("artwork is not an image")?;
         let dims_ok = image::ImageReader::new(std::io::Cursor::new(&b)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok()).is_some_and(|(w, h)| (w as u64) * (h as u64) <= MAX_PIXELS);
         if !dims_ok {

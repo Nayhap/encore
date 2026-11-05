@@ -18,6 +18,28 @@ use serde_json::{Value, json};
 pub const ORIGIN: &str = "https://music.youtube.com";
 pub const FALLBACK_VERSION: &str = "1.20261027.10.00";
 pub const WEB_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+/// The largest answer read from YouTube Music, decompressed: its biggest
+/// pages are under 1 MB, so this only stops a runaway body.
+const MAX_ANSWER: usize = 24 * 1024 * 1024;
+/// The start page read for the client version (D10).
+const MAX_PAGE: usize = 8 * 1024 * 1024;
+
+/// A body as text, read to its end but never past `max` bytes; `None` when
+/// it was interrupted or larger.
+async fn text_capped(mut r: reqwest::Response, max: usize) -> Option<String> {
+    if r.content_length().is_some_and(|l| l as usize > max) {
+        return None;
+    }
+    let mut out = Vec::new();
+    while let Some(c) = r.chunk().await.ok()? {
+        if out.len() + c.len() > max {
+            return None;
+        }
+        out.extend_from_slice(&c);
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
 const ANDROID_MUSIC_VERSION: &str = "7.27.52";
 const ANDROID_MUSIC_UA: &str = "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 14) gzip";
 
@@ -182,7 +204,7 @@ impl InnerTube {
         let t0 = Instant::now();
         let res = self.http.get(format!("{ORIGIN}/")).header("User-Agent", WEB_UA).header("Cookie", "SOCS=CAI").header("Accept-Language", "en-US,en;q=0.9").send().await;
         let body = match res {
-            Ok(r) => r.text().await.unwrap_or_default(),
+            Ok(r) => text_capped(r, MAX_PAGE).await.unwrap_or_default(),
             Err(_) => String::new(),
         };
         tracing::info!(ms = t0.elapsed().as_millis() as u64, bytes = body.len(), "innertube bootstrap");
@@ -319,7 +341,7 @@ impl InnerTube {
         if self.epoch() == epoch {
             self.merge_cookies(&url, resp.headers());
         }
-        let text = resp.text().await.map_err(|_| AppError::network("The response from YouTube Music was interrupted."))?;
+        let text = text_capped(resp, MAX_ANSWER).await.ok_or_else(|| AppError::network("The response from YouTube Music was interrupted."))?;
         tracing::info!(endpoint, status, ms = t0.elapsed().as_millis() as u64, bytes = text.len(), signed = self.has_cookies(), "innertube");
         if self.epoch() != epoch {
             return Err(AppError::stale());
