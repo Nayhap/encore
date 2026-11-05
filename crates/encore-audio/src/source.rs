@@ -119,12 +119,14 @@ impl Drop for HttpSource {
     }
 }
 
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("http client")
+/// One client for every source, so a song's ranges and the next song's
+/// reuse the media server's connections, and one runtime thread serves
+/// them all. It sends no header of its own (no cookie ever goes to the
+/// media server, D3): each request carries its spec's headers. A read
+/// waits at most 30 s.
+fn client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::blocking::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).build().expect("http client"))
 }
 
 /// Classify an HTTP failure without leaking the URL.
@@ -396,10 +398,7 @@ fn fetch_ranges(sh: &Shared, wf: &File, mut spec: HttpSpec) -> Result<(), String
 }
 
 fn fetch_sequential(sh: &Shared, wf: &File, spec: HttpSpec) -> Result<(), String> {
-    let c = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| "http client".to_string())?;
+    let c = client();
     sh.stats.requests.fetch_add(1, Ordering::Relaxed);
     let mut r = apply_headers(c.get(&spec.url), &spec).send().map_err(|e| describe(&e))?;
     if !r.status().is_success() {
