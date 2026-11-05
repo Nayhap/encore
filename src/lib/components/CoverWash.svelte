@@ -2,7 +2,10 @@
   // The cover ambience (D27): the playing song's cover, small and blurred
   // into a wash. Used behind the now playing panel and full-screen lyrics.
   // Covers crossfade from one song to the next; Linux shows nothing here
-  // (its gradients stay, D17).
+  // (its gradients stay, D17). Real covers come blurred and saturated from
+  // Rust (`&wash=`), with room around them for the blur, and are scaled up
+  // by that room to sit where the cover would; only the mock's drawn covers
+  // (and a cover that failed) are blurred here.
   import { fade } from "svelte/transition";
   import { ambience, washFade } from "$lib/state.svelte";
   import Cover from "./Cover.svelte";
@@ -16,7 +19,7 @@
   <div class="wash {strength}" aria-hidden="true">
     {#key key}
       <div class="layer" transition:fade={{ duration: washFade() }}>
-        <Cover {art} radius={0} size={120} label={ambience.label} />
+        <Cover {art} radius={0} size={120} label={ambience.label} wash={strength} />
       </div>
     {/key}
   </div>
@@ -39,9 +42,18 @@
     width: 140%;
     height: auto;
     aspect-ratio: 1;
-    transform: translateX(-50%);
-    filter: blur(var(--wash-blur)) saturate(1.6);
+    transform: translateX(-50%) scale(var(--wash-scale, 1));
     opacity: var(--wash-alpha);
+  }
+  .layer :global(> :not(.washed)) {
+    filter: blur(var(--wash-blur)) saturate(1.6);
+  }
+  /* (120 + 2 × the blur's room) / 120, as `Wash::pad` in art.rs. */
+  .layer :global(> .washed) {
+    --wash-scale: calc(186 / 120);
+  }
+  .theater .layer :global(> .washed) {
+    --wash-scale: calc(160 / 120);
   }
   /* The panel: the cover rises behind its card and fades out before the queue. */
   .panel {
@@ -58,7 +70,7 @@
   .theater .layer :global(> *) {
     top: 50%;
     width: 120vmax;
-    transform: translate(-50%, -50%);
+    transform: translate(-50%, -50%) scale(var(--wash-scale, 1));
     /* Under lyrics: enough to colour the room, never enough to wash out text. */
     opacity: calc(var(--wash-alpha) * 0.55);
   }

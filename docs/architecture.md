@@ -63,6 +63,8 @@ bindings are generated into `src/lib/backend/bindings.ts` by `cargo test`.
 - **Events carry revisions**, so a late event for an old track or an old seek is ignored.
 - **Artwork** loads through an `art://` protocol that takes opaque keys, checks the host,
   and caches to disk. The cover's dominant hue is computed once and drives the UI accent.
+  The cover ambience asks for a blurred cover (`&wash=`), made once in Rust, so the
+  webview draws it with no filter (D27).
 
 ## Feature areas
 

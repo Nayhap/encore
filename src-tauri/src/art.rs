@@ -6,6 +6,9 @@
 //! Covers the user chose for folders are local art (D34): checked and
 //! re-encoded once into `<app data>/covers`, served under keys of their own,
 //! never fetched and never through the remote allow-list.
+//! `&wash=panel|theater` answers the cover ambience (D27): the 120 px cover
+//! blurred and saturated once, with the room its blur spreads into, as a
+//! PNG cached beside the cover, so the webview draws it with no filter.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -114,6 +117,126 @@ fn hues_of(img: &image::DynamicImage) -> Option<(u16, u16)> {
     Some((first as u16 * 10 + 5, second as u16 * 10 + 5))
 }
 
+/// The cover ambience's two looks (D27), each the CSS `blur()` and
+/// `saturate(1.6)` it replaces, worked out for the 120 px cover at the size
+/// it is usually shown: the panel's 140 % of a 352 px side panel takes
+/// `blur(44px)`, about 10.7 px of the cover; full-screen lyrics' 120vmax of
+/// a 1360 px window takes `blur(90px)`, about 6.6 px.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wash {
+    Panel,
+    Theater,
+}
+
+impl Wash {
+    fn name(self) -> &'static str {
+        match self {
+            Wash::Panel => "panel",
+            Wash::Theater => "theater",
+        }
+    }
+
+    /// The blur's standard deviation in pixels of the 120 px cover.
+    fn sigma(self) -> f32 {
+        match self {
+            Wash::Panel => 10.7,
+            Wash::Theater => 6.6,
+        }
+    }
+
+    /// The room around the cover the blur spreads into, on each side: three
+    /// standard deviations. The UI scales the picture up by
+    /// `(120 + 2 × pad) / 120` to keep the cover where it was.
+    pub fn pad(self) -> u32 {
+        (self.sigma() * 3.0).ceil() as u32
+    }
+}
+
+const WASH_EDGE: u32 = 120;
+const WASH_SATURATE: f32 = 1.6;
+
+/// Blurs a cover as CSS `filter: blur(σ) saturate(1.6)` does on the 120 px
+/// picture: a Gaussian on premultiplied RGBA with transparent room around
+/// the cover, then the saturate matrix of Filter Effects on the
+/// unpremultiplied colour. PNG, for the alpha of the soft edge.
+fn wash_png(bytes: &[u8], wash: Wash) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // Centre square, as `aspect-ratio: 1` with the cover's own `object-fit`.
+    let side = w.min(h);
+    let cover = img.crop_imm((w - side) / 2, (h - side) / 2, side, side).resize_exact(WASH_EDGE, WASH_EDGE, image::imageops::FilterType::Triangle).to_rgb8();
+    let pad = wash.pad();
+    let n = (WASH_EDGE + 2 * pad) as usize;
+    let mut px = vec![[0f32; 4]; n * n];
+    for (x, y, p) in cover.enumerate_pixels() {
+        let i = (y + pad) as usize * n + (x + pad) as usize;
+        px[i] = [p[0] as f32, p[1] as f32, p[2] as f32, 255.0];
+    }
+    let kernel = gaussian(wash.sigma());
+    blur_pass(&mut px, n, &kernel, true);
+    blur_pass(&mut px, n, &kernel, false);
+    let s = WASH_SATURATE;
+    let m = [
+        [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+        [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+        [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+    ];
+    let mut out = image::RgbaImage::new(n as u32, n as u32);
+    for (o, p) in out.pixels_mut().zip(&px) {
+        let a = p[3];
+        if a < 0.5 {
+            continue;
+        }
+        let c = [p[0] * 255.0 / a, p[1] * 255.0 / a, p[2] * 255.0 / a];
+        let mut rgb = [0u8; 3];
+        for (k, row) in m.iter().enumerate() {
+            rgb[k] = (row[0] * c[0] + row[1] * c[1] + row[2] * c[2]).round().clamp(0.0, 255.0) as u8;
+        }
+        *o = image::Rgba([rgb[0], rgb[1], rgb[2], a.round().clamp(0.0, 255.0) as u8]);
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    out.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(buf.into_inner())
+}
+
+/// A normalised Gaussian kernel out to three standard deviations.
+fn gaussian(sigma: f32) -> Vec<f32> {
+    let r = (sigma * 3.0).ceil() as i32;
+    let k: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let sum: f32 = k.iter().sum();
+    k.into_iter().map(|v| v / sum).collect()
+}
+
+/// One direction of a separable blur over an `n`×`n` premultiplied image;
+/// outside the image is transparent.
+fn blur_pass(px: &mut [[f32; 4]], n: usize, kernel: &[f32], rows: bool) {
+    let r = (kernel.len() / 2) as isize;
+    let mut line = vec![[0f32; 4]; n];
+    for a in 0..n {
+        let at = |b: usize| if rows { a * n + b } else { b * n + a };
+        for (b, out) in line.iter_mut().enumerate() {
+            let mut acc = [0f32; 4];
+            for (j, w) in kernel.iter().enumerate() {
+                let src = b as isize + j as isize - r;
+                if src < 0 || src >= n as isize {
+                    continue;
+                }
+                let p = px[at(src as usize)];
+                for c in 0..4 {
+                    acc[c] += p[c] * w;
+                }
+            }
+            *out = acc;
+        }
+        for (b, v) in line.iter().enumerate() {
+            px[at(b)] = *v;
+        }
+    }
+}
+
 impl ArtCache {
     pub fn new(dir: PathBuf, store: Arc<Store>, kept: Option<PathBuf>) -> Self {
         let _ = std::fs::create_dir_all(&dir);
@@ -197,6 +320,37 @@ impl ArtCache {
             Ok(x) => Ok(x),
             Err(e) => kept.ok_or(e),
         }
+    }
+
+    /// The cover ambience for a key (D27): made once from the 120 px cover
+    /// (cached, kept or fetched as `get` finds it) and cached beside it as
+    /// `<key>-wash-<look>`, counted and evicted with the other covers.
+    pub async fn get_wash(&self, key: &str, wash: Wash) -> Result<(Vec<u8>, &'static str), String> {
+        if !art::is_local_key(key) && !Self::valid_key(key) {
+            return Err("bad art key".into());
+        }
+        let path = self.dir.join(format!("{key}-wash-{}", wash.name()));
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        let flight = Flight::join(&self.inflight, (format!("{key}-wash-{}", wash.name()), 0));
+        let _one = flight.lock.lock().await;
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        let (cover, _) = self.get(key, WASH_EDGE).await?;
+        let png = {
+            let _turn = self.hues.decodes.acquire().await.map_err(|_| "closing")?;
+            tokio::task::spawn_blocking(move || wash_png(&cover, wash)).await.ok().flatten().ok_or("artwork could not be decoded")?
+        };
+        if let Some(dir) = path.parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
+        let tmp = path.with_extension("tmp");
+        if tokio::fs::write(&tmp, &png).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+        Ok((png, "image/png"))
     }
 
     /// A cached file that is an image, its time touched for the LRU.
@@ -426,6 +580,16 @@ pub fn parse_request(uri: &str) -> Option<(String, u32)> {
     Some((key, size))
 }
 
+/// The `wash` of an `art://` request, if it asks for the cover ambience.
+pub fn parse_wash(uri: &str) -> Option<Wash> {
+    let u = url::Url::parse(uri).ok()?;
+    match u.query_pairs().find(|(k, _)| k == "wash")?.1.as_ref() {
+        "panel" => Some(Wash::Panel),
+        "theater" => Some(Wash::Theater),
+        _ => None,
+    }
+}
+
 /// Downloads keep the cover the app shows (D23).
 #[async_trait::async_trait]
 impl encore_downloads::ArtSource for ArtCache {
@@ -444,6 +608,41 @@ mod tests {
         assert_eq!(snap_size(100), 120);
         assert_eq!(snap_size(300), 544);
         assert_eq!(snap_size(5000), 1080);
+    }
+
+    #[test]
+    fn parses_washes() {
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120&wash=panel"), Some(Wash::Panel));
+        assert_eq!(parse_wash("http://art.localhost/0123456789abcdef0123?s=120&wash=theater"), Some(Wash::Theater));
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120&wash=../x"), None);
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120"), None);
+    }
+
+    #[test]
+    fn a_wash_is_the_blurred_cover_with_room_around_it() {
+        // Left half red, right half blue.
+        let img = image::RgbImage::from_fn(240, 240, |x, _| if x < 120 { image::Rgb([200, 30, 30]) } else { image::Rgb([30, 30, 200]) });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        for wash in [Wash::Panel, Wash::Theater] {
+            let png = wash_png(buf.get_ref(), wash).unwrap();
+            assert_eq!(mime_of(&png), Some("image/png"));
+            let out = image::load_from_memory(&png).unwrap().to_rgba8();
+            let (n, pad) = (out.width(), wash.pad());
+            assert_eq!(n, 120 + 2 * pad);
+            let mid = n / 2;
+            // The corners are clear, the middle of the cover opaque.
+            assert!(out.get_pixel(0, 0)[3] < 3, "{wash:?} corner");
+            assert_eq!(out.get_pixel(mid, mid)[3], 255, "{wash:?} centre");
+            // The edge of the cover is half covered, as CSS blur leaves it.
+            let edge = out.get_pixel(pad, mid)[3];
+            assert!((100..=160).contains(&edge), "{wash:?} edge {edge}");
+            // Inside, still red and blue, more saturated; the seam is blurred.
+            let red = out.get_pixel(pad + 10, mid);
+            assert!(red[0] > 200 && red[2] < 30, "{wash:?} {red:?}");
+            let seam = out.get_pixel(mid, mid);
+            assert!(seam[0] > 60 && seam[2] > 60, "{wash:?} {seam:?}");
+        }
     }
 
     #[test]

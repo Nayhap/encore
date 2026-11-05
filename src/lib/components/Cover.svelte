@@ -7,7 +7,8 @@
   // Real covers come through the art:// protocol from an opaque key (D14).
   // Mock art (dev) and missing covers are drawn from a seed instead, using
   // the same colours the app derives from real art.
-  let { art, round = false, radius = 8, size = 544, label = "" }: { art: AnyArt; round?: boolean; radius?: number; size?: number; label?: string } = $props();
+  // `wash` asks Rust for the cover ambience's pre-blurred picture (D27).
+  let { art, round = false, radius = 8, size = 544, label = "", wash }: { art: AnyArt; round?: boolean; radius?: number; size?: number; label?: string; wash?: "panel" | "theater" } = $props();
 
   type Drawn = { seed: number; h1: number; h2: number; motif: "orbit" | "stripes" | "grid" | "wave" | "sun" | "blocks" };
   const motifs = ["orbit", "stripes", "grid", "wave", "sun", "blocks"] as const;
@@ -99,8 +100,9 @@
   <img
     class="cover"
     class:round
+    class:washed={!!wash}
     style:border-radius={round ? "50%" : `${radius}px`}
-    src={protocolUrl("art", `${real}?s=${size}`)}
+    src={protocolUrl("art", `${real}?s=${size}${wash ? `&wash=${wash}` : ""}`)}
     alt=""
     loading="lazy"
     decoding="async"
@@ -131,6 +133,11 @@
   img.cover {
     object-fit: cover;
     background: var(--hover);
+  }
+  /* Already blurred, with clear room around the cover. */
+  img.cover.washed {
+    background: none;
+    box-shadow: none;
   }
   .cover {
     display: block;

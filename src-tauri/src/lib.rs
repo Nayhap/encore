@@ -366,7 +366,11 @@ pub fn run() {
                             responder.respond(tauri::http::Response::new(Vec::new()));
                             return;
                         };
-                        match core.art.get(&key, size).await {
+                        let got = match art::parse_wash(&uri) {
+                            Some(wash) => core.art.get_wash(&key, wash).await,
+                            None => core.art.get(&key, size).await,
+                        };
+                        match got {
                             Ok((bytes, mime)) => tauri::http::Response::builder().status(200).header("Content-Type", mime).header("Cache-Control", "max-age=604800").body(bytes),
                             Err(e) => {
                                 tracing::warn!(key = %key, size, error = %e, "artwork failed");
