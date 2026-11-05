@@ -86,7 +86,7 @@ impl SolvedCache {
 }
 
 /// The layout of a preprocessed file; another one is a miss.
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 /// Preprocessed players kept on disk, newest first.
 pub const PREPROCESSED_FILES: usize = 3;
 /// A preprocessed player is about 4.2 MB for the players YouTube serves
@@ -109,12 +109,23 @@ struct Header {
     ejs: String,
     engine: String,
     bytes: u64,
+    /// The preprocessed text's own digest: an altered body is a miss even
+    /// when it is the same length and still reads as JavaScript.
+    body_sha3_256: String,
 }
 
 impl Header {
-    fn of(player_id: &str, code: &str, bytes: u64) -> Self {
+    fn of(player_id: &str, code: &str, body: &[u8]) -> Self {
         use sha3::Digest;
-        Header { schema: SCHEMA, player: player_id.to_string(), sha3_256: hex::encode(sha3::Sha3_256::digest(code.as_bytes())), ejs: super::ejs::EJS_VERSION.to_string(), engine: super::quickjs::ENGINE.to_string(), bytes }
+        Header {
+            schema: SCHEMA,
+            player: player_id.to_string(),
+            sha3_256: hex::encode(sha3::Sha3_256::digest(code.as_bytes())),
+            ejs: super::ejs::EJS_VERSION.to_string(),
+            engine: super::quickjs::ENGINE.to_string(),
+            bytes: body.len() as u64,
+            body_sha3_256: hex::encode(sha3::Sha3_256::digest(body)),
+        }
     }
 }
 
@@ -151,7 +162,7 @@ impl PreprocessedDisk {
         let nl = raw.iter().take(HEADER_MAX as usize).position(|&b| b == b'\n')?;
         let header: Header = serde_json::from_slice(&raw[..nl]).ok()?;
         let body = &raw[nl + 1..];
-        if header != Header::of(player_id, code, body.len() as u64) {
+        if header != Header::of(player_id, code, body) {
             return None;
         }
         String::from_utf8(body.to_vec()).ok()
@@ -164,7 +175,7 @@ impl PreprocessedDisk {
         if pre.len() as u64 > PREPROCESSED_MAX_BYTES || std::fs::create_dir_all(&self.dir).is_err() {
             return;
         }
-        let Ok(mut header) = serde_json::to_vec(&Header::of(player_id, code, pre.len() as u64)) else { return };
+        let Ok(mut header) = serde_json::to_vec(&Header::of(player_id, code, pre.as_bytes())) else { return };
         header.push(b'\n');
         let tmp = path.with_extension("pre-part");
         let written = std::fs::File::create(&tmp).and_then(|mut f| {
@@ -248,6 +259,10 @@ mod tests {
         let path = d.dir().join("9fcf08e8-main.pre");
         let raw = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, raw.replace(super::super::ejs::EJS_VERSION, "0.0.1")).unwrap();
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        // The same length, still JavaScript, header untouched: a miss too.
+        std::fs::write(&path, raw.replace("\npre", "\npry")).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), raw.len() as u64);
         assert_eq!(d.read("9fcf08e8/main", "code"), None);
         std::fs::write(&path, &raw[..raw.len() - 1]).unwrap();
         assert_eq!(d.read("9fcf08e8/main", "code"), None);
