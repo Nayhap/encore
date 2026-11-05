@@ -1,6 +1,6 @@
 // @ts-nocheck: run with `bun test src/lib` (bun's own runner and types).
 import { expect, test } from "bun:test";
-import { bezier, ease, hueAt } from "./hue";
+import { bezier, ease, fadeTimes, hueAt } from "./hue";
 
 test("the curve starts at 0, ends at 1 and climbs", () => {
   expect(ease(0)).toBe(0);
@@ -26,4 +26,20 @@ test("hues go straight across the numbers, as the CSS transition did", () => {
   const [h] = hueAt([350, 30], [10, 50], 0.5);
   expect(h).toBeLessThan(350);
   expect(h).toBeGreaterThan(10);
+});
+
+test("no step of the fade is a jump", () => {
+  const times = fadeTimes();
+  expect(times[0]).toBeLessThanOrEqual(20);
+  expect(times.length).toBeLessThan(30);
+  // A half-turn, the largest change a fade makes.
+  let last = 0;
+  let largest = 0;
+  for (const ms of times) {
+    const [h] = hueAt([0, 0], [180, 0], ms / 1200);
+    largest = Math.max(largest, h - last);
+    last = h;
+  }
+  expect(last).toBe(180);
+  expect(largest).toBeLessThanOrEqual(22);
 });

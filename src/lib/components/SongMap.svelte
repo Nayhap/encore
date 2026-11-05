@@ -300,7 +300,6 @@
     inset: 0;
     background: var(--accent);
     transform-origin: left;
-    will-change: transform;
   }
   .seg.lit {
     background: color-mix(in srgb, var(--text) 55%, transparent);
