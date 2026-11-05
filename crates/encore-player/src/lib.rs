@@ -44,6 +44,8 @@ const RADIO_LOW_WATER: usize = 3;
 /// How long a song chosen right after another must stay chosen before its
 /// stream is resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
+/// How often running playback work checks that it is still wanted.
+const SUPERSEDED_CHECK: Duration = Duration::from_millis(150);
 const NOTHING_OFFLINE: &str = "You're offline, and nothing else in the queue is downloaded.";
 /// The shortest A–B loop (D26).
 pub const MIN_LOOP: f64 = 1.0;
@@ -1133,9 +1135,17 @@ impl Player {
             let (res, path) = match local {
                 Some((s, p)) => (Ok(s), Some(p)),
                 None => {
+                    // Another song chosen meanwhile stops this one's resolve
+                    // (its requests and any challenge solve), not just its
+                    // result. A resolve another caller waits on for the same
+                    // song goes on there (the resolver's single flight).
+                    let gone = |st: &State| st.track_gen != my_gen;
                     let res = {
                         let _busy = me.gate.enter();
-                        me.resolve_as_now(&vid).await
+                        tokio::select! {
+                            r = me.resolve_as_now(&vid) => r,
+                            _ = me.superseded(gone) => return,
+                        }
                     };
                     // A preroll (D37): said, and waited out without holding
                     // the gate, so downloads and paging go on meanwhile.
@@ -1144,7 +1154,11 @@ impl Player {
                             if let Some(secs) = s.wait_secs().filter(|&w| w >= 3) {
                                 let _ = me.tx.send(PlayerEvent::Notice(format!("This song starts in {secs} seconds: YouTube holds it back for the length of an ad.")));
                             }
-                            let r = me.resolver.ready(s, (me.auth)().as_ref()).await;
+                            let auth = (me.auth)();
+                            let r = tokio::select! {
+                                r = me.resolver.ready(s, auth.as_ref()) => r,
+                                _ = me.superseded(gone) => return,
+                            };
                             if me.st.lock().track_gen != my_gen {
                                 return;
                             }
@@ -1451,20 +1465,47 @@ impl Player {
         self.resolver.resolve(vid, auth.as_ref()).await
     }
 
+    /// Returns once `gone` holds, checked a few times a second: for work
+    /// to stop when what it was for is no longer wanted.
+    async fn superseded(&self, gone: impl Fn(&State) -> bool) {
+        loop {
+            tokio::time::sleep(SUPERSEDED_CHECK).await;
+            if gone(&self.st.lock()) {
+                return;
+            }
+        }
+    }
+
+    /// Whether `uid` is no longer the entry that plays next.
+    fn not_next(&self, st: &State, uid: &str) -> bool {
+        st.queue.upcoming_where(&self.avail()).map(|u| u.uid.as_str()) != Some(uid)
+    }
+
     async fn preload(self: &Arc<Self>, entry: QueueEntry) {
         let vid = entry.track.id.remote().to_string();
         let (res, path) = match self.local_source(&vid) {
             Some((s, p)) => (Ok(s), Some(p)),
             None if !self.online() => (Err(PlayFailure::new(PlayFailureKind::Network, "offline")), None),
             None => {
-                let res = {
-                    let _busy = self.gate.enter();
-                    self.resolve_as_now(&vid).await
+                // Stopped when this entry stops being the next one.
+                let gone = |st: &State| self.not_next(st, &entry.uid);
+                let res = async {
+                    let res = {
+                        let _busy = self.gate.enter();
+                        self.resolve_as_now(&vid).await
+                    };
+                    // The preroll is waited out here, without the gate (D37).
+                    match res {
+                        Ok(s) => self.resolver.ready(s, (self.auth)().as_ref()).await,
+                        e => e,
+                    }
                 };
-                // The preroll is waited out here, without the gate (D37).
-                let res = match res {
-                    Ok(s) => self.resolver.ready(s, (self.auth)().as_ref()).await,
-                    e => e,
+                let res = tokio::select! {
+                    r = res => r,
+                    _ = self.superseded(gone) => {
+                        self.st.lock().preloading = false;
+                        return;
+                    }
                 };
                 (res, None)
             }
@@ -1517,7 +1558,12 @@ impl Player {
         tokio::spawn(async move {
             let auth = (me.auth)();
             let _busy = me.gate.enter();
-            let _ = me.resolver.resolve(up.track.id.remote(), auth.as_ref()).await;
+            // Given up when another entry comes next (the queue changed).
+            let gone = |st: &State| st.queue.upcoming().map(|u| u.uid.as_str()) != Some(up.uid.as_str());
+            tokio::select! {
+                _ = me.resolver.resolve(up.track.id.remote(), auth.as_ref()) => {}
+                _ = me.superseded(gone) => {}
+            }
         });
     }
 
