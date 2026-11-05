@@ -177,7 +177,9 @@ impl PreprocessedDisk {
         }
         let Ok(mut header) = serde_json::to_vec(&Header::of(player_id, code, pre.as_bytes())) else { return };
         header.push(b'\n');
-        let tmp = path.with_extension("pre-part");
+        // Its own temp name: two solves of one player may write at once.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!("pre-part{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let written = std::fs::File::create(&tmp).and_then(|mut f| {
             f.write_all(&header)?;
             f.write_all(pre.as_bytes())?;
@@ -203,7 +205,7 @@ impl PreprocessedDisk {
             let _ = std::fs::remove_file(p);
         }
         for e in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
-            if e.file_name().to_string_lossy().ends_with(".pre-part") && e.file_type().is_ok_and(|t| t.is_file()) {
+            if e.file_name().to_string_lossy().contains(".pre-part") && e.file_type().is_ok_and(|t| t.is_file()) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -241,9 +243,72 @@ impl PreprocessedDisk {
     }
 }
 
+/// The disk store behind one lane: reads, writes and removals take turns,
+/// and each carries the reset generation it began in (`QuickJsSolver`). A
+/// Reset bumps the generation at once and wipes the files in its turn; a
+/// write from before it, even one already queued, writes nothing once the
+/// wipe is done or pending, and a read while one is pending finds nothing.
+pub struct SavedPlayers {
+    disk: PreprocessedDisk,
+    /// The generation the files belong to: the last wipe's.
+    wiped: Mutex<u64>,
+}
+
+impl SavedPlayers {
+    pub fn new(dir: PathBuf) -> Self {
+        SavedPlayers { disk: PreprocessedDisk::new(dir), wiped: Mutex::new(0) }
+    }
+
+    /// Blocking, like the rest.
+    pub fn read(&self, generation: u64, player_id: &str, code: &str) -> Option<String> {
+        let g = self.wiped.lock();
+        if *g != generation {
+            return None;
+        }
+        self.disk.read(player_id, code)
+    }
+
+    pub fn write(&self, generation: u64, player_id: &str, code: &str, pre: &str) {
+        let g = self.wiped.lock();
+        if *g == generation {
+            self.disk.write(player_id, code, pre);
+        }
+    }
+
+    pub fn remove(&self, player_id: &str) {
+        let _g = self.wiped.lock();
+        self.disk.remove(player_id);
+    }
+
+    /// Reset's turn: every file goes, and only `generation` writes after.
+    pub fn wipe(&self, generation: u64) {
+        let mut g = self.wiped.lock();
+        self.disk.clear();
+        *g = (*g).max(generation);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_from_before_a_reset_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = SavedPlayers::new(tmp.path().to_path_buf());
+        s.write(0, "a/main", "code", "pre");
+        assert_eq!(s.read(0, "a/main", "code").as_deref(), Some("pre"));
+        // Reset: the generation moves on at once, the wipe comes in its turn.
+        assert_eq!(s.read(1, "a/main", "code"), None, "nothing is read while the wipe is pending");
+        s.write(0, "b/main", "code", "pre");
+        s.wipe(1);
+        assert!(s.disk.files().is_empty());
+        // A write queued before the reset that runs after the wipe.
+        s.write(0, "a/main", "code", "pre");
+        assert!(s.disk.files().is_empty());
+        s.write(1, "c/main", "code", "pre");
+        assert_eq!(s.read(1, "c/main", "code").as_deref(), Some("pre"));
+    }
 
     #[test]
     fn a_preprocessed_player_is_used_only_for_what_it_was_made_from() {
