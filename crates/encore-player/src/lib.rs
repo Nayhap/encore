@@ -38,8 +38,8 @@ pub use types::*;
 pub const PRELOAD_LEAD: f64 = 20.0;
 const MAX_AUTO_SKIPS: u32 = 3;
 const RADIO_LOW_WATER: usize = 3;
-/// How long a newly chosen song must stay chosen before its stream is
-/// resolved (see `play_current`).
+/// How long a song chosen right after another must stay chosen before its
+/// stream is resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
 const NOTHING_OFFLINE: &str = "You're offline, and nothing else in the queue is downloaded.";
 /// The shortest A–B loop (D26).
@@ -98,6 +98,9 @@ struct State {
     ab_loop: Option<AbLoop>,
     /// The sleep timer (D26).
     sleep: Option<Sleep>,
+    /// When a song was last chosen (`play_current`), to tell a run of
+    /// skips from one choice.
+    chosen_at: Option<Instant>,
     /// Where the queue is saved, and what was last written there.
     slot: Option<Slot>,
     /// Bumped whenever `slot` is replaced.
@@ -266,6 +269,7 @@ impl Player {
                 cycle: None,
                 ab_loop: None,
                 sleep: None,
+                chosen_at: None,
                 slot: None,
                 slot_gen: 0,
             }),
@@ -1111,8 +1115,10 @@ impl Player {
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
-        let (uid, vid, my_gen) = {
+        let (uid, vid, my_gen, burst) = {
             let mut st = self.st.lock();
+            // Chosen within SKIP_SETTLE of the last choice: part of a run.
+            let burst = st.chosen_at.replace(Instant::now()).is_some_and(|t| t.elapsed() < SKIP_SETTLE);
             let Some(cur) = st.queue.current().cloned() else {
                 st.phase = Phase::Idle;
                 drop(st);
@@ -1127,7 +1133,7 @@ impl Player {
             st.loaded = None;
             st.last_duration = cur.track.duration;
             // A preloaded deck for this entry can be promoted directly.
-            (cur.uid.clone(), cur.track.id.remote().to_string(), st.track_gen)
+            (cur.uid.clone(), cur.track.id.remote().to_string(), st.track_gen, burst)
         };
         self.publish(false);
         let cur = self.st.lock().queue.current().cloned();
@@ -1156,9 +1162,11 @@ impl Player {
             }
             // Pressing Next several times in a row used to resolve every song
             // passed over, one after another (seconds each, two at a time),
-            // so the song the user stopped on started last. Wait a moment
-            // and give up if another song was chosen meanwhile.
-            if local.is_none() && promoted.is_none() {
+            // so the song the user stopped on started last. A song chosen
+            // right after another waits a moment and gives up if another
+            // was chosen meanwhile; one chosen on its own (Play, a single
+            // Next, the end of a song) resolves at once.
+            if local.is_none() && promoted.is_none() && burst {
                 tokio::time::sleep(SKIP_SETTLE).await;
                 if me.st.lock().track_gen != my_gen {
                     return;
