@@ -419,7 +419,9 @@ pub async fn set_muted(core: S<'_>, muted: bool) -> Result<()> {
 pub async fn set_like(core: S<'_>, track_id: ItemId, liked: bool) -> Result<MutationOutcome> {
     core.require_online("change your likes")?;
     let svc = core.service();
-    let r = svc.set_like(&svc.context(), &track_id, liked).await?;
+    let r = svc.set_like(&svc.context(), &track_id, liked).await;
+    core.wrote();
+    let r = r?;
     if r == MutationOutcome::Done {
         core.player.update_track(track_id.as_str(), |t| t.liked = Some(liked));
         // Liked songs kept downloaded follow (D23).
@@ -435,7 +437,9 @@ pub async fn set_like(core: S<'_>, track_id: ItemId, liked: bool) -> Result<Muta
 pub async fn set_saved(core: S<'_>, playlist_id: String, saved: bool) -> Result<MutationOutcome> {
     core.require_online("change your library")?;
     let svc = core.service();
-    svc.set_saved(&svc.context(), &playlist_id, saved).await
+    let r = svc.set_saved(&svc.context(), &playlist_id, saved).await;
+    core.wrote();
+    r
 }
 
 #[tauri::command]
@@ -443,7 +447,9 @@ pub async fn set_saved(core: S<'_>, playlist_id: String, saved: bool) -> Result<
 pub async fn set_subscribed(core: S<'_>, channel_id: String, subscribed: bool) -> Result<MutationOutcome> {
     core.require_online("change your subscriptions")?;
     let svc = core.service();
-    svc.set_subscribed(&svc.context(), &channel_id, subscribed).await
+    let r = svc.set_subscribed(&svc.context(), &channel_id, subscribed).await;
+    core.wrote();
+    r
 }
 
 /// After a playlist write: drop the cached copies (the cache only serves on
@@ -453,6 +459,7 @@ fn playlists_changed(app: &AppHandle, core: &Core, playlist_id: Option<&str>, ou
     if outcome == MutationOutcome::Rejected || outcome == MutationOutcome::Duplicate {
         return;
     }
+    core.wrote();
     let scope = core.account_scope();
     let _ = core.store.delete(&scope, "library:Playlists");
     if let Some(p) = playlist_id {

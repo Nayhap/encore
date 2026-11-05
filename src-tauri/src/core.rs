@@ -95,6 +95,47 @@ pub struct Core {
     pub startup_notice: parking_lot::Mutex<(bool, Option<String>)>,
     /// `prepare_exit` ran (and wasn't undone).
     exit_prepared: tokio::sync::Mutex<bool>,
+    /// Page fetches running, shared by identical reads (`cached`).
+    pages: Flights,
+    /// Counts writes to the library and playlists (`wrote`).
+    writes: std::sync::atomic::AtomicU64,
+}
+
+type Shared = Result<Arc<dyn std::any::Any + Send + Sync>>;
+
+/// Fetches running, shared by identical reads: the first one runs, the
+/// others wait for its answer.
+#[derive(Default)]
+pub struct Flights(parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::OnceCell<Shared>>>>);
+
+impl Flights {
+    pub async fn run<T, Fut>(&self, key: String, fetch: impl FnOnce() -> Fut) -> Result<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let cell = self.0.lock().entry(key.clone()).or_default().clone();
+        let share = Share { map: self, key, cell };
+        let shared = share.cell.get_or_init(|| async { fetch().await.map(|v| Arc::new(v) as Arc<dyn std::any::Any + Send + Sync>) }).await.clone();
+        shared.and_then(|a| a.downcast_ref::<T>().cloned().ok_or_else(|| AppError::internal("an answer of another type")))
+    }
+}
+
+/// One reader's share of a fetch; the last one out removes it, so a fetch
+/// that failed or that everyone gave up is never answered again.
+struct Share<'a> {
+    map: &'a Flights,
+    key: String,
+    cell: Arc<tokio::sync::OnceCell<Shared>>,
+}
+
+impl Drop for Share<'_> {
+    fn drop(&mut self) {
+        let mut m = self.map.0.lock();
+        if Arc::strong_count(&self.cell) == 2 && m.get(&self.key).is_some_and(|c| Arc::ptr_eq(c, &self.cell)) {
+            m.remove(&self.key);
+        }
+    }
 }
 
 /// The queue as last saved in full (D6, D11). `stamp` is newer than 0.6.2
@@ -210,6 +251,8 @@ impl Core {
             paths,
             startup_notice: parking_lot::Mutex::new((false, None)),
             exit_prepared: tokio::sync::Mutex::new(false),
+            pages: Default::default(),
+            writes: Default::default(),
         });
         core.keep_backups();
         Ok(core)
@@ -388,24 +431,46 @@ impl Core {
         if self.connectivity.online() { Ok(()) } else { Err(AppError::network(format!("You're offline. Connect to the internet to {what}."))) }
     }
 
+    /// A write to the library or a playlist: page reads from now on never
+    /// share a fetch that started before it.
+    pub fn wrote(&self) {
+        self.writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Serve from the network; on a network failure fall back to the last
     /// cached copy for this account (cursors stripped: they do not survive).
+    /// Already offline, the cached copy answers at once (and the connection
+    /// is looked at again now). The same page asked for again while its
+    /// fetch runs (same account, epoch and no write since) shares that fetch.
     pub async fn cached<T, F, Fut>(&self, key: &str, fetch: F, strip: impl Fn(&mut T)) -> Result<T>
     where
-        T: Serialize + DeserializeOwned,
+        T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
         let scope = self.account_scope();
-        match fetch().await {
-            Ok(v) => {
+        if !self.connectivity.online() {
+            if let Ok(Some((mut v, _, _))) = self.store.get_any::<T>(&scope, key) {
+                strip(&mut v);
+                self.connectivity.check();
+                return Ok(v);
+            }
+        }
+        let flight = format!("{scope}\u{1f}{key}\u{1f}{}\u{1f}{}\u{1f}{}", std::any::type_name::<T>(), self.ytm.context().epoch, self.writes.load(std::sync::atomic::Ordering::SeqCst));
+        let shared = self
+            .pages
+            .run(flight, || async {
+                let v = fetch().await?;
                 let _ = self.store.put(&scope, key, &v, Some(7 * 24 * 3600));
                 // An answer while marked offline: the connection is back.
                 if !self.connectivity.online() {
                     self.connectivity.check();
                 }
                 Ok(v)
-            }
+            })
+            .await;
+        match shared {
+            Ok(v) => Ok(v),
             Err(e) if e.code == ErrorCode::Network => {
                 self.connectivity.transport_failed();
                 match self.store.get_any::<T>(&scope, key) {
@@ -455,6 +520,31 @@ mod tests {
 
     fn track(n: &str) -> Track {
         Track { id: ItemId::ytm(n), title: n.into(), artists: vec![], album: None, duration: Some(200.0), art: None, kind: TrackKind::Song, explicit: false, playable: true, liked: None, counterpart: None, plays: None }
+    }
+
+    #[tokio::test]
+    async fn identical_reads_share_one_fetch_and_failures_are_not_kept() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let f = Flights::default();
+        let calls = AtomicUsize::new(0);
+        let fetch = || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<_, AppError>(vec![1, 2, 3])
+        };
+        let (a, b) = tokio::join!(f.run("home".into(), fetch), f.run("home".into(), fetch));
+        assert_eq!((a.unwrap(), b.unwrap()), (vec![1, 2, 3], vec![1, 2, 3]));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(f.0.lock().is_empty(), "done: the next read fetches again");
+        let r: Result<Vec<i32>> = f.run("home".into(), || async { Err(AppError::network("down")) }).await;
+        assert!(r.is_err());
+        let r = f.run("home".into(), fetch).await;
+        assert_eq!(r.unwrap(), vec![1, 2, 3], "a failure is never answered again");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Another key is another fetch.
+        let (a, b) = tokio::join!(f.run("home".into(), fetch), f.run("explore".into(), fetch));
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     fn queue() -> Queue {
