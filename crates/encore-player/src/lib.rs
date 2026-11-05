@@ -1209,6 +1209,7 @@ impl Player {
                         st.decks.insert(load_id, uid.clone());
                         st.last_duration = stream.duration.or(st.last_duration);
                         st.loaded = Some(Loaded { load_id, uid: uid.clone(), stream, from_cache: false });
+                        me.prune_decks(&mut st);
                         let start = st.pending_pos;
                         drop(st);
                         if promoted.is_none() {
@@ -1454,6 +1455,14 @@ impl Player {
         }
     }
 
+    /// Forget the decks that are neither loaded nor preloaded now: their
+    /// entry and stream (a signed URL) are never asked for again.
+    fn prune_decks(&self, st: &mut State) {
+        let live = [st.loaded.as_ref().map(|l| l.load_id), st.preload.as_ref().map(|p| p.1)];
+        st.decks.retain(|id, _| live.contains(&Some(*id)));
+        self.preloaded_streams.lock().retain(|id, _| live.contains(&Some(*id)));
+    }
+
     /// Resolve as whoever is signed in now. A result that comes back after
     /// the account or channel changed belongs to the old identity (D2): it
     /// is dropped and the song resolved again as the new one.
@@ -1510,6 +1519,7 @@ impl Player {
             st.decks.insert(load_id, entry.uid.clone());
             st.preload = Some((entry.uid.clone(), load_id));
             st.preload_local = path.is_some();
+            self.prune_decks(&mut st);
             let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
             let spec = match path {
                 Some(p) => SourceSpec::File(p),
@@ -1618,6 +1628,7 @@ impl Player {
                             let stream = self.preloaded_streams.lock().remove(&to);
                             st.last_duration = stream.as_ref().and_then(|s| s.duration).or(st.queue.current().and_then(|c| c.track.duration));
                             st.loaded = stream.map(|stream| Loaded { load_id: to, uid: now_uid.clone().unwrap_or_default(), stream, from_cache: false });
+                            self.prune_decks(&mut st);
                             (true, passed)
                         } else {
                             (false, passed)

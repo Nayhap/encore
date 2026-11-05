@@ -362,13 +362,42 @@ fn redirect_policy() -> reqwest::redirect::Policy {
 
 pub type VisitorSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+type Inflight = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One resolve's share of a key's single flight: resolves of the same key
+/// wait for each other, and the last to leave, however it leaves (done,
+/// answered from the cache, or dropped), takes the key out.
+struct Flight<'a> {
+    map: &'a Inflight,
+    key: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<'a> Flight<'a> {
+    fn join(map: &'a Inflight, key: &str) -> Self {
+        let lock = map.lock().entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        Flight { map, key: key.to_string(), lock }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        // Copies are taken under this lock, so the count is exact: only the
+        // map's and this one left means nobody else waits on the key.
+        if Arc::strong_count(&self.lock) == 2 && m.get(&self.key).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
+            m.remove(&self.key);
+        }
+    }
+}
+
 pub struct NativeResolver {
     http: reqwest::Client,
     player_js: PlayerJs,
     solver: Arc<QuickJsSolver>,
     solved: jsc::cache::SolvedCache,
     cache: Mutex<HashMap<String, Cached>>,
-    inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    inflight: Inflight,
     /// The signed-out session (watch page cookies and visitor, memory only).
     anon: tokio::sync::Mutex<Option<webpage::AnonSession>>,
     /// Where a signed-out resolve gets its visitor when the watch page gave
@@ -503,8 +532,8 @@ impl NativeResolver {
             }
         }
         let key = Self::cache_key(video_id, &id, opts);
-        let lock = self.inflight.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
-        let _g = lock.lock().await;
+        let flight = Flight::join(&self.inflight, &key);
+        let _g = flight.lock.lock().await;
         if let Some(c) = self.cache.lock().get(&key)
             && c.until > Instant::now()
         {
@@ -519,14 +548,17 @@ impl NativeResolver {
             self.cache_stream(&key, s);
             *self.notice.lock() = None;
         }
-        self.inflight.lock().remove(&key);
         r
     }
 
     fn cache_stream(&self, key: &str, s: &ResolvedStream) {
         let now = encore_core::store::now();
         let ttl = s.expires_at.map(|e| (e - now - 300).clamp(0, 3600)).unwrap_or(1800) as u64;
-        self.cache.lock().insert(key.to_string(), Cached { stream: s.clone(), until: Instant::now() + Duration::from_secs(ttl) });
+        let mut c = self.cache.lock();
+        // Expired URLs are never answered again: they go as new ones come.
+        let at = Instant::now();
+        c.retain(|_, v| v.until > at);
+        c.insert(key.to_string(), Cached { stream: s.clone(), until: at + Duration::from_secs(ttl) });
     }
 
     /// Extract, then probe; a URL that must wait for its preroll comes
@@ -950,6 +982,34 @@ pub async fn solver_self_check() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_single_flight_is_shared_and_leaves_nothing_behind() {
+        let map: Inflight = Mutex::new(HashMap::new());
+        let a = Flight::join(&map, "k");
+        let held = a.lock.clone().lock_owned().await;
+        // A second resolve of the key waits on the same lock.
+        let b = Flight::join(&map, "k");
+        assert!(Arc::ptr_eq(&a.lock, &b.lock));
+        assert!(b.lock.try_lock().is_err());
+        drop(held);
+        drop(a);
+        assert!(map.lock().contains_key("k"), "kept while another waits on it");
+        // Answered from the cache, cancelled or done: the last one out removes it.
+        drop(b);
+        assert!(map.lock().is_empty());
+        // A future dropped while it waits leaves nothing either.
+        let c = Flight::join(&map, "k");
+        let g = c.lock.clone().lock_owned().await;
+        let waiting = async {
+            let d = Flight::join(&map, "k");
+            let _g = d.lock.lock().await;
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting).await.is_err());
+        drop(g);
+        drop(c);
+        assert!(map.lock().is_empty());
+    }
 
     #[test]
     fn causes_become_d4_kinds() {
