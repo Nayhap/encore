@@ -10,10 +10,11 @@ use encore_lyrics::LyricsService;
 
 /// The lyrics it has, and how often it was asked (each answer takes a
 /// moment, as a request would).
-struct Fake(Option<Lyrics>, Arc<std::sync::atomic::AtomicUsize>);
+/// Its session's epoch can move on, as after a re-import.
+struct Fake(Option<Lyrics>, Arc<std::sync::atomic::AtomicUsize>, std::sync::atomic::AtomicU64);
 
 fn fake(l: Option<Lyrics>) -> Arc<Fake> {
-    Arc::new(Fake(l, Default::default()))
+    Arc::new(Fake(l, Default::default(), 1.into()))
 }
 
 fn track() -> Track {
@@ -29,7 +30,7 @@ impl MusicService for Fake {
         Capabilities::default()
     }
     fn context(&self) -> RequestContext {
-        RequestContext { account: "test".into(), epoch: 1 }
+        RequestContext { account: "test".into(), epoch: self.2.load(std::sync::atomic::Ordering::SeqCst) }
     }
     async fn lyrics(&self, _ctx: &RequestContext, _id: &ItemId) -> Result<Option<Lyrics>> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -141,4 +142,18 @@ async fn lookups_of_one_song_at_once_share_one_walk() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     quitter.abort();
     assert_eq!(s.get(&track()).await, Some(timed));
+}
+
+#[tokio::test]
+async fn another_session_of_the_same_account_asks_again() {
+    let timed = Lyrics { track_id: ItemId::ytm("abc"), sync: LyricsSync::Line, lines: vec![line(1.0, "a"), line(2.0, "b")], plain: None, source: "YouTube Music".into(), attribution: None };
+    let f = fake(Some(timed.clone()));
+    let s = Arc::new(LyricsService::with_base(f.clone(), None, "http://127.0.0.1:9"));
+    let s2 = s.clone();
+    let first = tokio::spawn(async move { s2.get(&track()).await });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    f.2.store(2, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(s.get(&track()).await, Some(timed.clone()));
+    assert_eq!(first.await.unwrap(), Some(timed));
+    assert_eq!(f.1.load(std::sync::atomic::Ordering::SeqCst), 2, "the new session's lookup doesn't join the old one");
 }

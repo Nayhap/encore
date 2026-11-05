@@ -197,19 +197,19 @@ impl LyricsService {
 
     /// The chain, shared with any lookup of the same song (and the same
     /// title, artists, album and length, which LRCLIB is asked by) under
-    /// the same account that is running now.
+    /// the same account and session (its epoch, D2), frozen here for the
+    /// whole walk.
     async fn fetch(&self, track: &Track) -> Outcome {
         let ctx = self.service.context();
         let artists: Vec<&str> = track.artists.iter().map(|a| a.name.as_str()).collect();
-        let key = format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{:?}", ctx.account, track.id.as_str(), track.title, artists.join("\u{1e}"), track.album.as_ref().map(|a| a.name.as_str()), track.duration.map(|d| d.round() as i64));
+        let key = format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{:?}", ctx.account, ctx.epoch, track.id.as_str(), track.title, artists.join("\u{1e}"), track.album.as_ref().map(|a| a.name.as_str()), track.duration.map(|d| d.round() as i64));
         let cell = self.pending.lock().entry(key.clone()).or_default().clone();
         let share = Share { map: &self.pending, key, cell };
-        share.cell.get_or_init(|| self.fetch_chain(track)).await.clone()
+        share.cell.get_or_init(|| self.fetch_chain(&ctx, track)).await.clone()
     }
 
-    async fn fetch_chain(&self, track: &Track) -> Outcome {
-        let ctx = self.service.context();
-        let yt = self.service.lyrics(&ctx, &track.id).await;
+    async fn fetch_chain(&self, ctx: &encore_core::service::RequestContext, track: &Track) -> Outcome {
+        let yt = self.service.lyrics(ctx, &track.id).await;
         let mut net_error = yt.is_err();
         let yt = yt.ok().flatten();
         if let Some(l) = &yt {
