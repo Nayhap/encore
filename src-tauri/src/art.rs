@@ -1,10 +1,14 @@
 //! `art://localhost/<key>?s=<size>` (D14): opaque keys, allow-listed hosts,
-//! size/MIME limits, disk LRU, dominant hue computed once. The same cached
+//! size/MIME limits, disk LRU, one fetch per key and size at a time, dominant
+//! hue worked out once per key after the image is answered. The same cached
 //! file feeds macOS Now Playing. Covers of downloaded songs are kept apart,
 //! out of the LRU, and answer every size when the network can't (D23).
 //! Covers the user chose for folders are local art (D34): checked and
 //! re-encoded once into `<app data>/covers`, served under keys of their own,
 //! never fetched and never through the remote allow-list.
+//! `&wash=panel|theater` answers the cover ambience (D27): the 120 px cover
+//! blurred and saturated once, with the room its blur spreads into, as a
+//! PNG cached beside the cover, so the webview draws it with no filter.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +29,26 @@ const LOCAL_MAX_PIXELS: u64 = 64_000_000;
 const LOCAL_EDGE: u32 = 640;
 
 type HueHook = Box<dyn Fn(&str, u16, u16) + Send + Sync>;
+/// Covers decoded for their hue at once, at most: a decode of a large one
+/// holds tens of MB for a moment.
+const HUE_DECODES: usize = 2;
+/// Covers downloaded at once, at most: a long list scrolled fast asks for
+/// hundreds; the rest wait their turn (each answers when its file lands).
+const FETCHES: usize = 6;
+
+/// Fetches in flight, one per key and size: a second request for the same
+/// cover waits for the first and reads its file.
+type Inflight = Mutex<std::collections::HashMap<(String, u32), Arc<tokio::sync::Mutex<()>>>>;
+
+/// The hue side of the cache, shared with the tasks that work hues out
+/// after the image has been answered.
+struct Hues {
+    store: Arc<Store>,
+    on_hue: Mutex<Option<HueHook>>,
+    /// Keys whose hue was worked out (or found to have none) this run.
+    done: Mutex<std::collections::HashSet<String>>,
+    decodes: tokio::sync::Semaphore,
+}
 
 pub struct ArtCache {
     dir: PathBuf,
@@ -32,9 +56,10 @@ pub struct ArtCache {
     kept: Option<PathBuf>,
     /// Offline, a kept cover answers at once, at every size (D23).
     online: AtomicBool,
-    store: Arc<Store>,
     http: reqwest::Client,
-    on_hue: Mutex<Option<HueHook>>,
+    hues: Arc<Hues>,
+    inflight: Inflight,
+    fetches: tokio::sync::Semaphore,
     writes: Mutex<u32>,
 }
 
@@ -54,9 +79,15 @@ fn mime_of(b: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Two dominant hues (0..360) weighted by saturation and brightness.
-pub fn hues(bytes: &[u8]) -> Option<(u16, u16)> {
+/// Two dominant hues (0..360) weighted by saturation and brightness:
+/// `Some(None)` for a cover with none, `None` for one that couldn't be
+/// decoded.
+fn decoded_hues(bytes: &[u8]) -> Option<Option<(u16, u16)>> {
     let img = image::load_from_memory(bytes).ok()?;
+    Some(hues_of(&img))
+}
+
+fn hues_of(img: &image::DynamicImage) -> Option<(u16, u16)> {
     let small = img.thumbnail(32, 32).to_rgb8();
     let mut bins = [0f64; 36];
     for p in small.pixels() {
@@ -90,6 +121,126 @@ pub fn hues(bytes: &[u8]) -> Option<(u16, u16)> {
     Some((first as u16 * 10 + 5, second as u16 * 10 + 5))
 }
 
+/// The cover ambience's two looks (D27), each the CSS `blur()` and
+/// `saturate(1.6)` it replaces, worked out for the 120 px cover at the size
+/// it is usually shown: the panel's 140 % of a 352 px side panel takes
+/// `blur(44px)`, about 10.7 px of the cover; full-screen lyrics' 120vmax of
+/// a 1360 px window takes `blur(90px)`, about 6.6 px.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wash {
+    Panel,
+    Theater,
+}
+
+impl Wash {
+    fn name(self) -> &'static str {
+        match self {
+            Wash::Panel => "panel",
+            Wash::Theater => "theater",
+        }
+    }
+
+    /// The blur's standard deviation in pixels of the 120 px cover.
+    fn sigma(self) -> f32 {
+        match self {
+            Wash::Panel => 10.7,
+            Wash::Theater => 6.6,
+        }
+    }
+
+    /// The room around the cover the blur spreads into, on each side: three
+    /// standard deviations. The UI scales the picture up by
+    /// `(120 + 2 × pad) / 120` to keep the cover where it was.
+    pub fn pad(self) -> u32 {
+        (self.sigma() * 3.0).ceil() as u32
+    }
+}
+
+const WASH_EDGE: u32 = 120;
+const WASH_SATURATE: f32 = 1.6;
+
+/// Blurs a cover as CSS `filter: blur(σ) saturate(1.6)` does on the 120 px
+/// picture: a Gaussian on premultiplied RGBA with transparent room around
+/// the cover, then the saturate matrix of Filter Effects on the
+/// unpremultiplied colour. PNG, for the alpha of the soft edge.
+fn wash_png(bytes: &[u8], wash: Wash) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // Centre square, as `aspect-ratio: 1` with the cover's own `object-fit`.
+    let side = w.min(h);
+    let cover = img.crop_imm((w - side) / 2, (h - side) / 2, side, side).resize_exact(WASH_EDGE, WASH_EDGE, image::imageops::FilterType::Triangle).to_rgb8();
+    let pad = wash.pad();
+    let n = (WASH_EDGE + 2 * pad) as usize;
+    let mut px = vec![[0f32; 4]; n * n];
+    for (x, y, p) in cover.enumerate_pixels() {
+        let i = (y + pad) as usize * n + (x + pad) as usize;
+        px[i] = [p[0] as f32, p[1] as f32, p[2] as f32, 255.0];
+    }
+    let kernel = gaussian(wash.sigma());
+    blur_pass(&mut px, n, &kernel, true);
+    blur_pass(&mut px, n, &kernel, false);
+    let s = WASH_SATURATE;
+    let m = [
+        [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+        [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+        [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+    ];
+    let mut out = image::RgbaImage::new(n as u32, n as u32);
+    for (o, p) in out.pixels_mut().zip(&px) {
+        let a = p[3];
+        if a < 0.5 {
+            continue;
+        }
+        let c = [p[0] * 255.0 / a, p[1] * 255.0 / a, p[2] * 255.0 / a];
+        let mut rgb = [0u8; 3];
+        for (k, row) in m.iter().enumerate() {
+            rgb[k] = (row[0] * c[0] + row[1] * c[1] + row[2] * c[2]).round().clamp(0.0, 255.0) as u8;
+        }
+        *o = image::Rgba([rgb[0], rgb[1], rgb[2], a.round().clamp(0.0, 255.0) as u8]);
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    out.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(buf.into_inner())
+}
+
+/// A normalised Gaussian kernel out to three standard deviations.
+fn gaussian(sigma: f32) -> Vec<f32> {
+    let r = (sigma * 3.0).ceil() as i32;
+    let k: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let sum: f32 = k.iter().sum();
+    k.into_iter().map(|v| v / sum).collect()
+}
+
+/// One direction of a separable blur over an `n`×`n` premultiplied image;
+/// outside the image is transparent.
+fn blur_pass(px: &mut [[f32; 4]], n: usize, kernel: &[f32], rows: bool) {
+    let r = (kernel.len() / 2) as isize;
+    let mut line = vec![[0f32; 4]; n];
+    for a in 0..n {
+        let at = |b: usize| if rows { a * n + b } else { b * n + a };
+        for (b, out) in line.iter_mut().enumerate() {
+            let mut acc = [0f32; 4];
+            for (j, w) in kernel.iter().enumerate() {
+                let src = b as isize + j as isize - r;
+                if src < 0 || src >= n as isize {
+                    continue;
+                }
+                let p = px[at(src as usize)];
+                for c in 0..4 {
+                    acc[c] += p[c] * w;
+                }
+            }
+            *out = acc;
+        }
+        for (b, v) in line.iter().enumerate() {
+            px[at(b)] = *v;
+        }
+    }
+}
+
 impl ArtCache {
     pub fn new(dir: PathBuf, store: Arc<Store>, kept: Option<PathBuf>) -> Self {
         let _ = std::fs::create_dir_all(&dir);
@@ -97,11 +248,12 @@ impl ArtCache {
             // Follow only redirects that stay on allow-listed hosts.
             if a.previous().len() < 3 && a.url().scheme() == "https" && a.url().host_str().is_some_and(art::host_allowed) { a.follow() } else { a.stop() }
         })).build().expect("http");
-        Self { dir, kept, online: AtomicBool::new(true), store, http, on_hue: Mutex::new(None), writes: Mutex::new(0) }
+        let hues = Arc::new(Hues { store, on_hue: Mutex::new(None), done: Mutex::new(Default::default()), decodes: tokio::sync::Semaphore::new(HUE_DECODES) });
+        Self { dir, kept, online: AtomicBool::new(true), http, hues, inflight: Mutex::new(Default::default()), fetches: tokio::sync::Semaphore::new(FETCHES), writes: Mutex::new(0) }
     }
 
     pub fn on_hue(&self, f: impl Fn(&str, u16, u16) + Send + Sync + 'static) {
-        *self.on_hue.lock() = Some(Box::new(f));
+        *self.hues.on_hue.lock() = Some(Box::new(f));
     }
 
     fn valid_key(key: &str) -> bool {
@@ -147,13 +299,14 @@ impl ArtCache {
         }
         let size = snap_size(size);
         let path = self.dir.join(format!("{key}-{size}"));
-        if let Ok(b) = tokio::fs::read(&path).await {
-            if let Some(m) = mime_of(&b) {
-                if let Ok(f) = std::fs::OpenOptions::new().append(true).open(&path) {
-                    let _ = f.set_modified(SystemTime::now());
-                }
-                return Ok((b, m));
-            }
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        // One fetch per cover and size: the others wait, then read its file.
+        let flight = Flight::join(&self.inflight, (key.to_string(), size));
+        let _one = flight.lock.lock().await;
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
         }
         // A downloaded song's cover: enough for anything up to 544 px, and
         // for every size when the network can't answer.
@@ -173,6 +326,60 @@ impl ArtCache {
         }
     }
 
+    /// The cover ambience for a key (D27): made once from the 120 px cover
+    /// (cached, kept or fetched as `get` finds it) and cached beside it as
+    /// `<key>-wash-<look>`, counted and evicted with the other covers.
+    pub async fn get_wash(&self, key: &str, wash: Wash) -> Result<(Vec<u8>, &'static str), String> {
+        if !art::is_local_key(key) && !Self::valid_key(key) {
+            return Err("bad art key".into());
+        }
+        let path = self.dir.join(format!("{key}-wash-{}", wash.name()));
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        let flight = Flight::join(&self.inflight, (format!("{key}-wash-{}", wash.name()), 0));
+        let _one = flight.lock.lock().await;
+        if let Some(hit) = Self::read_cached(&path).await {
+            return Ok(hit);
+        }
+        let (cover, _) = self.get(key, WASH_EDGE).await?;
+        let png = {
+            let _turn = self.hues.decodes.acquire().await.map_err(|_| "closing")?;
+            tokio::task::spawn_blocking(move || wash_png(&cover, wash)).await.ok().flatten().ok_or("artwork could not be decoded")?
+        };
+        if let Some(dir) = path.parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
+        let tmp = path.with_extension("tmp");
+        if tokio::fs::write(&tmp, &png).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+        self.wrote();
+        Ok((png, "image/png"))
+    }
+
+    /// A file was added: every 50th keeps the cache under its limit.
+    fn wrote(&self) {
+        let evict = {
+            let mut w = self.writes.lock();
+            *w += 1;
+            *w % 50 == 0
+        };
+        if evict {
+            self.evict();
+        }
+    }
+
+    /// A cached file that is an image, its time touched for the LRU.
+    async fn read_cached(path: &std::path::Path) -> Option<(Vec<u8>, &'static str)> {
+        let b = tokio::fs::read(path).await.ok()?;
+        let m = mime_of(&b)?;
+        if let Ok(f) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = f.set_modified(SystemTime::now());
+        }
+        Some((b, m))
+    }
+
     async fn fetch(&self, key: &str, size: u32, path: &std::path::Path) -> Result<(Vec<u8>, &'static str), String> {
         let entry = art::lookup(key).ok_or("unknown art key")?;
         let url = art::sized_url(&entry.base, size);
@@ -180,6 +387,7 @@ impl ArtCache {
         if u.scheme() != "https" || !u.host_str().is_some_and(art::host_allowed) {
             return Err("art host not allowed".into());
         }
+        let _turn = self.fetches.acquire().await.map_err(|_| "closing")?;
         let r = self.http.get(u).send().await.map_err(|_| "artwork download failed".to_string())?;
         if !r.status().is_success() {
             return Err(format!("artwork server answered {}", r.status().as_u16()));
@@ -187,10 +395,16 @@ impl ArtCache {
         if r.content_length().is_some_and(|l| l as usize > MAX_BYTES) {
             return Err("artwork too large".into());
         }
-        let b = r.bytes().await.map_err(|_| "artwork download interrupted".to_string())?;
-        if b.len() > MAX_BYTES {
-            return Err("artwork too large".into());
+        // Read up to the limit, whatever the length said.
+        let mut r = r;
+        let mut b = Vec::new();
+        while let Some(c) = r.chunk().await.map_err(|_| "artwork download interrupted".to_string())? {
+            if b.len() + c.len() > MAX_BYTES {
+                return Err("artwork too large".into());
+            }
+            b.extend_from_slice(&c);
         }
+        let b: Arc<[u8]> = b.into();
         let mime = mime_of(&b).ok_or("artwork is not an image")?;
         let dims_ok = image::ImageReader::new(std::io::Cursor::new(&b)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok()).is_some_and(|(w, h)| (w as u64) * (h as u64) <= MAX_PIXELS);
         if !dims_ok {
@@ -204,27 +418,27 @@ impl ArtCache {
         if tokio::fs::write(&tmp, &b).await.is_ok() {
             let _ = tokio::fs::rename(&tmp, path).await;
         }
-        // Hue once per key; persist the key → URL mapping and hue.
-        if entry.hue.is_none() {
-            let bytes = b.to_vec();
-            let h = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten();
-            if let Some((h1, h2)) = h {
-                art::set_hue(key, h1, h2);
-                if let Some(f) = self.on_hue.lock().as_ref() {
-                    f(key, h1, h2);
+        // Hue once per key (none found counts too), worked out after the
+        // image is answered; then the key → URL mapping and hue are saved.
+        // A decode or a save that failed is tried again on the next fetch.
+        if entry.hue.is_none() && self.hues.done.lock().insert(key.to_string()) {
+            let (hs, key, base, bytes) = (self.hues.clone(), key.to_string(), entry.base.clone(), b.clone());
+            let ttl = if self.is_kept(&key) { None } else { Some(180 * 24 * 3600) };
+            tauri::async_runtime::spawn(async move {
+                let Some(h) = hs.work_out(bytes).await else {
+                    hs.done.lock().remove(&key);
+                    return;
+                };
+                if let Some((h1, h2)) = h {
+                    art::set_hue(&key, h1, h2);
+                    hs.tell(&key, h1, h2);
                 }
-            }
-            let ttl = if self.is_kept(key) { None } else { Some(180 * 24 * 3600) };
-            let _ = self.store.put("art", key, &(entry.base.clone(), h), ttl);
+                if hs.store.put("art", &key, &(base, h), ttl).is_err() {
+                    hs.done.lock().remove(&key);
+                }
+            });
         }
-        let evict = {
-            let mut w = self.writes.lock();
-            *w += 1;
-            *w % 50 == 0
-        };
-        if evict {
-            self.evict();
-        }
+        self.wrote();
         Ok((b.to_vec(), mime))
     }
 
@@ -232,14 +446,15 @@ impl ArtCache {
     async fn get_local(&self, key: &str) -> Result<(Vec<u8>, &'static str), String> {
         let b = tokio::fs::read(local_path(&local_dir(), key)).await.map_err(|_| "no such cover".to_string())?;
         let mime = mime_of(&b).ok_or("cover is not an image")?;
-        let first = LOCAL_HUES.get_or_init(Default::default).lock().insert(key.to_string());
-        if first {
-            let bytes = b.clone();
-            if let Some((h1, h2)) = tokio::task::spawn_blocking(move || hues(&bytes)).await.ok().flatten()
-                && let Some(f) = self.on_hue.lock().as_ref()
-            {
-                f(key, h1, h2);
-            }
+        if self.hues.done.lock().insert(key.to_string()) {
+            let (hs, key, bytes) = (self.hues.clone(), key.to_string(), b.clone());
+            tauri::async_runtime::spawn(async move {
+                match hs.work_out(bytes).await {
+                    Some(Some((h1, h2))) => hs.tell(&key, h1, h2),
+                    Some(None) => {}
+                    None => drop(hs.done.lock().remove(&key)),
+                }
+            });
         }
         Ok((b, mime))
     }
@@ -287,7 +502,45 @@ impl ArtCache {
     }
 }
 
-static LOCAL_HUES: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+impl Hues {
+    /// A cover's hues, decoded off the async runtime, a few at a time;
+    /// `None` when it couldn't be decoded.
+    async fn work_out(&self, bytes: impl AsRef<[u8]> + Send + 'static) -> Option<Option<(u16, u16)>> {
+        let _turn = self.decodes.acquire().await.ok()?;
+        tokio::task::spawn_blocking(move || decoded_hues(bytes.as_ref())).await.ok().flatten()
+    }
+
+    fn tell(&self, key: &str, h1: u16, h2: u16) {
+        if let Some(f) = self.on_hue.lock().as_ref() {
+            f(key, h1, h2);
+        }
+    }
+}
+
+/// One request's share of a fetch in flight; the last one out removes it.
+struct Flight<'a> {
+    map: &'a Inflight,
+    key: (String, u32),
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<'a> Flight<'a> {
+    fn join(map: &'a Inflight, key: (String, u32)) -> Self {
+        let lock = map.lock().entry(key.clone()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        Flight { map, key, lock }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        // Copies are taken under this lock: the map's and this one left
+        // means no one else waits.
+        if Arc::strong_count(&self.lock) == 2 && m.get(&self.key).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
+            m.remove(&self.key);
+        }
+    }
+}
 
 /// `<app data>/covers`, beside the database: durable, unlike the art cache.
 fn local_dir() -> PathBuf {
@@ -344,6 +597,16 @@ pub fn parse_request(uri: &str) -> Option<(String, u32)> {
     Some((key, size))
 }
 
+/// The `wash` of an `art://` request, if it asks for the cover ambience.
+pub fn parse_wash(uri: &str) -> Option<Wash> {
+    let u = url::Url::parse(uri).ok()?;
+    match u.query_pairs().find(|(k, _)| k == "wash")?.1.as_ref() {
+        "panel" => Some(Wash::Panel),
+        "theater" => Some(Wash::Theater),
+        _ => None,
+    }
+}
+
 /// Downloads keep the cover the app shows (D23).
 #[async_trait::async_trait]
 impl encore_downloads::ArtSource for ArtCache {
@@ -365,6 +628,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_washes() {
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120&wash=panel"), Some(Wash::Panel));
+        assert_eq!(parse_wash("http://art.localhost/0123456789abcdef0123?s=120&wash=theater"), Some(Wash::Theater));
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120&wash=../x"), None);
+        assert_eq!(parse_wash("art://localhost/0123456789abcdef0123?s=120"), None);
+    }
+
+    #[test]
+    fn a_wash_is_the_blurred_cover_with_room_around_it() {
+        // Left half red, right half blue.
+        let img = image::RgbImage::from_fn(240, 240, |x, _| if x < 120 { image::Rgb([200, 30, 30]) } else { image::Rgb([30, 30, 200]) });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        for wash in [Wash::Panel, Wash::Theater] {
+            let png = wash_png(buf.get_ref(), wash).unwrap();
+            assert_eq!(mime_of(&png), Some("image/png"));
+            let out = image::load_from_memory(&png).unwrap().to_rgba8();
+            let (n, pad) = (out.width(), wash.pad());
+            assert_eq!(n, 120 + 2 * pad);
+            let mid = n / 2;
+            // The corners are clear, the middle of the cover opaque.
+            assert!(out.get_pixel(0, 0)[3] < 3, "{wash:?} corner");
+            assert_eq!(out.get_pixel(mid, mid)[3], 255, "{wash:?} centre");
+            // The edge of the cover is half covered, as CSS blur leaves it.
+            let edge = out.get_pixel(pad, mid)[3];
+            assert!((100..=160).contains(&edge), "{wash:?} edge {edge}");
+            // Inside, still red and blue, more saturated; the seam is blurred.
+            let red = out.get_pixel(pad + 10, mid);
+            assert!(red[0] > 200 && red[2] < 30, "{wash:?} {red:?}");
+            let seam = out.get_pixel(mid, mid);
+            assert!(seam[0] > 60 && seam[2] > 60, "{wash:?} {seam:?}");
+        }
+    }
+
+    #[test]
     fn hue_of_solid_colour() {
         let mut img = image::RgbImage::new(8, 8);
         for p in img.pixels_mut() {
@@ -372,7 +670,7 @@ mod tests {
         }
         let mut buf = std::io::Cursor::new(Vec::new());
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
-        let (h1, _) = hues(buf.get_ref()).unwrap();
+        let (h1, _) = decoded_hues(buf.get_ref()).flatten().unwrap();
         assert!((215..=235).contains(&h1), "{h1}");
     }
 
@@ -400,6 +698,36 @@ mod tests {
         std::fs::write(&text, b"hello").unwrap();
         assert!(import_local_into(&dir, &text).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn one_fetch_per_cover_and_size() {
+        let map: Inflight = Mutex::new(Default::default());
+        let a = Flight::join(&map, ("k".into(), 120));
+        let b = Flight::join(&map, ("k".into(), 120));
+        let other = Flight::join(&map, ("k".into(), 544));
+        assert!(Arc::ptr_eq(&a.lock, &b.lock));
+        assert!(!Arc::ptr_eq(&a.lock, &other.lock), "another size is another fetch");
+        let g = a.lock.lock().await;
+        assert!(b.lock.try_lock().is_err(), "the second waits for the first");
+        drop(g);
+        drop((a, b, other));
+        assert!(map.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn grey_covers_have_no_hue_and_decodes_wait_their_turn() {
+        let store = Arc::new(Store::open_memory().unwrap());
+        let hs = Hues { store, on_hue: Mutex::new(None), done: Mutex::new(Default::default()), decodes: tokio::sync::Semaphore::new(1) };
+        let grey = image::RgbImage::from_pixel(8, 8, image::Rgb([120, 120, 120]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        grey.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        assert_eq!(hs.work_out(buf.into_inner()).await, Some(None), "decoded, no hue");
+        assert_eq!(hs.work_out(b"not an image".to_vec()).await, None, "not decoded: tried again later");
+        let held = hs.decodes.acquire().await.unwrap();
+        let waiting = hs.work_out(vec![0u8; 4]);
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting).await.is_err());
+        drop(held);
     }
 
     #[test]

@@ -235,6 +235,7 @@ pub async fn library_like(app: AppHandle, core: S<'_>, track_ids: Vec<ItemId>, l
                 break;
             };
             let r = svc.set_like(&ctx, id, liked).await;
+            core.wrote();
             drop(turn);
             match r {
                 Ok(o) => {

@@ -15,17 +15,21 @@
 //!
 //! The preprocessed player (the player reduced to what the solver needs)
 //! is kept in memory for the last few players, so the songs after the
-//! first one under a player skip the slow parse.
+//! first one under a player skip the slow parse, and on disk
+//! (`cache::PreprocessedDisk`), so the first song after a launch skips it
+//! too. A solve from a saved copy that fails throws the copy away and
+//! solves once more from the player.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rquickjs::{Context, Ctx, Function, Runtime, Value};
 
+use super::cache::SavedPlayers;
 use super::ejs::{self, Input, Output};
 use super::{ChallengeRequest, ChallengeResults, PlayerScript, SolveError, Solver};
 
@@ -80,12 +84,26 @@ pub struct QuickJsSolver {
     closed: Arc<AtomicBool>,
     /// (player id, content hash) → preprocessed player, newest last.
     preprocessed: Mutex<VecDeque<(String, Arc<str>)>>,
+    /// The same across launches; `None`: memory only.
+    disk: Option<Arc<SavedPlayers>>,
+    /// Bumped by Reset: a solve that began before it keeps nothing, in
+    /// memory or on disk.
+    reset: AtomicU64,
     last: Mutex<SolveTiming>,
 }
 
 impl QuickJsSolver {
     pub fn new(limits: Limits) -> Arc<Self> {
-        Arc::new(QuickJsSolver { limits, jobs: Mutex::new(None), closed: Arc::new(AtomicBool::new(false)), preprocessed: Mutex::new(VecDeque::new()), last: Mutex::new(SolveTiming::default()) })
+        Self::build(limits, None)
+    }
+
+    /// Keeping preprocessed players in `dir` too (the player cache).
+    pub fn with_disk(limits: Limits, dir: std::path::PathBuf) -> Arc<Self> {
+        Self::build(limits, Some(Arc::new(SavedPlayers::new(dir))))
+    }
+
+    fn build(limits: Limits, disk: Option<Arc<SavedPlayers>>) -> Arc<Self> {
+        Arc::new(QuickJsSolver { limits, jobs: Mutex::new(None), closed: Arc::new(AtomicBool::new(false)), preprocessed: Mutex::new(VecDeque::new()), disk, reset: AtomicU64::new(0), last: Mutex::new(SolveTiming::default()) })
     }
 
     /// Before Encore quits or installs an update (D24): the running script
@@ -100,9 +118,48 @@ impl QuickJsSolver {
         self.closed.store(false, Ordering::SeqCst);
     }
 
-    /// Forget the preprocessed players (Settings → Reset player cache).
+    /// Forget the preprocessed players, on disk too (Settings → Reset
+    /// player cache). Solves already running keep nothing they make, and
+    /// the files are deleted off the async runtime, in the disk lane's
+    /// order, so no earlier write lands after them.
     pub fn clear(&self) {
-        self.preprocessed.lock().clear();
+        let generation = {
+            let mut q = self.preprocessed.lock();
+            q.clear();
+            self.reset.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        if let Some(d) = self.disk.clone() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => drop(h.spawn_blocking(move || d.wipe(generation))),
+                Err(_) => d.wipe(generation),
+            }
+        }
+    }
+
+    fn remember(&self, k: &str, pre: Arc<str>, generation: u64) {
+        let mut q = self.preprocessed.lock();
+        if self.reset.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        q.retain(|(id, _)| id != k);
+        q.push_back((k.to_string(), pre));
+        while q.len() > PREPROCESSED_KEPT {
+            q.pop_front();
+        }
+    }
+
+    /// The saved copy for `player`, read off the async runtime.
+    async fn saved_copy(&self, player: &PlayerScript, generation: u64) -> Option<Arc<str>> {
+        let d = self.disk.clone()?;
+        let (id, code) = (player.id.clone(), player.code.clone());
+        tokio::task::spawn_blocking(move || d.read(generation, &id, &code)).await.ok().flatten().map(Arc::from)
+    }
+
+    /// Run `f` on the disk store off the async runtime, without waiting.
+    fn on_disk(&self, f: impl FnOnce(&SavedPlayers) + Send + 'static) {
+        if let Some(d) = self.disk.clone() {
+            tokio::task::spawn_blocking(move || f(&d));
+        }
     }
 
     pub fn last_timing(&self) -> SolveTiming {
@@ -179,37 +236,70 @@ fn key(player: &PlayerScript) -> String {
     format!("{}:{:016x}", player.id, crate::fxhash(&player.code))
 }
 
-#[async_trait]
-impl Solver for QuickJsSolver {
-    async fn solve(&self, player: &PlayerScript, requests: Vec<ChallengeRequest>) -> Result<Vec<ChallengeResults>, SolveError> {
-        let started = Instant::now();
+impl QuickJsSolver {
+    /// One solve, from `pre` when given, else from the player (keeping
+    /// what ejs preprocessed, in memory and on disk).
+    async fn solve_from(&self, player: &PlayerScript, requests: &[ChallengeRequest], pre: Option<&Arc<str>>, started: Instant, generation: u64) -> Result<Vec<ChallengeResults>, SolveError> {
         let k = key(player);
-        let cached = self.preprocessed.lock().iter().find(|(id, _)| *id == k).map(|(_, p)| p.clone());
-        let hit = cached.is_some();
-        let input = match &cached {
-            Some(pre) => Input::Preprocessed { preprocessed_player: pre, requests: &requests },
-            None => Input::Player { player: &player.code, requests: &requests, output_preprocessed: true },
+        let input = match pre {
+            Some(pre) => Input::Preprocessed { preprocessed_player: pre, requests },
+            None => Input::Player { player: &player.code, requests, output_preprocessed: true },
         };
         let input = serde_json::to_string(&input).map_err(|e| SolveError::Engine(e.to_string()))?;
-        let out = self.run_job(input, !hit).await?;
-        *self.last.lock() = SolveTiming { millis: started.elapsed().as_millis() as u64, preprocessed_hit: hit };
+        let out = self.run_job(input, pre.is_none()).await?;
+        *self.last.lock() = SolveTiming { millis: started.elapsed().as_millis() as u64, preprocessed_hit: pre.is_some() };
         match out {
             Output::Error { error } => Err(SolveError::Player(first_line(&error))),
             Output::Result { preprocessed_player, responses } => {
                 if responses.len() != requests.len() {
                     return Err(SolveError::Engine("the solver answered a different number of requests".into()));
                 }
-                if let Some(pre) = preprocessed_player {
-                    let mut q = self.preprocessed.lock();
-                    q.retain(|(id, _)| *id != k);
-                    q.push_back((k, pre.into()));
-                    while q.len() > PREPROCESSED_KEPT {
-                        q.pop_front();
-                    }
+                if let Some(text) = preprocessed_player {
+                    let text: Arc<str> = text.into();
+                    self.remember(&k, text.clone(), generation);
+                    let (id, code) = (player.id.clone(), player.code.clone());
+                    self.on_disk(move |d| d.write(generation, &id, &code, &text));
                 }
                 Ok(requests.iter().zip(responses).map(|(req, r)| super::validate(req, r.into_results())).collect())
             }
         }
+    }
+}
+
+#[async_trait]
+impl Solver for QuickJsSolver {
+    async fn solve(&self, player: &PlayerScript, requests: Vec<ChallengeRequest>) -> Result<Vec<ChallengeResults>, SolveError> {
+        let started = Instant::now();
+        let k = key(player);
+        let generation = self.reset.load(Ordering::SeqCst);
+        let mut pre = self.preprocessed.lock().iter().find(|(id, _)| *id == k).map(|(_, p)| p.clone());
+        let mut saved = false;
+        if pre.is_none()
+            && let Some(p) = self.saved_copy(player, generation).await
+        {
+            self.remember(&k, p.clone(), generation);
+            (pre, saved) = (Some(p), true);
+        }
+        let r = self.solve_from(player, &requests, pre.as_ref(), started, generation).await;
+        // A saved copy that didn't answer everything goes, and the player
+        // is solved once more cold (never when quitting).
+        let bad = match &r {
+            Err(SolveError::Closed) => false,
+            Err(SolveError::Engine(m)) => m != "cancelled",
+            Err(SolveError::Player(_)) => true,
+            Ok(v) => v.iter().any(|x| x.is_err()),
+        };
+        if saved && bad {
+            tracing::info!(player = %player.id, "the saved preprocessed player didn't solve; solving from the player");
+            self.preprocessed.lock().retain(|(id, _)| *id != k);
+            // Gone before the cold solve writes its own.
+            if let Some(d) = self.disk.clone() {
+                let id = player.id.clone();
+                let _ = tokio::task::spawn_blocking(move || d.remove(&id)).await;
+            }
+            return self.solve_from(player, &requests, None, started, generation).await;
+        }
+        r
     }
 }
 
@@ -312,6 +402,114 @@ mod tests {
             assert_eq!(super::super::apply_permutation(&perm, "abcdef").as_deref(), Some(crate::jsc::SYNTHETIC_SIG_ABCDEF));
             assert_eq!(s.last_timing().preprocessed_hit, round == 1);
         }
+    }
+
+    fn synthetic_requests() -> Vec<ChallengeRequest> {
+        vec![
+            ChallengeRequest { kind: super::super::ChallengeType::N, challenges: vec!["abcdef".into()] },
+            ChallengeRequest { kind: super::super::ChallengeType::Sig, challenges: vec![super::super::sig_spec_challenge(6)] },
+        ]
+    }
+
+    async fn written(path: &std::path::Path) {
+        for _ in 0..200 {
+            if path.is_file() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{} was never written", path.display());
+    }
+
+    #[tokio::test]
+    async fn the_preprocessed_player_outlives_a_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = script(crate::jsc::SYNTHETIC_PLAYER);
+        let first = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        first.solve(&p, synthetic_requests()).await.unwrap();
+        assert!(!first.last_timing().preprocessed_hit);
+        let file = tmp.path().join("test-main.pre");
+        written(&file).await;
+        // The next launch: nothing in memory, the saved copy is used.
+        let next = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        let out = next.solve(&p, synthetic_requests()).await.unwrap();
+        assert!(next.last_timing().preprocessed_hit);
+        assert_eq!(out[0].as_ref().unwrap()["abcdef"], crate::jsc::SYNTHETIC_N_ABCDEF);
+        // Reset player cache takes it away.
+        next.clear();
+        gone(&file).await;
+    }
+
+    async fn gone(path: &std::path::Path) {
+        for _ in 0..200 {
+            if !path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{} is still there", path.display());
+    }
+
+    #[tokio::test]
+    async fn a_saved_copy_altered_but_still_javascript_is_a_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = script(crate::jsc::SYNTHETIC_PLAYER);
+        let first = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        let good = first.solve(&p, synthetic_requests()).await.unwrap();
+        let file = tmp.path().join("test-main.pre");
+        written(&file).await;
+        // The same length, the header untouched, a different answer.
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(raw.contains("slice(1)"));
+        std::fs::write(&file, raw.replace("slice(1)", "slice(2)")).unwrap();
+        let next = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        let out = next.solve(&p, synthetic_requests()).await.unwrap();
+        assert!(!next.last_timing().preprocessed_hit, "solved from the player");
+        assert_eq!(format!("{out:?}"), format!("{good:?}"));
+    }
+
+    #[tokio::test]
+    async fn nothing_from_before_a_reset_comes_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = script(crate::jsc::SYNTHETIC_PLAYER);
+        let s = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        // A solve that began before the reset and ends after it.
+        let before = s.reset.load(Ordering::SeqCst);
+        s.clear();
+        s.remember(&key(&p), Arc::from("pre"), before);
+        assert!(s.preprocessed.lock().is_empty(), "memory isn't refilled");
+        // Its disk write, queued behind the reset's wipe, writes nothing.
+        let d = s.disk.clone().unwrap();
+        tokio::task::spawn_blocking(move || d.write(before, &p.id, &p.code, "pre")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!tmp.path().join("test-main.pre").exists());
+        // A solve after the reset keeps its copy again.
+        let p = script(crate::jsc::SYNTHETIC_PLAYER);
+        s.solve(&p, synthetic_requests()).await.unwrap();
+        written(&tmp.path().join("test-main.pre")).await;
+    }
+
+    #[tokio::test]
+    async fn a_saved_copy_that_fails_goes_and_the_player_is_solved_cold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = script(crate::jsc::SYNTHETIC_PLAYER);
+        // A copy made for this very player, but not something ejs can use.
+        super::super::cache::PreprocessedDisk::new(tmp.path().to_path_buf()).write(&p.id, &p.code, "this is not javascript");
+        let s = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        let out = s.solve(&p, synthetic_requests()).await.unwrap();
+        assert!(!s.last_timing().preprocessed_hit, "solved again from the player");
+        assert_eq!(out[0].as_ref().unwrap()["abcdef"], crate::jsc::SYNTHETIC_N_ABCDEF);
+        // And the good copy replaced the bad one.
+        let file = tmp.path().join("test-main.pre");
+        for _ in 0..200 {
+            if std::fs::read_to_string(&file).is_ok_and(|t| !t.contains("this is not javascript")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let again = QuickJsSolver::with_disk(Limits::default(), tmp.path().to_path_buf());
+        again.solve(&p, synthetic_requests()).await.unwrap();
+        assert!(again.last_timing().preprocessed_hit);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Solved challenges, per player (D37).
+//! Solved challenges, per player, and preprocessed players on disk (D37).
 //!
 //! Upstream: yt-dlp `_video.py` `_load_player_data_from_cache` /
 //! `_store_player_data_to_cache` (2208-2227): `n` answers per challenge,
@@ -6,10 +6,18 @@
 //! player. Here the key also holds the player's content hash and the
 //! solver's and engine's versions, so a new ejs or QuickJS never reuses an
 //! old answer. Kept in memory only, for the last few players, bounded.
+//!
+//! The preprocessed player (`PreprocessedDisk`) is kept on disk too, beside
+//! the player scripts, so the first song after a launch doesn't parse the
+//! player again. Only that text is written: no bytecode, no challenge or
+//! answer, no cookie, URL or account.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 const PLAYERS_KEPT: usize = 3;
 const N_PER_PLAYER: usize = 512;
@@ -77,9 +85,284 @@ impl SolvedCache {
     }
 }
 
+/// The layout of a preprocessed file; another one is a miss.
+const SCHEMA: u32 = 2;
+/// Preprocessed players kept on disk, newest first.
+pub const PREPROCESSED_FILES: usize = 3;
+/// A preprocessed player is about 4.2 MB for the players YouTube serves
+/// now, 3.7 MB at most in the solver corpus (tests/ejs_players.rs prints
+/// it); one larger than this isn't written or read.
+pub const PREPROCESSED_MAX_BYTES: u64 = 8 << 20;
+/// All of them together.
+const PREPROCESSED_TOTAL_BYTES: u64 = 24 << 20;
+const SUFFIX: &str = ".pre";
+/// The header line is short; a longer one isn't ours.
+const HEADER_MAX: u64 = 1024;
+
+/// What a preprocessed file was made from: it is used only for exactly that
+/// player, ejs and engine.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct Header {
+    schema: u32,
+    player: String,
+    sha3_256: String,
+    ejs: String,
+    engine: String,
+    bytes: u64,
+    /// The preprocessed text's own digest: an altered body is a miss even
+    /// when it is the same length and still reads as JavaScript.
+    body_sha3_256: String,
+}
+
+impl Header {
+    fn of(player_id: &str, code: &str, body: &[u8]) -> Self {
+        use sha3::Digest;
+        Header {
+            schema: SCHEMA,
+            player: player_id.to_string(),
+            sha3_256: hex::encode(sha3::Sha3_256::digest(code.as_bytes())),
+            ejs: super::ejs::EJS_VERSION.to_string(),
+            engine: super::quickjs::ENGINE.to_string(),
+            bytes: body.len() as u64,
+            body_sha3_256: hex::encode(sha3::Sha3_256::digest(body)),
+        }
+    }
+}
+
+/// Preprocessed players in `<cache>/player/`, one file per player and
+/// variant (`<id>-<variant>.pre`): a header line naming what it was made
+/// from, then the text. Blocking: call these off the async runtime.
+pub struct PreprocessedDisk {
+    dir: PathBuf,
+}
+
+impl PreprocessedDisk {
+    pub fn new(dir: PathBuf) -> Self {
+        PreprocessedDisk { dir }
+    }
+
+    /// `9fcf08e8/main` → `9fcf08e8-main.pre`; nothing for an id that
+    /// isn't a plain one.
+    fn file(&self, player_id: &str) -> Option<PathBuf> {
+        let name: String = player_id.chars().map(|c| if c == '/' { '-' } else { c }).collect();
+        let plain = !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        plain.then(|| self.dir.join(format!("{name}{SUFFIX}")))
+    }
+
+    /// The preprocessed text for this player's `code`, if a file made from
+    /// exactly it, this ejs and this engine is there and whole.
+    pub fn read(&self, player_id: &str, code: &str) -> Option<String> {
+        let path = self.file(player_id)?;
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if !meta.is_file() || meta.len() > PREPROCESSED_MAX_BYTES + HEADER_MAX {
+            return None;
+        }
+        let mut raw = Vec::with_capacity(meta.len() as usize);
+        std::fs::File::open(&path).ok()?.take(PREPROCESSED_MAX_BYTES + HEADER_MAX).read_to_end(&mut raw).ok()?;
+        let nl = raw.iter().take(HEADER_MAX as usize).position(|&b| b == b'\n')?;
+        let header: Header = serde_json::from_slice(&raw[..nl]).ok()?;
+        let body = &raw[nl + 1..];
+        if header != Header::of(player_id, code, body) {
+            return None;
+        }
+        String::from_utf8(body.to_vec()).ok()
+    }
+
+    /// Keep `pre` for this player's `code`: by temp file and rename, then
+    /// only the newest few, within the total. Too large is not kept.
+    pub fn write(&self, player_id: &str, code: &str, pre: &str) {
+        let Some(path) = self.file(player_id) else { return };
+        if pre.len() as u64 > PREPROCESSED_MAX_BYTES || std::fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let Ok(mut header) = serde_json::to_vec(&Header::of(player_id, code, pre.as_bytes())) else { return };
+        header.push(b'\n');
+        // Its own temp name: two solves of one player may write at once.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!("pre-part{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let written = std::fs::File::create(&tmp).and_then(|mut f| {
+            f.write_all(&header)?;
+            f.write_all(pre.as_bytes())?;
+            f.sync_all()
+        });
+        if written.is_err() || std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        self.prune();
+    }
+
+    /// A copy that failed to solve with: it goes, and the next solve is cold.
+    pub fn remove(&self, player_id: &str) {
+        if let Some(p) = self.file(player_id) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Settings → Reset player cache, with any write a crash left half done.
+    pub fn clear(&self) {
+        for (_, _, p) in self.files() {
+            let _ = std::fs::remove_file(p);
+        }
+        for e in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().contains(".pre-part") && e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
+    /// Our files, newest first.
+    fn files(&self) -> Vec<(std::time::SystemTime, u64, PathBuf)> {
+        let mut v: Vec<_> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(SUFFIX) && e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| {
+                let m = e.metadata().ok()?;
+                Some((m.modified().ok()?, m.len(), e.path()))
+            })
+            .collect();
+        v.sort_by_key(|f| std::cmp::Reverse(f.0));
+        v
+    }
+
+    fn prune(&self) {
+        let mut total = 0;
+        for (i, (_, len, p)) in self.files().into_iter().enumerate() {
+            total += len;
+            if i >= PREPROCESSED_FILES || total > PREPROCESSED_TOTAL_BYTES {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
+/// The disk store behind one lane: reads, writes and removals take turns,
+/// and each carries the reset generation it began in (`QuickJsSolver`). A
+/// Reset bumps the generation at once and wipes the files in its turn; a
+/// write from before it, even one already queued, writes nothing once the
+/// wipe is done or pending, and a read while one is pending finds nothing.
+pub struct SavedPlayers {
+    disk: PreprocessedDisk,
+    /// The generation the files belong to: the last wipe's.
+    wiped: Mutex<u64>,
+}
+
+impl SavedPlayers {
+    pub fn new(dir: PathBuf) -> Self {
+        SavedPlayers { disk: PreprocessedDisk::new(dir), wiped: Mutex::new(0) }
+    }
+
+    /// Blocking, like the rest.
+    pub fn read(&self, generation: u64, player_id: &str, code: &str) -> Option<String> {
+        let g = self.wiped.lock();
+        if *g != generation {
+            return None;
+        }
+        self.disk.read(player_id, code)
+    }
+
+    pub fn write(&self, generation: u64, player_id: &str, code: &str, pre: &str) {
+        let g = self.wiped.lock();
+        if *g == generation {
+            self.disk.write(player_id, code, pre);
+        }
+    }
+
+    pub fn remove(&self, player_id: &str) {
+        let _g = self.wiped.lock();
+        self.disk.remove(player_id);
+    }
+
+    /// Reset's turn: every file goes, and only `generation` writes after.
+    pub fn wipe(&self, generation: u64) {
+        let mut g = self.wiped.lock();
+        self.disk.clear();
+        *g = (*g).max(generation);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_from_before_a_reset_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = SavedPlayers::new(tmp.path().to_path_buf());
+        s.write(0, "a/main", "code", "pre");
+        assert_eq!(s.read(0, "a/main", "code").as_deref(), Some("pre"));
+        // Reset: the generation moves on at once, the wipe comes in its turn.
+        assert_eq!(s.read(1, "a/main", "code"), None, "nothing is read while the wipe is pending");
+        s.write(0, "b/main", "code", "pre");
+        s.wipe(1);
+        assert!(s.disk.files().is_empty());
+        // A write queued before the reset that runs after the wipe.
+        s.write(0, "a/main", "code", "pre");
+        assert!(s.disk.files().is_empty());
+        s.write(1, "c/main", "code", "pre");
+        assert_eq!(s.read(1, "c/main", "code").as_deref(), Some("pre"));
+    }
+
+    #[test]
+    fn a_preprocessed_player_is_used_only_for_what_it_was_made_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = PreprocessedDisk::new(tmp.path().join("player"));
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        d.write("9fcf08e8/main", "code", "pre");
+        assert!(d.dir().join("9fcf08e8-main.pre").is_file());
+        assert_eq!(d.read("9fcf08e8/main", "code").as_deref(), Some("pre"));
+        assert_eq!(d.read("9fcf08e8/main", "other code"), None, "another player under the same id");
+        assert_eq!(d.read("9fcf08e8/tv", "code"), None);
+        // Another ejs or engine, or a cut-off or altered file, is a miss.
+        let path = d.dir().join("9fcf08e8-main.pre");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, raw.replace(super::super::ejs::EJS_VERSION, "0.0.1")).unwrap();
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        // The same length, still JavaScript, header untouched: a miss too.
+        std::fs::write(&path, raw.replace("\npre", "\npry")).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), raw.len() as u64);
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        std::fs::write(&path, &raw[..raw.len() - 1]).unwrap();
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        std::fs::write(&path, "not a header").unwrap();
+        assert_eq!(d.read("9fcf08e8/main", "code"), None);
+        // An id that isn't plain never names a file.
+        d.write("../../x", "code", "pre");
+        assert_eq!(d.read("../../x", "code"), None);
+        assert!(!tmp.path().join("x.pre").exists());
+        d.remove("9fcf08e8/main");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn few_and_small_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = PreprocessedDisk::new(tmp.path().to_path_buf());
+        // A player script beside them is never touched.
+        std::fs::write(tmp.path().join("9fcf08e8-main.js"), "player").unwrap();
+        for i in 0..5 {
+            d.write(&format!("{i:08x}/main"), "code", "pre");
+            // Distinct times, oldest first.
+            let f = std::fs::File::options().append(true).open(tmp.path().join(format!("{i:08x}-main.pre"))).unwrap();
+            f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i)).unwrap();
+        }
+        d.prune();
+        let kept: Vec<_> = d.files().into_iter().map(|f| f.2.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(kept, ["00000004-main.pre", "00000003-main.pre", "00000002-main.pre"]);
+        let big = "x".repeat(PREPROCESSED_MAX_BYTES as usize + 1);
+        d.write("0000000a/main", "code", &big);
+        assert_eq!(d.read("0000000a/main", "code"), None, "too large isn't kept");
+        d.clear();
+        assert!(d.files().is_empty());
+        assert!(tmp.path().join("9fcf08e8-main.js").exists());
+    }
 
     #[test]
     fn answers_are_kept_per_player_and_bounded() {

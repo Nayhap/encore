@@ -27,7 +27,7 @@ jobs:
           # The oldest Ubuntu we support: an AppImage only runs on systems
           # whose glibc is at least as new as the one it was built with.
           - os: ubuntu-22.04
-            args: --bundles deb,appimage
+            args: --bundles deb,rpm,appimage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +64,7 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           mv Encore.app.tar.gz "Encore_${v}_universal.app.tar.gz"
           mv Encore.app.tar.gz.sig "Encore_${v}_universal.app.tar.gz.sig"
-      - name: Self-test the AppImage and .deb
+      - name: Self-test the AppImage, .deb and .rpm
         if: runner.os == 'Linux'
         run: |
           scripts/self-test-bundle.sh appimage target/release/bundle/appimage/*.AppImage
@@ -72,6 +72,7 @@ jobs:
             scripts/self-test-bundle.sh appimage-in "$img" target/release/bundle/appimage/*.AppImage
           done
           scripts/self-test-bundle.sh deb target/release/bundle/deb/*.deb
+          scripts/self-test-bundle.sh rpm-in fedora:latest target/release/bundle/rpm/*.rpm
       - name: Self-test the app from the disk image (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -97,6 +98,7 @@ jobs:
             target/release/bundle/msi/*.msi
             target/release/bundle/msi/*.msi.sig
             target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error

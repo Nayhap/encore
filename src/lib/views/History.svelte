@@ -127,6 +127,7 @@
         <h2>{g.title}</h2>
         <TrackTable
           tracks={g.rows.map((r) => r.track)}
+          keys={g.rows.map((r) => r.rowId)}
           label="History"
           head={gi === 0}
           extraMenu={(i) => (g.rows[i]?.removable ? [{ label: "Remove from history", icon: "x", danger: true, run: () => remove(gi, i) }] : [])}

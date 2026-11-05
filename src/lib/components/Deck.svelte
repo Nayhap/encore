@@ -324,11 +324,15 @@
     gap: 12px;
     width: 100%;
   }
+  /* Its text changes every second; a box of its own size keeps that
+     layout inside it (D17). */
   .time {
     font-size: 11.5px;
     color: var(--mute);
     width: 34px;
+    height: 1.4em;
     flex: none;
+    contain: size layout;
   }
   .time:first-child {
     text-align: right;

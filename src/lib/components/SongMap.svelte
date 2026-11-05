@@ -178,7 +178,9 @@
       {#if mark != null && !band}
         <div class="mark" style:left={pct(mark)} title="Loop from {fmt(mark)}: press A again where it should end"></div>
       {/if}
-      <div class="head" style:left={pct(shown)}></div>
+      <!-- The playhead rides a full-width carriage moved by transform, so
+           playback never lays the bar out again (D17). -->
+      <div class="carriage" style:transform="translateX({(shown / track.dur) * 100}%)"><div class="head"></div></div>
 
       {#if hover}
         <div class="tip" style:left="{hover.x}px">
@@ -268,6 +270,7 @@
   .played {
     width: 100%;
     transform-origin: left;
+    will-change: transform;
     background: color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .seg {
@@ -305,8 +308,15 @@
   .map:focus-visible .seg.plain {
     height: 6px;
   }
+  .carriage {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    will-change: transform;
+  }
   .head {
     position: absolute;
+    left: 0;
     top: 50%;
     width: 3px;
     height: calc(var(--h-chorus) + 8px);

@@ -31,7 +31,7 @@ jobs:
           # The oldest Ubuntu we support: an AppImage only runs on systems
           # whose glibc is at least as new as the one it was built with.
           - os: ubuntu-22.04
-            bundles: deb,appimage
+            bundles: deb,rpm,appimage
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -122,6 +122,11 @@ jobs:
       - name: Self-test the .deb
         if: runner.os == 'Linux'
         run: scripts/self-test-bundle.sh deb target/release/bundle/deb/*.deb
+      # Installed with dnf on a fresh Fedora, so its dependencies resolve
+      # from Fedora's own names and its WebKitGTK is Fedora's.
+      - name: Self-test the .rpm on fresh Fedora
+        if: runner.os == 'Linux'
+        run: scripts/self-test-bundle.sh rpm-in fedora:latest target/release/bundle/rpm/*.rpm
       - name: Self-test the app (macOS)
         if: runner.os == 'macOS'
         run: scripts/self-test-bundle.sh app target/release/bundle/macos/Encore.app
@@ -137,5 +142,6 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
             target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
             target/release/bundle/appimage/*.AppImage
           if-no-files-found: error

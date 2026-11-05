@@ -27,6 +27,24 @@ pub use client::{Client, InnerTube};
 use pages::{Cont, Parsed};
 
 const CURSOR_TTL: Duration = Duration::from_secs(30 * 60);
+/// At most this many cursors, row tokens or dismissal tokens are kept:
+/// past it the oldest go (a page that old says "This list expired").
+const KEPT_MAX: usize = 4_000;
+/// Song/video pairs kept, the oldest going first.
+const PAIRS_MAX: usize = 512;
+
+/// Drops the oldest entries of `m` past `max`, by when each was made.
+fn cap_oldest<K: Clone + Eq + std::hash::Hash, V>(m: &mut HashMap<K, V>, max: usize, at: impl Fn(&V) -> Instant) {
+    if m.len() <= max {
+        return;
+    }
+    let mut by_age: Vec<(Instant, K)> = m.iter().map(|(k, v)| (at(v), k.clone())).collect();
+    by_age.sort_by_key(|x| x.0);
+    let n = m.len() - max;
+    for (_, k) in by_age.into_iter().take(n) {
+        m.remove(&k);
+    }
+}
 
 #[derive(Clone, Debug)]
 enum CursorKind {
@@ -62,8 +80,10 @@ impl Cursors {
         let cont = cont?;
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut m = self.map.lock();
-        m.retain(|_, r| r.at.elapsed() < CURSOR_TTL);
+        // Another account's cursors can never be used again (D2).
+        m.retain(|_, r| r.at.elapsed() < CURSOR_TTL && r.epoch == epoch);
         m.insert(id.clone(), CursorRec { kind, cont, epoch, at: Instant::now() });
+        cap_oldest(&mut m, KEPT_MAX, |r| r.at);
         Some(id)
     }
     fn take(&self, id: &str, epoch: u64) -> Result<CursorRec> {
@@ -87,8 +107,9 @@ impl RowTokens {
     fn put(&self, token: String, epoch: u64) -> String {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut m = self.map.lock();
-        m.retain(|_, r| r.2.elapsed() < CURSOR_TTL);
+        m.retain(|_, r| r.2.elapsed() < CURSOR_TTL && r.1 == epoch);
         m.insert(id.clone(), (token, epoch, Instant::now()));
+        cap_oldest(&mut m, KEPT_MAX, |r| r.2);
         id
     }
     fn get(&self, id: &str, epoch: u64) -> Option<String> {
@@ -115,10 +136,11 @@ impl Dismissals {
             return;
         }
         let mut m = self.map.lock();
-        m.retain(|_, r| r.2.elapsed() < DISMISSAL_TTL);
+        m.retain(|_, r| r.2.elapsed() < DISMISSAL_TTL && r.1 == epoch);
         for (id, t) in found {
             m.insert(id, (t, epoch, Instant::now()));
         }
+        cap_oldest(&mut m, KEPT_MAX, |r| r.2);
     }
     fn get(&self, video_id: &str, epoch: u64) -> Option<String> {
         self.map.lock().get(video_id).filter(|r| r.1 == epoch && r.2.elapsed() < DISMISSAL_TTL).map(|r| r.0.clone())
@@ -740,7 +762,11 @@ impl MusicService for YtMusic {
             found = self.counterpart_by_search(ctx, track).await?;
         }
         self.check(ctx)?;
-        self.pairs.lock().insert(key, (found.clone(), Instant::now()));
+        let mut pairs = self.pairs.lock();
+        pairs.retain(|_, (c, at)| at.elapsed() < if c.is_some() { PAIR_TTL } else { NO_PAIR_TTL });
+        pairs.insert(key, (found.clone(), Instant::now()));
+        cap_oldest(&mut pairs, PAIRS_MAX, |v| v.1);
+        drop(pairs);
         Ok(found)
     }
 
@@ -823,6 +849,30 @@ mod tests {
         let v = json!({ "playerConfig": { "audioConfig": { "loudnessDb": -3.25, "perceptualLoudnessDb": -17.25 } } });
         assert_eq!(loudness_of(&v), Some(-3.25));
         assert_eq!(loudness_of(&json!({ "playabilityStatus": { "status": "OK" } })), None);
+    }
+
+    #[test]
+    fn kept_maps_drop_their_oldest_past_the_limit() {
+        let t0 = Instant::now();
+        let mut m: HashMap<u32, Instant> = (0..10).map(|i| (i, t0 + Duration::from_millis(i as u64))).collect();
+        cap_oldest(&mut m, 6, |v| *v);
+        let mut left: Vec<u32> = m.into_keys().collect();
+        left.sort();
+        assert_eq!(left, [4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn another_accounts_cursors_and_tokens_are_dropped() {
+        let c = Cursors::default();
+        let cont = || Some(Cont::Body("t".into()));
+        let old = c.put(CursorKind::History, cont(), 1).unwrap();
+        let new = c.put(CursorKind::History, cont(), 2).unwrap();
+        assert!(c.map.lock().get(&old).is_none(), "epoch 1 can never be used again");
+        assert!(c.take(&new, 2).is_ok());
+        let r = RowTokens::default();
+        let a = r.put("a".into(), 1);
+        let b = r.put("b".into(), 2);
+        assert_eq!((r.get(&a, 1), r.get(&b, 2).as_deref()), (None, Some("b")));
     }
 
     #[test]

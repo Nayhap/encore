@@ -852,8 +852,7 @@ async fn play(svc: Arc<YtMusic>, video_id: &str, seek: Option<f64>, next: Option
         bail!("--report needs a connection; leave out --offline");
     }
     let resolver = cli_resolver(&svc);
-    // `$ENCORE_CACHE_DIR` keeps a test away from the running app's cache.
-    let cache_dir = std::env::var_os("ENCORE_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop")).join("audio");
+    let cache_dir = cache_dir().join("audio");
     let cache = encore_audio::AudioCache::new(&cache_dir, encore_audio::cache::DEFAULT_LIMIT)?;
     let it = svc.it.clone();
     let auth: encore_player::AuthProvider = Arc::new(move || encore_cli_auth(&it));
@@ -1091,13 +1090,25 @@ async fn downloads(svc: Arc<YtMusic>, cmd: DownloadsCmd, json: bool) -> Result<(
     Ok(())
 }
 
-/// The native resolver on the app's cache folder (player scripts only),
-/// with encore-ytm's visitor for signed-out resolves, as in the app.
+/// The native resolver on the app's cache folder (player scripts only), or
+/// `$ENCORE_DATA_DIR` / `$ENCORE_CACHE_DIR`, with encore-ytm's visitor for
+/// signed-out resolves, as in the app.
 fn cli_resolver(svc: &Arc<YtMusic>) -> Arc<encore_resolver::NativeResolver> {
-    let r = encore_resolver::NativeResolver::new(encore_resolver::ResolverConfig::default_paths());
+    let mut cfg = encore_resolver::ResolverConfig::default_paths();
+    if let Some(d) = std::env::var_os("ENCORE_DATA_DIR") {
+        cfg.data_dir = PathBuf::from(d);
+    }
+    cfg.cache_dir = cache_dir();
+    let r = encore_resolver::NativeResolver::new(cfg);
     let it = svc.it.clone();
     r.set_visitor_source(Arc::new(move || it.visitor_data()));
     r
+}
+
+/// The app's cache folder, or `$ENCORE_CACHE_DIR`, which keeps a test away
+/// from the running app's audio cache and player scripts.
+fn cache_dir() -> PathBuf {
+    std::env::var_os("ENCORE_CACHE_DIR").map(PathBuf::from).unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("app.encore.desktop"))
 }
 
 /// The app's data folder, or `$ENCORE_DATA_DIR` (tests that must not

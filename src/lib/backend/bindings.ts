@@ -1202,6 +1202,8 @@ export type InstallKind =
 "appImage" | 
 /**  Linux `.deb`: never updated by Encore, which links to the release instead. */
 "deb" | 
+/**  Linux `.rpm`: never updated by Encore either, the same as the `.deb`. */
+"rpm" | 
 /**  A development build. */
 "dev" | 
 /**  Not from an installer Encore knows. */

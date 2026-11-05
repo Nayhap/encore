@@ -18,7 +18,6 @@
 //! callback from taking up the preloaded deck ("sleep at the end of this
 //! song").
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -597,7 +596,6 @@ fn actor(
     let (wev_tx, wev_rx) = mpsc::channel::<WorkerEvent>();
     let mut current: Option<DeckInfo> = None;
     let mut next: Option<DeckInfo> = None;
-    let mut durations: HashMap<u64, Option<f64>> = HashMap::new();
     let mut was_starving = false;
     let mut last_dev_check = Instant::now();
     // An output error seen at this time, with the callback count then.
@@ -744,7 +742,6 @@ fn actor(
         while let Ok(ev) = wev_rx.try_recv() {
             match ev {
                 WorkerEvent::Ready { id, duration, codec, from_cache, .. } => {
-                    durations.insert(id, duration);
                     for d in [current.as_mut(), next.as_mut()].into_iter().flatten() {
                         if d.id == id {
                             d.duration = duration;

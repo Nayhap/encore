@@ -5,6 +5,7 @@
   import Cover from "./Cover.svelte";
   import DownloadMark from "./DownloadMark.svelte";
   import Icon from "./Icon.svelte";
+  import { uniqueKeys } from "./library-tools/logic";
 
   let {
     tracks,
@@ -22,6 +23,7 @@
     tag,
     groupStart,
     metric,
+    keys,
   }: {
     tracks: Track[];
     label: string;
@@ -47,7 +49,13 @@
     groupStart?: (i: number) => boolean;
     /** The value a list is sorted by, in the plays column's place. */
     metric?: { label: string; value: (i: number) => string | null };
+    /** A stable id per row (a playlist's entry ids), so finding and sorting
+     *  move rows rather than build them again. Without it, the track id. */
+    keys?: string[];
   } = $props();
+  // Keys must be unique: a repeated one (the same song twice, without entry
+  // ids) gets its occurrence after it.
+  const rowKeys = $derived(uniqueKeys(tracks.map((t, i) => keys?.[i] ?? t.id)));
   const numCol = $derived(showPlays || !!metric);
 
   const menuFor = (i: number) => {
@@ -95,7 +103,7 @@
     <span role="columnheader" class="r"><Icon name="clock" size={15} /></span>
     <span></span>
   </div>{/if}
-  {#each tracks as t, i (t.id + ":" + i)}
+  {#each tracks as t, i (rowKeys[i])}
     {@const id = t.id}
     {@const current = player.current?.id === id}
     {@const artist = t.artists.find((a) => a.id)}
@@ -277,6 +285,19 @@
     min-height: 56px;
     padding: 0 8px;
     border-radius: 8px;
+  }
+  /* Rows off screen skip style, layout and paint: a long list costs what is
+     on screen, its last measured height kept for the scrollbar. They stay
+     focusable and in the accessibility tree. */
+  .row:not(.head) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 56px;
+  }
+  /* That containment clips what a row draws outside itself: the drop line
+     while dragging, a group's separator. Those rows are drawn as usual. */
+  .row.over,
+  .row.group-start {
+    content-visibility: visible;
   }
   .row.head {
     min-height: 34px;

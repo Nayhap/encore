@@ -7,7 +7,24 @@ export function fold(s: string): string {
   return s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-const hay = (t: Track) => fold([t.title, ...t.artists.map((a) => a.name), t.album?.name ?? ""].join(" "));
+// Each track's folded text, made once rather than on every keystroke.
+const hays = new WeakMap<Track, string>();
+const hay = (t: Track) => {
+  let h = hays.get(t);
+  if (h == null) hays.set(t, (h = fold([t.title, ...t.artists.map((a) => a.name), t.album?.name ?? ""].join(" "))));
+  return h;
+};
+
+/** Keys for a keyed list: each id as it is, a repeated one with its
+ *  occurrence after it, so no two are the same. */
+export function uniqueKeys(ids: string[]): string[] {
+  const seen = new Map<string, number>();
+  return ids.map((k) => {
+    const n = seen.get(k) ?? 0;
+    seen.set(k, n + 1);
+    return n ? `${k}\u0000${n}` : k;
+  });
+}
 
 /** Rows whose title, artists or album hold every word of `query`. */
 export function find(entries: Entry[], query: string): Entry[] {

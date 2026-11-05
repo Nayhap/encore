@@ -12,6 +12,7 @@
 
 pub mod history;
 pub mod plays;
+mod saver;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -33,14 +34,18 @@ use encore_core::service::{Admission, LocalAudio, MusicService, PlayFailure, Pla
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
+pub use saver::SaveQueue;
+use saver::{Job, Planned, Saver, Slot, Write};
 pub use types::*;
 
 pub const PRELOAD_LEAD: f64 = 20.0;
 const MAX_AUTO_SKIPS: u32 = 3;
 const RADIO_LOW_WATER: usize = 3;
-/// How long a newly chosen song must stay chosen before its stream is
-/// resolved (see `play_current`).
+/// How long a song chosen right after another must stay chosen before its
+/// stream is resolved (see `play_current`).
 const SKIP_SETTLE: Duration = Duration::from_millis(400);
+/// How often running playback work checks that it is still wanted.
+const SUPERSEDED_CHECK: Duration = Duration::from_millis(150);
 const NOTHING_OFFLINE: &str = "You're offline, and nothing else in the queue is downloaded.";
 /// The shortest A–B loop (D26).
 pub const MIN_LOOP: f64 = 1.0;
@@ -87,6 +92,8 @@ struct State {
     queue_loading: bool,
     last_queue: Vec<QueueEntry>,
     last_queue_rev: u64,
+    /// The queue's `content` when `last_queue` was taken.
+    last_queue_content: u64,
     last_duration: Option<f64>,
     /// Bumped whenever radio results would no longer be wanted (Autoplay
     /// turned off, the queue replaced): a response for an older value is
@@ -98,6 +105,16 @@ struct State {
     ab_loop: Option<AbLoop>,
     /// The sleep timer (D26).
     sleep: Option<Sleep>,
+    /// When a song was last chosen (`play_current`), to tell a run of
+    /// skips from one choice.
+    chosen_at: Option<Instant>,
+}
+
+/// The position, length and playing flag at one engine read.
+struct Now {
+    position: f64,
+    duration: Option<f64>,
+    playing: bool,
 }
 
 struct AbLoop {
@@ -134,7 +151,8 @@ pub struct Player {
     tx: broadcast::Sender<PlayerEvent>,
     next_load: AtomicU64,
     rt: tokio::runtime::Handle,
-    on_persist: Mutex<Option<Box<dyn Fn(&Queue, f64) + Send + Sync>>>,
+    /// Where the queue is saved, and how (D6).
+    saver: Saver,
     preloaded_streams: Mutex<HashMap<u64, ResolvedStream>>,
     cache: Option<AudioCache>,
     /// Report plays to the service's history (a user setting, D18).
@@ -205,16 +223,18 @@ impl Player {
                 queue_loading: false,
                 last_queue: vec![],
                 last_queue_rev: 0,
+                last_queue_content: 0,
                 last_duration: None,
                 radio_gen: 0,
                 cycle: None,
                 ab_loop: None,
                 sleep: None,
+                chosen_at: None,
             }),
             tx,
             next_load: AtomicU64::new(1),
             rt: tokio::runtime::Handle::current(),
-            on_persist: Mutex::new(None),
+            saver: Saver::default(),
             preloaded_streams: Mutex::new(HashMap::new()),
             cache: cache_for_player,
             reporting: Arc::new(AtomicBool::new(false)),
@@ -503,8 +523,47 @@ impl Player {
         &self.engine
     }
 
-    pub fn on_persist(&self, f: impl Fn(&Queue, f64) + Send + Sync + 'static) {
-        *self.on_persist.lock() = Some(Box::new(f));
+    /// How the queue is saved. `f` returns whether the write was made; one
+    /// that wasn't is tried again on the next tick.
+    pub fn on_persist(&self, f: impl Fn(SaveQueue<'_>) -> bool + Send + Sync + 'static) {
+        self.saver.set_hook(Box::new(f));
+    }
+
+    /// Save the queue, as it is now, under `scope` from now on (`None`:
+    /// nowhere, as while signing out). What is there is taken to be this
+    /// queue already, so nothing is written until it changes. Returns once
+    /// a write on its way has landed: after `save_to(None)` nothing is
+    /// written anywhere, so the old place can be purged.
+    pub fn save_to(&self, scope: Option<String>) {
+        self.saver.replace(|| {
+            let st = self.st.lock();
+            (scope.map(|scope| Slot { scope, stamp: None, content: st.queue.content(), revision: st.queue.revision(), position: self.position_locked(&st) }), ())
+        });
+    }
+
+    /// Restore the queue saved under `scope`, paused, and save it there from
+    /// now on. `load` reads it (the queue, the position in its song and the
+    /// stamp of its whole write) after any write on its way has landed and
+    /// before another can start, so what it reads is the last one written.
+    /// With nothing saved, an empty queue (`empty`) or the queue as it is.
+    pub fn restore_saved(&self, scope: String, empty: bool, load: impl FnOnce() -> Option<(Queue, f64, Option<String>)>) {
+        let restored = self.saver.replace(|| {
+            let (queue, position, stamp) = match load() {
+                Some(saved) => saved,
+                None if empty => (Queue::default(), 0.0, None),
+                None => {
+                    let st = self.st.lock();
+                    let slot = Slot { scope, stamp: None, content: st.queue.content(), revision: st.queue.revision(), position: self.position_locked(&st) };
+                    return (Some(slot), false);
+                }
+            };
+            let slot = Slot { scope, stamp, content: queue.content(), revision: queue.revision(), position: position.max(0.0) };
+            self.install(queue, position);
+            (Some(slot), true)
+        });
+        if restored {
+            self.restored();
+        }
     }
 
     /// Before Encore quits or installs an update (D24): pause, drop what
@@ -541,28 +600,40 @@ impl Player {
         self.closed.store(false, Ordering::SeqCst);
     }
 
+    /// Write what changed since the last write (see `Slot`).
     fn persist(&self) {
-        let (q, pos) = {
+        self.saver.persist(|slot| {
             let st = self.st.lock();
-            (st.queue.clone(), self.position_locked(&st))
-        };
-        if let Some(f) = self.on_persist.lock().as_ref() {
-            f(&q, pos);
-        }
+            let position = self.position_locked(&st);
+            let (content, revision) = (st.queue.content(), st.queue.revision());
+            let at = st.queue.checkpoint();
+            let job = match (slot.write(content, revision, position, at.is_some()), at) {
+                (Write::Nothing, _) => return None,
+                (Write::Checkpoint, Some(c)) => Job::Checkpoint(c),
+                _ => Job::Full(st.queue.clone()),
+            };
+            Some(Planned { job, content, revision, position })
+        });
     }
 
     /// Restore a saved queue, paused at `position` (never auto-plays).
     pub fn restore(&self, queue: Queue, position: f64) {
-        {
-            let mut st = self.st.lock();
-            st.queue = queue;
-            st.pending_pos = position.max(0.0);
-            st.last_duration = st.queue.current().and_then(|c| c.track.duration);
-            st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
-            st.track_gen += 1;
-            st.radio_gen += 1;
-            st.cycle = None;
-        }
+        self.install(queue, position);
+        self.restored();
+    }
+
+    fn install(&self, queue: Queue, position: f64) {
+        let mut st = self.st.lock();
+        st.queue = queue;
+        st.pending_pos = position.max(0.0);
+        st.last_duration = st.queue.current().and_then(|c| c.track.duration);
+        st.phase = if st.queue.current().is_some() { Phase::Paused } else { Phase::Idle };
+        st.track_gen += 1;
+        st.radio_gen += 1;
+        st.cycle = None;
+    }
+
+    fn restored(&self) {
         self.publish(true);
         let cur = self.st.lock().queue.current().cloned();
         let _ = self.tx.send(PlayerEvent::TrackChanged(cur));
@@ -874,21 +945,33 @@ impl Player {
         }
     }
 
+    /// Position, length and whether it plays, from one engine status read.
+    fn now_locked(st: &State, es: &encore_audio::engine::EngineStatus) -> Now {
+        let loaded_now = st.loaded.as_ref().is_some_and(|l| l.load_id == es.id);
+        Now {
+            position: if loaded_now { es.position } else { st.pending_pos },
+            duration: if loaded_now { es.duration.or(st.last_duration) } else { st.last_duration }.or_else(|| st.queue.current().and_then(|c| c.track.duration)),
+            playing: matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading) && !es.paused,
+        }
+    }
+
+    fn anchor_locked(st: &State, now: &Now) -> PositionAnchor {
+        PositionAnchor { track_gen: s(st.track_gen), seek_gen: s(st.seek_gen), position: now.position, duration: now.duration, playing: now.playing && st.phase == Phase::Playing }
+    }
+
     fn snapshot_locked(&self, st: &State) -> PlayerSnapshot {
         let es = self.engine.status();
-        let cur = st.queue.current().cloned();
-        let loaded_now = st.loaded.as_ref().is_some_and(|l| l.load_id == es.id);
-        let duration = if loaded_now { es.duration.or(st.last_duration) } else { st.last_duration }.or_else(|| cur.as_ref().and_then(|c| c.track.duration));
+        let now = Self::now_locked(st, &es);
         PlayerSnapshot {
             revision: s(st.revision),
             track_gen: s(st.track_gen),
             seek_gen: s(st.seek_gen),
             phase: st.phase,
-            playing: matches!(st.phase, Phase::Playing | Phase::Buffering | Phase::Loading) && !es.paused,
-            current: cur,
+            playing: now.playing,
+            current: st.queue.current().cloned(),
             index: st.queue.index().map(|i| i as u32),
-            position: self.position_locked(st),
-            duration,
+            position: now.position,
+            duration: now.duration,
             shuffle: st.queue.shuffle,
             repeat: st.queue.repeat,
             autoplay: st.queue.autoplay,
@@ -929,8 +1012,8 @@ impl Player {
 
     pub fn anchor(&self) -> PositionAnchor {
         let st = self.st.lock();
-        let snap = self.snapshot_locked(&st);
-        PositionAnchor { track_gen: snap.track_gen, seek_gen: snap.seek_gen, position: snap.position, duration: snap.duration, playing: snap.playing && st.phase == Phase::Playing }
+        let now = Self::now_locked(&st, &self.engine.status());
+        Self::anchor_locked(&st, &now)
     }
 
     /// Emit state (and a queue splice if the queue changed).
@@ -941,12 +1024,20 @@ impl Player {
             st.revision += 1;
             let snap = self.snapshot_locked(&st);
             let qrev = st.queue.revision();
-            let splice = if force_queue || qrev != st.last_queue_rev {
+            let splice = if !force_queue && qrev != st.last_queue_rev && st.queue.content() == st.last_queue_content {
+                // Only another entry playing (next, previous, a jump, a song
+                // ending): the entries are as last sent, so the splice is
+                // empty and nothing is copied or compared.
+                let sp = QueueSplice { base: s(st.last_queue_rev), revision: s(qrev), start: st.last_queue.len() as u32, delete: 0, insert: vec![], index: st.queue.index().map(|i| i as u32) };
+                st.last_queue_rev = qrev;
+                Some(sp)
+            } else if force_queue || qrev != st.last_queue_rev {
                 let new = st.queue.entries().to_vec();
                 let (start, delete, insert) = diff(&st.last_queue, &new);
                 let sp = QueueSplice { base: s(st.last_queue_rev), revision: s(qrev), start: start as u32, delete: delete as u32, insert, index: st.queue.index().map(|i| i as u32) };
                 st.last_queue = new;
                 st.last_queue_rev = qrev;
+                st.last_queue_content = st.queue.content();
                 Some(sp)
             } else {
                 None
@@ -995,8 +1086,10 @@ impl Player {
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
-        let (uid, vid, my_gen) = {
+        let (uid, vid, my_gen, burst) = {
             let mut st = self.st.lock();
+            // Chosen within SKIP_SETTLE of the last choice: part of a run.
+            let burst = st.chosen_at.replace(Instant::now()).is_some_and(|t| t.elapsed() < SKIP_SETTLE);
             let Some(cur) = st.queue.current().cloned() else {
                 st.phase = Phase::Idle;
                 drop(st);
@@ -1011,7 +1104,7 @@ impl Player {
             st.loaded = None;
             st.last_duration = cur.track.duration;
             // A preloaded deck for this entry can be promoted directly.
-            (cur.uid.clone(), cur.track.id.remote().to_string(), st.track_gen)
+            (cur.uid.clone(), cur.track.id.remote().to_string(), st.track_gen, burst)
         };
         self.publish(false);
         let cur = self.st.lock().queue.current().cloned();
@@ -1040,9 +1133,11 @@ impl Player {
             }
             // Pressing Next several times in a row used to resolve every song
             // passed over, one after another (seconds each, two at a time),
-            // so the song the user stopped on started last. Wait a moment
-            // and give up if another song was chosen meanwhile.
-            if local.is_none() && promoted.is_none() {
+            // so the song the user stopped on started last. A song chosen
+            // right after another waits a moment and gives up if another
+            // was chosen meanwhile; one chosen on its own (Play, a single
+            // Next, the end of a song) resolves at once.
+            if local.is_none() && promoted.is_none() && burst {
                 tokio::time::sleep(SKIP_SETTLE).await;
                 if me.st.lock().track_gen != my_gen {
                     return;
@@ -1051,9 +1146,18 @@ impl Player {
             let (res, path) = match local {
                 Some((s, p)) => (Ok(s), Some(p)),
                 None => {
+                    // Another song chosen meanwhile stops this one's resolve
+                    // (its requests and any challenge solve), not just its
+                    // result. Another caller waiting on the same song's
+                    // resolve then runs its own (the resolver's single flight
+                    // hands the turn on; nothing is shared from a stopped one).
+                    let gone = |st: &State| st.track_gen != my_gen;
                     let res = {
                         let _busy = me.gate.enter();
-                        me.resolve_as_now(&vid).await
+                        tokio::select! {
+                            r = me.resolve_as_now(&vid) => r,
+                            _ = me.superseded(gone) => return,
+                        }
                     };
                     // A preroll (D37): said, and waited out without holding
                     // the gate, so downloads and paging go on meanwhile.
@@ -1062,7 +1166,11 @@ impl Player {
                             if let Some(secs) = s.wait_secs().filter(|&w| w >= 3) {
                                 let _ = me.tx.send(PlayerEvent::Notice(format!("This song starts in {secs} seconds: YouTube holds it back for the length of an ad.")));
                             }
-                            let r = me.resolver.ready(s, (me.auth)().as_ref()).await;
+                            let auth = (me.auth)();
+                            let r = tokio::select! {
+                                r = me.resolver.ready(s, auth.as_ref()) => r,
+                                _ = me.superseded(gone) => return,
+                            };
                             if me.st.lock().track_gen != my_gen {
                                 return;
                             }
@@ -1093,6 +1201,7 @@ impl Player {
                         st.decks.insert(load_id, uid.clone());
                         st.last_duration = stream.duration.or(st.last_duration);
                         st.loaded = Some(Loaded { load_id, uid: uid.clone(), stream, from_cache: false });
+                        me.prune_decks(&mut st);
                         let start = st.pending_pos;
                         drop(st);
                         if promoted.is_none() {
@@ -1302,19 +1411,23 @@ impl Player {
         }
         self.expire_private();
         self.sleep_tick();
-        let (phase, pos, dur, upcoming, need_radio) = {
+        // One engine read and no snapshot: the anchor and every decision
+        // below come from the same moment.
+        let (phase, anchor, now, upcoming, need_radio) = {
             let st = self.st.lock();
-            let snap = self.snapshot_locked(&st);
+            let now = Self::now_locked(&st, &self.engine.status());
             let ok = self.avail();
             // Nothing is preloaded while a loop runs or the sleep timer
             // stops after this song (D26).
-            let up = if snap.ab_loop.is_some() || Self::sleep_holds(&st) { None } else { st.queue.upcoming_where(&ok).cloned() };
+            let looping = st.ab_loop.as_ref().is_some_and(|l| l.track_gen == st.track_gen);
+            let up = if looping || Self::sleep_holds(&st) { None } else { st.queue.upcoming_where(&ok).cloned() };
             let until_end = matches!(st.sleep, Some(Sleep::EndOfQueue));
             let need_radio = st.queue.autoplay && !until_end && st.queue.repeat == Repeat::Off && st.queue.remaining() < RADIO_LOW_WATER && !st.radio_loading && st.radio_empty < 3 && st.queue.current().is_some() && !st.queue_loading && self.online();
-            (st.phase, snap.position, snap.duration, up, need_radio)
+            (st.phase, Self::anchor_locked(&st, &now), now, up, need_radio)
         };
+        let (pos, dur) = (now.position, now.duration);
         if matches!(phase, Phase::Playing | Phase::Buffering) {
-            self.send_anchor();
+            let _ = self.tx.send(PlayerEvent::Position(anchor));
         }
         if need_radio && matches!(phase, Phase::Playing) {
             let me = self.clone();
@@ -1338,6 +1451,14 @@ impl Player {
         }
     }
 
+    /// Forget the decks that are neither loaded nor preloaded now: their
+    /// entry and stream (a signed URL) are never asked for again.
+    fn prune_decks(&self, st: &mut State) {
+        let live = [st.loaded.as_ref().map(|l| l.load_id), st.preload.as_ref().map(|p| p.1)];
+        st.decks.retain(|id, _| live.contains(&Some(*id)));
+        self.preloaded_streams.lock().retain(|id, _| live.contains(&Some(*id)));
+    }
+
     /// Resolve as whoever is signed in now. A result that comes back after
     /// the account or channel changed belongs to the old identity (D2): it
     /// is dropped and the song resolved again as the new one.
@@ -1356,20 +1477,47 @@ impl Player {
         self.resolver.resolve(vid, auth.as_ref()).await
     }
 
+    /// Returns once `gone` holds, checked a few times a second: for work
+    /// to stop when what it was for is no longer wanted.
+    async fn superseded(&self, gone: impl Fn(&State) -> bool) {
+        loop {
+            tokio::time::sleep(SUPERSEDED_CHECK).await;
+            if gone(&self.st.lock()) {
+                return;
+            }
+        }
+    }
+
+    /// Whether `uid` is no longer the entry that plays next.
+    fn not_next(&self, st: &State, uid: &str) -> bool {
+        st.queue.upcoming_where(&self.avail()).map(|u| u.uid.as_str()) != Some(uid)
+    }
+
     async fn preload(self: &Arc<Self>, entry: QueueEntry) {
         let vid = entry.track.id.remote().to_string();
         let (res, path) = match self.local_source(&vid) {
             Some((s, p)) => (Ok(s), Some(p)),
             None if !self.online() => (Err(PlayFailure::new(PlayFailureKind::Network, "offline")), None),
             None => {
-                let res = {
-                    let _busy = self.gate.enter();
-                    self.resolve_as_now(&vid).await
+                // Stopped when this entry stops being the next one.
+                let gone = |st: &State| self.not_next(st, &entry.uid);
+                let res = async {
+                    let res = {
+                        let _busy = self.gate.enter();
+                        self.resolve_as_now(&vid).await
+                    };
+                    // The preroll is waited out here, without the gate (D37).
+                    match res {
+                        Ok(s) => self.resolver.ready(s, (self.auth)().as_ref()).await,
+                        e => e,
+                    }
                 };
-                // The preroll is waited out here, without the gate (D37).
-                let res = match res {
-                    Ok(s) => self.resolver.ready(s, (self.auth)().as_ref()).await,
-                    e => e,
+                let res = tokio::select! {
+                    r = res => r,
+                    _ = self.superseded(gone) => {
+                        self.st.lock().preloading = false;
+                        return;
+                    }
                 };
                 (res, None)
             }
@@ -1394,6 +1542,7 @@ impl Player {
             st.decks.insert(load_id, entry.uid.clone());
             st.preload = Some((entry.uid.clone(), load_id));
             st.preload_local = path.is_some();
+            self.prune_decks(&mut st);
             let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
             let spec = match path {
                 Some(p) => SourceSpec::File(p),
@@ -1421,7 +1570,12 @@ impl Player {
         tokio::spawn(async move {
             let auth = (me.auth)();
             let _busy = me.gate.enter();
-            let _ = me.resolver.resolve(up.track.id.remote(), auth.as_ref()).await;
+            // Given up when another entry comes next (the queue changed).
+            let gone = |st: &State| st.queue.upcoming().map(|u| u.uid.as_str()) != Some(up.uid.as_str());
+            tokio::select! {
+                _ = me.resolver.resolve(up.track.id.remote(), auth.as_ref()) => {}
+                _ = me.superseded(gone) => {}
+            }
         });
     }
 
@@ -1502,6 +1656,7 @@ impl Player {
                             let stream = self.preloaded_streams.lock().remove(&to);
                             st.last_duration = stream.as_ref().and_then(|s| s.duration).or(st.queue.current().and_then(|c| c.track.duration));
                             st.loaded = stream.map(|stream| Loaded { load_id: to, uid: now_uid.clone().unwrap_or_default(), stream, from_cache: false });
+                            self.prune_decks(&mut st);
                             (true, passed)
                         } else {
                             (false, passed)

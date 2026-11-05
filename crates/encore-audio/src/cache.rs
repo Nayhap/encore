@@ -4,12 +4,19 @@
 //! `.part` file). Partial downloads are discarded when their source is dropped.
 //! Eviction removes the least recently used files until the cache is under its
 //! byte limit. Files that are currently open are never evicted.
+//!
+//! Which videos have a file is kept in memory (one folder read, then
+//! followed through installs, eviction and clearing), so looking a song up
+//! before playing it costs no folder read. A file gone from under it (the
+//! system purging caches) is noticed when it is looked up; the folder is
+//! read again on a miss at most every few minutes, for files another
+//! Encore (the CLI) put there.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 
@@ -24,6 +31,45 @@ struct Inner {
     dir: PathBuf,
     limit: u64,
     open: Mutex<HashSet<String>>,
+    index: Mutex<Index>,
+}
+
+/// How often a miss may read the folder again.
+const RESCAN: Duration = Duration::from_secs(300);
+
+/// Complete files by video id: the format ids each has.
+#[derive(Default)]
+struct Index {
+    videos: HashMap<String, Vec<u32>>,
+    read_at: Option<Instant>,
+}
+
+impl Index {
+    fn add(&mut self, key: &str) {
+        if let Some((vid, itag)) = split_key(key) {
+            let v = self.videos.entry(vid.to_string()).or_default();
+            if !v.contains(&itag) {
+                v.push(itag);
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some((vid, itag)) = split_key(key)
+            && let Some(v) = self.videos.get_mut(vid)
+        {
+            v.retain(|&i| i != itag);
+            if v.is_empty() {
+                self.videos.remove(vid);
+            }
+        }
+    }
+}
+
+/// `<videoId>-<itag>`, the key of a song's file.
+fn split_key(key: &str) -> Option<(&str, u32)> {
+    let (vid, itag) = key.rsplit_once('-')?;
+    Some((vid, itag.parse().ok()?))
 }
 
 /// Cache keys are built from the video id and format id; anything else is
@@ -51,7 +97,7 @@ impl AudioCache {
                 }
             }
         }
-        Ok(Self { inner: Arc::new(Inner { dir, limit, open: Mutex::new(HashSet::new()) }) })
+        Ok(Self { inner: Arc::new(Inner { dir, limit, open: Mutex::new(HashSet::new()), index: Mutex::new(Index::default()) }) })
     }
 
     pub fn dir(&self) -> &Path {
@@ -88,19 +134,35 @@ impl AudioCache {
     /// A complete cached file for a video, whatever format it was: returns
     /// (path, format id).
     pub fn find_video(&self, video_id: &str) -> Option<(PathBuf, u32)> {
-        let prefix = format!("{}-", sanitize_key(video_id)?);
-        let rd = fs::read_dir(&self.inner.dir).ok()?;
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".audio")) {
-                if let Ok(itag) = rest.parse::<u32>() {
-                    let p = e.path();
-                    touch(&p);
-                    return Some((p, itag));
+        let vid = sanitize_key(video_id)?;
+        let mut ix = self.inner.index.lock();
+        if ix.read_at.is_none_or(|t| t.elapsed() > RESCAN && !ix.videos.contains_key(&vid)) {
+            self.read_index(&mut ix);
+        }
+        let itags = ix.videos.get(&vid)?.clone();
+        for itag in itags {
+            let p = self.complete_path(&format!("{vid}-{itag}"));
+            if p.is_file() {
+                touch(&p);
+                return Some((p, itag));
+            }
+            ix.remove(&format!("{vid}-{itag}"));
+        }
+        None
+    }
+
+    /// The index from the folder.
+    fn read_index(&self, ix: &mut Index) {
+        ix.videos.clear();
+        ix.read_at = Some(Instant::now());
+        if let Ok(rd) = fs::read_dir(&self.inner.dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(key) = name.strip_suffix(".audio") {
+                    ix.add(key);
                 }
             }
         }
-        None
     }
 
     pub fn mark_open(&self, key: &str) {
@@ -120,6 +182,7 @@ impl AudioCache {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(0o600));
         }
+        self.inner.index.lock().add(&key);
         self.evict();
         Ok(dst)
     }
@@ -161,6 +224,7 @@ impl AudioCache {
             }
             if fs::remove_file(&p).is_ok() {
                 total = total.saturating_sub(len);
+                self.inner.index.lock().remove(&key);
             }
         }
     }
@@ -169,8 +233,8 @@ impl AudioCache {
         let open = self.inner.open.lock().clone();
         for (p, _, _) in self.entries() {
             let key = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-            if !open.contains(&key) {
-                let _ = fs::remove_file(p);
+            if !open.contains(&key) && fs::remove_file(p).is_ok() {
+                self.inner.index.lock().remove(&key);
             }
         }
     }
@@ -206,6 +270,29 @@ mod tests {
         assert!(c.install("abc-140", &part).is_ok());
         assert!(c.lookup("abc-140").is_some());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn songs_are_found_without_reading_the_folder() {
+        let dir = std::env::temp_dir().join(format!("encore-cache-index-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let c = AudioCache::new(&dir, 1 << 30).unwrap();
+        // A file there before: found by the first lookup's folder read.
+        fs::write(dir.join("aaaaaaaaaaa-140.audio"), b"x").unwrap();
+        assert_eq!(c.find_video("aaaaaaaaaaa").map(|f| f.1), Some(140));
+        // Installed later: found from the index.
+        let part = c.part_path("bbbbbbbbbbb-251");
+        fs::write(&part, b"y").unwrap();
+        c.install("bbbbbbbbbbb-251", &part).unwrap();
+        assert_eq!(c.find_video("bbbbbbbbbbb").map(|f| f.1), Some(251));
+        // A file purged from under it is not answered.
+        fs::remove_file(dir.join("bbbbbbbbbbb-251.audio")).unwrap();
+        assert!(c.find_video("bbbbbbbbbbb").is_none());
+        // Cleared: gone from the index too.
+        c.clear();
+        assert!(c.find_video("aaaaaaaaaaa").is_none());
+        assert!(c.inner.index.lock().videos.is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

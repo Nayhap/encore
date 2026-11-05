@@ -11,6 +11,7 @@
   import { commands } from "./backend/bindings";
   import { isMac } from "./platform";
   import { catalog } from "./catalog.svelte";
+  import { fadeHue } from "./hue";
   import { account, connect, downloads, nav, player, ui, updates } from "./state.svelte";
   import Deck from "./components/Deck.svelte";
   import Overlays from "./components/Overlays.svelte";
@@ -121,10 +122,7 @@
   $effect(() => {
     const tr = player.current;
     if (!tr) return;
-    const [h1, h2] = catalog.hue(tr.art, tr.id);
-    const root = document.documentElement.style;
-    root.setProperty("--h", String(h1));
-    root.setProperty("--h2", String(h2));
+    fadeHue(catalog.hue(tr.art, tr.id));
   });
 
   function lyricJump(dir: 1 | -1) {

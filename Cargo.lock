@@ -1458,6 +1458,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "webkit2gtk",
  "windows-sys 0.61.2",
 ]
 
@@ -1612,6 +1613,7 @@ version = "0.6.2"
 dependencies = [
  "async-trait",
  "encore-core",
+ "parking_lot 0.13.0",
  "reqwest",
  "serde",
  "serde_json",

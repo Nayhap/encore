@@ -116,7 +116,7 @@ asking again is how an address gets flagged.
 - **Only https audio formats.** No HLS, DASH manifests, SABR, live or OTF.
 - **The solver runs in-process** on QuickJS-ng with memory, stack and time
   limits, a fresh runtime per solve, and the preprocessed player kept in
-  memory (yt-dlp keeps none).
+  memory and on disk across launches (yt-dlp keeps none).
 - **Failures are kinds** (D4), not yt-dlp's error text.
 - **A preroll wait over 15 s** makes Encore try the next client first, and
   the wait itself happens in `StreamResolver::ready`, outside the resolve.

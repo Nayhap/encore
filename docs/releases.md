@@ -12,7 +12,10 @@ the app. Check before you publish.
    differ from the tag).
 2. Write `.github/release-notes/v<version>.md`. The **What's new** and
    **Fixes** sections are what Encore shows in its update sheet, as plain
-   bullets: keep each bullet one sentence or two.
+   bullets: keep each bullet one sentence or two. Its **Download** table
+   names one file per system, as the last release's does, with a row for
+   `Encore-<version>-1.x86_64.rpm` (Fedora 40+, other RPM distributions
+   with glibc 2.35+).
 3. Push the tag (`v0.5.0`). `release.yml` builds and signs every platform,
    self-tests each bundle, writes `latest.json` and attaches everything to a
    draft. A tag with a dash (`v0.5.0-rc.1`) becomes a pre-release, which
@@ -24,10 +27,14 @@ the app. Check before you publish.
 
 - The build jobs and their self-tests are green on all three systems.
 - The draft has `latest.json`, the `.dmg`, `.app.tar.gz`, `-setup.exe`,
-  `.msi`, `.deb`, `.AppImage` and a `.sig` for each updater package. (The
-  `release` job fails without them, and if a signature doesn't verify.)
+  `.msi`, `.deb`, `.rpm`, `.AppImage` and a `.sig` for each updater package.
+  (The `release` job fails without the updater packages, and if a signature
+  doesn't verify. The `.deb` and `.rpm` have no `.sig` there: Encore never
+  installs them itself, and the Linux build job fails without them.)
 - Install the new macOS, Windows and Linux builds over the previous release
-  once, by hand, and play a song.
+  once, by hand, and play a song. On Linux that is the AppImage, the `.deb`
+  (`sudo apt install ./…deb`) and the `.rpm` on Fedora (`sudo dnf install
+  ./…rpm`).
 - The notes read well, and say what users have to do (a Keychain prompt,
   Smart App Control, a moved setting).
 - Anything that changes stored data (the database, settings, downloads)

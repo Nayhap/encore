@@ -66,7 +66,8 @@ changed something only a newer Encore can follow (D37).
 
 For updates (D24), an automatic check runs 3 seconds in: `?update` finds
 Encore 0.5.0 and downloads it, `?update-manual` has automatic updates off,
-`?update-deb` is a `.deb` install (a link instead of an update),
+`?update-deb` and `?update-rpm` are a `.deb` and an `.rpm` install (a
+link instead of an update),
 `?update-fail` makes checks fail, `?update-translocated` runs from a
 translocated copy on macOS, and `?updated` starts just after an update,
 with its "What's new".
@@ -96,7 +97,7 @@ that arrive a page at a time. Tidewalker's page shows a Wikipedia summary.
 ```sh
 bun run tauri build --bundles app           # macOS: bundle/macos/Encore.app
 bun run tauri build --bundles nsis,msi      # Windows: bundle/nsis/*-setup.exe, bundle/msi/*.msi
-bun run tauri build --bundles deb,appimage  # Linux: bundle/deb/*.deb, bundle/appimage/*.AppImage
+bun run tauri build --bundles deb,rpm,appimage  # Linux: bundle/deb/*.deb, bundle/rpm/*.rpm, bundle/appimage/*.AppImage
 ```
 
 Bundles land in `target/release/bundle/`. CI builds all three on every pull
@@ -153,7 +154,7 @@ failure unless you add `--strict`; on Windows add `--out report.json`, since
 release builds have no console.
 
 `scripts/self-test-bundle.sh` (`appimage`, `appimage-in <docker image>`,
-`deb`, `app`) and `scripts/self-test-bundle.ps1` (the NSIS installer) run it
+`deb`, `rpm-in <docker image>`, `app`) and `scripts/self-test-bundle.ps1` (the NSIS installer) run it
 from the installed artifact, as users get it. CI runs them on every pull
 request and the release workflow before it drafts a release.
 
@@ -204,8 +205,9 @@ $C play 4D7u5KF7SP8 --offline        # from the downloads only, no YouTube
 `resolve` runs signed out unless given `--auth session`; `play` and
 `downloads` use the stored session unless given `--auth anonymous`, which
 never reads the Keychain. `ENCORE_DATA_DIR` and `ENCORE_CACHE_DIR` point the
-CLI's database, downloads and audio cache somewhere else, so a test leaves
-the app's own alone (and a running Encore's cache untouched):
+CLI's database, downloads, audio cache and the resolver's player scripts
+somewhere else, so a test leaves the app's own alone (and a running
+Encore's cache untouched):
 
 ```sh
 ENCORE_DATA_DIR=/tmp/e ENCORE_CACHE_DIR=/tmp/e $C --auth anonymous downloads add 52fNscjkST4
@@ -224,7 +226,7 @@ cookies, tokens or tracking URLs.
 | Backups of the database (the newest three, daily and before an update changes it) | `~/Library/Application Support/app.encore.desktop/backups/` | `%LOCALAPPDATA%\app.encore.desktop\backups\` | `~/.local/share/app.encore.desktop/backups/` |
 | Folder covers you picked | `~/Library/Application Support/app.encore.desktop/covers/` | `%LOCALAPPDATA%\app.encore.desktop\covers\` | `~/.local/share/app.encore.desktop/covers/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
-| Audio (1 GB) and artwork (256 MB) caches, the player scripts the resolver solves against (`player/`, three at most), a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `player\`, `updates\`) | `~/.cache/app.encore.desktop/` |
+| Audio (1 GB) and artwork (256 MB) caches, the player scripts the resolver solves against and their preprocessed copies (`player/`, three of each at most), a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `player\`, `updates\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
@@ -288,8 +290,8 @@ All systems:
 - Downloading many songs in a row can still make YouTube ask for a bot
   check. Downloads then wait 10 minutes, then 30, then stop until you try
   again.
-- Installs from the `.deb` don't update themselves; Encore links to the
-  new release instead.
+- Installs from the `.deb` or `.rpm` don't update themselves; Encore links
+  to the new release instead.
 
 macOS:
 
@@ -314,8 +316,13 @@ Linux:
 - Without a Secret Service, Encore can't keep a session and says so when you
   sign in.
 - If the window goes blank or closes by itself at start, WebKit's DMA-BUF
-  renderer may be failing on your graphics driver. The AppImage turns it off
-  already; for the `.deb`, start Encore with
-  `WEBKIT_DISABLE_DMABUF_RENDERER=1 encore`. If it still happens, add
+  renderer may be failing on your graphics driver. The AppImage hands frames
+  over through shared memory, and if WebKit still crashes it restarts once
+  with the renderer off, until the next version (the log's `webkit renderer`
+  line says which; delete `webkit-software` in the data folder to try
+  again). For the `.deb` or `.rpm`, start Encore with
+  `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 encore`, and if that doesn't help,
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1 encore` (slower: everything is painted
+  on the CPU). If it still happens, add
   `WEBKIT_DISABLE_COMPOSITING_MODE=1` and tell us.
 - Closing the window quits Encore.
