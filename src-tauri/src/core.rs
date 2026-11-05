@@ -449,12 +449,12 @@ impl Core {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let scope = self.account_scope();
-        if !self.connectivity.online() {
-            if let Ok(Some((mut v, _, _))) = self.store.get_any::<T>(&scope, key) {
-                strip(&mut v);
-                self.connectivity.check();
-                return Ok(v);
-            }
+        if !self.connectivity.online()
+            && let Ok(Some((mut v, _, _))) = self.store.get_any::<T>(&scope, key)
+        {
+            strip(&mut v);
+            self.connectivity.check();
+            return Ok(v);
         }
         let flight = format!("{scope}\u{1f}{key}\u{1f}{}\u{1f}{}\u{1f}{}", std::any::type_name::<T>(), self.ytm.context().epoch, self.writes.load(std::sync::atomic::Ordering::SeqCst));
         let shared = self

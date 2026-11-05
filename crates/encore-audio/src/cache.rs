@@ -55,12 +55,12 @@ impl Index {
     }
 
     fn remove(&mut self, key: &str) {
-        if let Some((vid, itag)) = split_key(key) {
-            if let Some(v) = self.videos.get_mut(vid) {
-                v.retain(|&i| i != itag);
-                if v.is_empty() {
-                    self.videos.remove(vid);
-                }
+        if let Some((vid, itag)) = split_key(key)
+            && let Some(v) = self.videos.get_mut(vid)
+        {
+            v.retain(|&i| i != itag);
+            if v.is_empty() {
+                self.videos.remove(vid);
             }
         }
     }

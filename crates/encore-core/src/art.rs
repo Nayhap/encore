@@ -80,6 +80,9 @@ fn reg() -> &'static RwLock<Registry> {
     R.get_or_init(|| RwLock::new(Registry::new(CAP)))
 }
 
+/// A key's row in the index: its URL and hue.
+type Row = (String, Option<(u16, u16)>);
+
 fn index() -> &'static OnceLock<Arc<Store>> {
     static S: OnceLock<Arc<Store>> = OnceLock::new();
     &S
@@ -122,7 +125,7 @@ fn keep(key: String, e: ArtEntry) -> ArtEntry {
 /// they are.
 fn spill(gone: Vec<(String, ArtEntry)>) {
     let Some(store) = index().get().cloned() else { return };
-    let rows: Vec<(String, (String, Option<(u16, u16)>))> = gone.into_iter().map(|(k, e)| (k, (e.base, e.hue))).collect();
+    let rows: Vec<(String, Row)> = gone.into_iter().map(|(k, e)| (k, (e.base, e.hue))).collect();
     let _ = std::thread::Builder::new().name("encore-art-index".into()).spawn(move || {
         if let Err(e) = store.put_absent("art", &rows, Some(SPILL_TTL)) {
             tracing::warn!(error = %e.message, "couldn't save artwork keys");
