@@ -1,7 +1,8 @@
 //! The solver corpus (D37): every player and variant of yt-dlp-ejs's own
 //! tests (`src/yt/solver/test/tests.ts` at the ejs commit in
 //! `upstream.toml`) and yt-dlp's `test/test_jsc/test_ejs_integration.py`,
-//! solved by the embedded engine cold and from the preprocessed player.
+//! solved by the embedded engine cold, from the preprocessed player, and
+//! from the preprocessed player saved on disk (as after a relaunch).
 //!
 //! The players are YouTube's code, so they are not committed: they are
 //! fetched once from `www.youtube.com/s/player/…` into
@@ -112,7 +113,9 @@ fn the_corpus_is_the_pinned_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_fixture_player_solves() {
-    let solver = QuickJsSolver::new(Limits::default());
+    let disk = tempfile::tempdir().unwrap();
+    let solver = QuickJsSolver::with_disk(Limits::default(), disk.path().to_path_buf());
+    let mut saved_max = 0u64;
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
     let mut failures = Vec::new();
     let mut missing = Vec::new();
@@ -144,9 +147,34 @@ async fn every_fixture_player_solves() {
             if !case.sig.is_empty() {
                 requests.push(ChallengeRequest { kind: ChallengeType::Sig, challenges: case.sig.iter().map(|(i, _)| i.to_string()).collect() });
             }
-            for pass in ["cold", "preprocessed"] {
+            for pass in ["cold", "preprocessed", "saved"] {
+                // A relaunch: a new solver, with only the saved copy.
+                let fresh;
+                let solver = if pass == "saved" {
+                    let file = disk.path().join(format!("{}-{variant}.pre", case.player));
+                    let mut size = None;
+                    for _ in 0..500 {
+                        size = std::fs::metadata(&file).ok().map(|m| m.len());
+                        if size.is_some() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    let Some(size) = size else {
+                        failures.push(format!("{} saved: the preprocessed player wasn't kept (over {} bytes?)", script.id, encore_resolver::jsc::cache::PREPROCESSED_MAX_BYTES));
+                        continue;
+                    };
+                    saved_max = saved_max.max(size);
+                    fresh = QuickJsSolver::with_disk(Limits::default(), disk.path().to_path_buf());
+                    &fresh
+                } else {
+                    &solver
+                };
                 let t = Instant::now();
                 let out = solver.solve(&script, requests.clone()).await;
+                if pass == "saved" && !solver.last_timing().preprocessed_hit {
+                    failures.push(format!("{} saved: solved cold, not from the saved copy", script.id));
+                }
                 let ms = t.elapsed().as_millis();
                 if pass == "cold" {
                     cold_total += ms;
@@ -179,7 +207,7 @@ async fn every_fixture_player_solves() {
         }
     }
     let n = runs.max(1) as u128;
-    eprintln!("solved {runs} player variants: cold {} ms on average (slowest {cold_max} ms), preprocessed {} ms", cold_total / n, warm_total / n);
+    eprintln!("solved {runs} player variants: cold {} ms on average (slowest {cold_max} ms), preprocessed {} ms; largest saved preprocessed player {saved_max} bytes", cold_total / n, warm_total / n);
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     if !missing.is_empty() {
         let msg = format!("{} fixture players couldn't be fetched and were skipped (set ENCORE_EJS_STRICT=1 to fail instead):\n  {}", missing.len(), missing.join("\n  "));

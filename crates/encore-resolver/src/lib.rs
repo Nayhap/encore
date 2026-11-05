@@ -425,7 +425,8 @@ impl NativeResolver {
         Arc::new(Self {
             player_js: PlayerJs::new(http.clone(), cfg.cache_dir.clone()),
             http,
-            solver: QuickJsSolver::new(Limits::default()),
+            // Preprocessed players are kept beside the player scripts.
+            solver: QuickJsSolver::with_disk(Limits::default(), cfg.cache_dir.join("player")),
             solved: Default::default(),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
@@ -484,8 +485,8 @@ impl NativeResolver {
         self.cache.lock().clear();
     }
 
-    /// Settings → Reset player cache: the URLs, the player scripts (memory
-    /// and disk), the preprocessed players and the solved challenges.
+    /// Settings → Reset player cache: the URLs, the player scripts and the
+    /// preprocessed players (memory and disk) and the solved challenges.
     pub fn reset_player_cache(&self) {
         self.clear_cache();
         self.player_js.forget(true);

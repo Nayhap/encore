@@ -225,7 +225,7 @@ cookies, tokens or tracking URLs.
 | Backups of the database (the newest three, daily and before an update changes it) | `~/Library/Application Support/app.encore.desktop/backups/` | `%LOCALAPPDATA%\app.encore.desktop\backups\` | `~/.local/share/app.encore.desktop/backups/` |
 | Folder covers you picked | `~/Library/Application Support/app.encore.desktop/covers/` | `%LOCALAPPDATA%\app.encore.desktop\covers\` | `~/.local/share/app.encore.desktop/covers/` |
 | Downloads (with their covers and a sidecar per song) | `~/Library/Application Support/app.encore.desktop/downloads/` | `%LOCALAPPDATA%\app.encore.desktop\downloads\` | `~/.local/share/app.encore.desktop/downloads/` |
-| Audio (1 GB) and artwork (256 MB) caches, the player scripts the resolver solves against (`player/`, three at most), a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `player\`, `updates\`) | `~/.cache/app.encore.desktop/` |
+| Audio (1 GB) and artwork (256 MB) caches, the player scripts the resolver solves against and their preprocessed copies (`player/`, three of each at most), a downloaded update (`updates/`) | `~/Library/Caches/app.encore.desktop/` | `%LOCALAPPDATA%\app.encore.desktop\` (`audio\`, `art\`, `player\`, `updates\`) | `~/.cache/app.encore.desktop/` |
 | Log | `~/Library/Logs/app.encore.desktop/encore.log` | `%LOCALAPPDATA%\app.encore.desktop\logs\encore.log` | `~/.local/state/app.encore.desktop/encore.log` |
 
 The log goes through a redacting writer. Cookies, tokens and signed stream
