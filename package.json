@@ -1,6 +1,6 @@
 {
   "name": "encore",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "YouTube Music for the desktop",
   "type": "module",
   "scripts": {
