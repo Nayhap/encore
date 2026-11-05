@@ -49,6 +49,7 @@ pub const SLEEP_FADE: f64 = 10.0;
 const SLEPT: &str = "Paused by the sleep timer.";
 
 pub type AuthProvider = Arc<dyn Fn() -> Option<ResolveAuth> + Send + Sync>;
+type PersistHook = Box<dyn Fn(SaveQueue<'_>) -> bool + Send + Sync>;
 
 struct Loaded {
     load_id: u64,
@@ -198,7 +199,7 @@ pub struct Player {
     tx: broadcast::Sender<PlayerEvent>,
     next_load: AtomicU64,
     rt: tokio::runtime::Handle,
-    on_persist: Mutex<Option<Box<dyn Fn(SaveQueue<'_>) -> bool + Send + Sync>>>,
+    on_persist: Mutex<Option<PersistHook>>,
     /// Held through a write of the queue, so two never cross.
     persisting: Mutex<()>,
     preloaded_streams: Mutex<HashMap<u64, ResolvedStream>>,
@@ -656,10 +657,11 @@ impl Player {
         };
         let mut st = self.st.lock();
         // A restore in between put another queue in another place.
-        if saved && st.slot_gen == slot_gen {
-            if let Some(slot) = st.slot.as_mut() {
-                *slot = Slot { scope, stamp: Some(stamp), content, revision, position };
-            }
+        if saved
+            && st.slot_gen == slot_gen
+            && let Some(slot) = st.slot.as_mut()
+        {
+            *slot = Slot { scope, stamp: Some(stamp), content, revision, position };
         }
     }
 

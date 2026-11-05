@@ -121,10 +121,11 @@ struct QueueAt {
 fn saved_queue(store: &Store, scope: &str) -> Option<(Queue, f64, Option<String>)> {
     let saved = store.get::<SavedQueue>(scope, "queue").ok()??;
     let (mut queue, mut position) = (saved.queue, saved.position);
-    if let (Some(stamp), Ok(Some(at))) = (&saved.stamp, store.get::<QueueAt>(scope, "queue-at")) {
-        if at.stamp == *stamp && queue.resume(&at.at) {
-            position = at.position;
-        }
+    if let (Some(stamp), Ok(Some(at))) = (&saved.stamp, store.get::<QueueAt>(scope, "queue-at"))
+        && at.stamp == *stamp
+        && queue.resume(&at.at)
+    {
+        position = at.position;
     }
     Some((queue, position, saved.stamp))
 }

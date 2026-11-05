@@ -210,7 +210,7 @@ impl PreprocessedDisk {
                 Some((m.modified().ok()?, m.len(), e.path()))
             })
             .collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.sort_by_key(|f| std::cmp::Reverse(f.0));
         v
     }
 

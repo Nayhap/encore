@@ -134,7 +134,7 @@ impl QuickJsSolver {
     }
 
     /// The saved copy for `player`, read off the async runtime.
-    async fn from_disk(&self, player: &PlayerScript) -> Option<Arc<str>> {
+    async fn saved_copy(&self, player: &PlayerScript) -> Option<Arc<str>> {
         let d = self.disk.clone()?;
         let (id, code) = (player.id.clone(), player.code.clone());
         tokio::task::spawn_blocking(move || d.read(&id, &code)).await.ok().flatten().map(Arc::from)
@@ -259,7 +259,7 @@ impl Solver for QuickJsSolver {
         let mut pre = self.preprocessed.lock().iter().find(|(id, _)| *id == k).map(|(_, p)| p.clone());
         let mut saved = false;
         if pre.is_none()
-            && let Some(p) = self.from_disk(player).await
+            && let Some(p) = self.saved_copy(player).await
         {
             self.remember(&k, p.clone());
             (pre, saved) = (Some(p), true);
