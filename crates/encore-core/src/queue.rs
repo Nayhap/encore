@@ -12,6 +12,7 @@
 //! the collection's current cycle first (`replace_cycle`, `set_shuffle_fresh`).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -85,6 +86,25 @@ pub struct Queue {
     /// aren't downloaded, D23).
     #[serde(skip)]
     passed: usize,
+    /// Changes with everything but a move to another entry (`go`): what
+    /// has to be saved again in full. Unique across queues, so a queue
+    /// put in another's place never looks unchanged.
+    #[serde(skip, default = "fresh_content")]
+    content: u64,
+}
+
+static CONTENT: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_content() -> u64 {
+    CONTENT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Where a saved queue had got to since it was saved in full: the entry
+/// playing and the songs played (for radio), without the entries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub uid: String,
+    pub recent: Vec<String>,
 }
 
 impl Default for Queue {
@@ -111,14 +131,35 @@ impl Queue {
             rng: seed | 1,
             recent: Vec::new(),
             passed: 0,
+            content: fresh_content(),
         }
     }
 
     fn bump(&mut self) {
         self.revision += 1;
+        self.content = fresh_content();
     }
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Changes whenever the queue changes other than by moving to another
+    /// of its entries (next, previous, a jump, a song ending).
+    pub fn content(&self) -> u64 {
+        self.content
+    }
+    /// The entry playing and the songs played, for a save that leaves the
+    /// entries as they were saved.
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        Some(Checkpoint { uid: self.current()?.uid.clone(), recent: self.recent.clone() })
+    }
+    /// Move back to where a checkpoint of this queue was; false when its
+    /// entry is no longer here (nothing changes then).
+    pub fn resume(&mut self, c: &Checkpoint) -> bool {
+        let Some(i) = self.position_of(&c.uid) else { return false };
+        self.index = Some(i);
+        self.recent = c.recent.clone();
+        self.revision += 1;
+        true
     }
     pub fn entries(&self) -> &[QueueEntry] {
         &self.entries
@@ -396,7 +437,8 @@ impl Queue {
     fn go(&mut self, i: usize) -> Step {
         self.index = Some(i);
         self.mark_played();
-        self.bump();
+        // A move, not a change of content: a checkpoint saves it.
+        self.revision += 1;
         Step::Play(i)
     }
 
@@ -969,5 +1011,54 @@ mod tests {
         assert_eq!(ids(&r), ids(&q));
         assert_eq!(r.index(), q.index());
         assert!(r.shuffle);
+    }
+
+    #[test]
+    fn moving_between_entries_is_not_a_change_of_content() {
+        let mut q = q5();
+        let c = q.content();
+        let r = q.revision();
+        assert_eq!(q.next(), Step::Play(1));
+        assert_eq!(q.content(), c, "next only moves");
+        assert!(q.revision() > r);
+        q.prev(0.0);
+        q.on_ended();
+        let uid = q.entries()[4].uid.clone();
+        q.jump(&uid).unwrap();
+        assert_eq!(q.content(), c);
+        q.append(vec![t("f")], Origin::Manual);
+        assert_ne!(q.content(), c, "an add changes it");
+        let c = q.content();
+        q.set_repeat(Repeat::All);
+        assert_ne!(q.content(), c, "so does a setting");
+    }
+
+    #[test]
+    fn another_queue_never_has_the_same_content() {
+        let a = q5();
+        let b: Queue = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_ne!(a.content(), b.content(), "a queue read back is a new one");
+        assert_eq!(a.clone().content(), a.content());
+        assert_ne!(q5().content(), a.content());
+    }
+
+    #[test]
+    fn a_checkpoint_puts_the_queue_back_where_it_was() {
+        let saved = q5();
+        let mut q = saved.clone();
+        q.next();
+        q.next();
+        let cp = q.checkpoint().unwrap();
+        assert_eq!(cp.uid, q.entries()[2].uid);
+        let mut back: Queue = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(back.resume(&cp));
+        assert_eq!(back.index(), Some(2));
+        assert_eq!(back.recent, q.recent);
+        // An entry that went away leaves the queue as it was saved.
+        let gone = Checkpoint { uid: "gone".into(), recent: vec![] };
+        let mut other = saved.clone();
+        assert!(!other.resume(&gone));
+        assert_eq!(other.index(), Some(0));
+        assert!(Queue::default().checkpoint().is_none());
     }
 }

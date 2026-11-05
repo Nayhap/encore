@@ -97,10 +97,36 @@ pub struct Core {
     exit_prepared: tokio::sync::Mutex<bool>,
 }
 
+/// The queue as last saved in full (D6, D11). `stamp` is newer than 0.6.2
+/// (which reads past it); `queue-at` checkpoints carry it.
 #[derive(Serialize, Deserialize)]
 struct SavedQueue {
     queue: Queue,
     position: f64,
+    #[serde(default)]
+    stamp: Option<String>,
+}
+
+/// Where that queue had got to since: the entry playing and the position
+/// in it, for the whole write named `stamp`.
+#[derive(Serialize, Deserialize)]
+struct QueueAt {
+    stamp: String,
+    at: encore_core::queue::Checkpoint,
+    position: f64,
+}
+
+/// The queue saved under `scope`, moved on to its last checkpoint when
+/// that belongs to it, with the stamp of its whole write.
+fn saved_queue(store: &Store, scope: &str) -> Option<(Queue, f64, Option<String>)> {
+    let saved = store.get::<SavedQueue>(scope, "queue").ok()??;
+    let (mut queue, mut position) = (saved.queue, saved.position);
+    if let (Some(stamp), Ok(Some(at))) = (&saved.stamp, store.get::<QueueAt>(scope, "queue-at")) {
+        if at.stamp == *stamp && queue.resume(&at.at) {
+            position = at.position;
+        }
+    }
+    Some((queue, position, saved.stamp))
 }
 
 pub fn auth_provider(it: Arc<InnerTube>) -> encore_player::AuthProvider {
@@ -252,43 +278,55 @@ impl Core {
         format!("account:{}", self.ytm.context().account)
     }
 
-    /// Restore the queue for the current account, paused.
+    /// Restore the queue for the current account, paused, and save it
+    /// there from now on.
     pub fn restore_queue(&self) {
-        if let Ok(Some(saved)) = self.store.get::<SavedQueue>(&self.account_scope(), "queue") {
-            self.player.restore(saved.queue, saved.position);
+        let scope = self.account_scope();
+        match saved_queue(&self.store, &scope) {
+            Some((queue, position, stamp)) => self.player.restore_saved(queue, position, scope, stamp),
+            None => self.player.save_to(Some(scope)),
         }
     }
 
     /// After an account change: that account's saved queue, or an empty one
-    /// (another account's queue never stays visible).
+    /// (another account's queue never stays visible). The queue that was
+    /// showing was saved under its own account, never this one.
     pub fn switch_queue(&self) {
-        match self.store.get::<SavedQueue>(&self.account_scope(), "queue") {
-            Ok(Some(saved)) => self.player.restore(saved.queue, saved.position),
-            _ => self.player.restore(Queue::default(), 0.0),
+        let scope = self.account_scope();
+        match saved_queue(&self.store, &scope) {
+            Some((queue, position, stamp)) => self.player.restore_saved(queue, position, scope, stamp),
+            None => self.player.restore_saved(Queue::default(), 0.0, scope, None),
         }
     }
 
     pub fn install_persistence(self: &Arc<Self>) {
         let w = Arc::downgrade(self);
         let saved_art = parking_lot::Mutex::new(std::collections::HashSet::<String>::new());
-        self.player.on_persist(move |q, pos| {
-            if let Some(c) = w.upgrade() {
-                let _ = c.store.put(&c.account_scope(), "queue", &SavedQueueRef { queue: q, position: pos }, None);
-                // Restored queues need their artwork keys after a restart.
-                let mut done = saved_art.lock();
-                for e in q.entries() {
-                    let Some(a) = &e.track.art else { continue };
-                    if done.contains(&a.key) {
-                        continue;
-                    }
-                    if let Some(entry) = encore_core::art::lookup(&a.key) {
-                        // A downloaded song's cover never expires (D23).
-                        let ttl = if c.art.is_kept(&a.key) { None } else { Some(180 * 24 * 3600) };
-                        let _ = c.store.put("art", &a.key, &(entry.base, entry.hue), ttl);
-                        done.insert(a.key.clone());
-                    }
+        self.player.on_persist(move |save| {
+            let Some(c) = w.upgrade() else { return false };
+            let (scope, stamp, q, position) = match save {
+                // Only where the queue is: a small row beside the whole one.
+                encore_player::SaveQueue::Checkpoint { scope, stamp, at, position } => return c.store.put(scope, "queue-at", &QueueAtRef { stamp, at, position }, None).is_ok(),
+                encore_player::SaveQueue::Full { scope, stamp, queue, position } => (scope, stamp, queue, position),
+            };
+            if c.store.put(scope, "queue", &SavedQueueRef { queue: q, position, stamp }, None).is_err() {
+                return false;
+            }
+            // Restored queues need their artwork keys after a restart.
+            let mut done = saved_art.lock();
+            for e in q.entries() {
+                let Some(a) = &e.track.art else { continue };
+                if done.contains(&a.key) {
+                    continue;
+                }
+                if let Some(entry) = encore_core::art::lookup(&a.key) {
+                    // A downloaded song's cover never expires (D23).
+                    let ttl = if c.art.is_kept(&a.key) { None } else { Some(180 * 24 * 3600) };
+                    let _ = c.store.put("art", &a.key, &(entry.base, entry.hue), ttl);
+                    done.insert(a.key.clone());
                 }
             }
+            true
         });
     }
 
@@ -401,4 +439,70 @@ fn age(secs: i64) -> String {
 struct SavedQueueRef<'a> {
     queue: &'a Queue,
     position: f64,
+    stamp: &'a str,
+}
+
+#[derive(Serialize)]
+struct QueueAtRef<'a> {
+    stamp: &'a str,
+    at: &'a encore_core::queue::Checkpoint,
+    position: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encore_core::model::{ItemId, Track, TrackKind};
+    use encore_core::queue::Origin;
+
+    fn track(n: &str) -> Track {
+        Track { id: ItemId::ytm(n), title: n.into(), artists: vec![], album: None, duration: Some(200.0), art: None, kind: TrackKind::Song, explicit: false, playable: true, liked: None, counterpart: None, plays: None }
+    }
+
+    fn queue() -> Queue {
+        let mut q = Queue::new(3);
+        q.replace(vec![track("a"), track("b"), track("c")], 0, None, false, Origin::Collection).unwrap();
+        q
+    }
+
+    #[test]
+    fn a_queue_saved_by_0_6_restores_as_it_was() {
+        let store = Store::open_memory().unwrap();
+        let q = queue();
+        // 0.6.2's row: the queue and position, no stamp.
+        store.put_raw("account:a", "queue", &serde_json::json!({ "queue": q, "position": 61.5 }).to_string(), None).unwrap();
+        let (back, position, stamp) = saved_queue(&store, "account:a").unwrap();
+        assert_eq!(position, 61.5);
+        assert_eq!(stamp, None);
+        assert_eq!(back.index(), Some(0));
+        assert!(saved_queue(&store, "account:b").is_none());
+    }
+
+    #[test]
+    fn a_checkpoint_moves_the_saved_queue_on() {
+        let store = Store::open_memory().unwrap();
+        let q = queue();
+        store.put("account:a", "queue", &SavedQueueRef { queue: &q, position: 10.0, stamp: "one" }, None).unwrap();
+        let mut later = q.clone();
+        later.next();
+        let at = later.checkpoint().unwrap();
+        store.put("account:a", "queue-at", &QueueAtRef { stamp: "one", at: &at, position: 33.0 }, None).unwrap();
+        let (back, position, stamp) = saved_queue(&store, "account:a").unwrap();
+        assert_eq!((back.index(), position, stamp.as_deref()), (Some(1), 33.0, Some("one")));
+        // A checkpoint of an older whole write is left out.
+        store.put("account:a", "queue", &SavedQueueRef { queue: &q, position: 5.0, stamp: "two" }, None).unwrap();
+        let (back, position, _) = saved_queue(&store, "account:a").unwrap();
+        assert_eq!((back.index(), position), (Some(0), 5.0));
+        // And 0.6.2 reads the new row, past its stamp.
+        let old: serde_json::Value = store.get("account:a", "queue").unwrap().unwrap();
+        assert!(serde_json::from_value::<OldSavedQueue>(old).is_ok());
+    }
+
+    /// 0.6.2's row, as it reads it.
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct OldSavedQueue {
+        queue: Queue,
+        position: f64,
+    }
 }
