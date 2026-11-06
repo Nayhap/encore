@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Lyrics } from "$lib/backend";
+  import { ui } from "$lib/state.svelte";
 
   // Timed lines follow the clock; plain lyrics (no timing) are shown as text
   // without the karaoke highlight.
@@ -53,6 +54,9 @@
   });
 
   const progress = (r: Row) => Math.min(Math.max((position - r.t) / (r.end - r.t), 0), 1);
+  // With the fill off (Settings → Appearance), the current line is lit whole,
+  // and the lines restyle only when the line changes, not with the clock.
+  const fill = (r: Row, i: number) => (i < active || (i === active && !ui.lyricFill) ? 1 : i === active ? progress(r) : 0);
 </script>
 
 {#if track.lyrics.length}
@@ -77,7 +81,7 @@
           class:on={i === active}
           class:past={i < active}
           data-i={i}
-          style:--p="{(i === active ? progress(r) : i < active ? 1 : 0) * 100}%"
+          style:--p="{fill(r, i) * 100}%"
           onclick={() => onseek(r.t)}
         >{r.text}</button>
       {/if}

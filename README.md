@@ -23,7 +23,8 @@
 ## Features
 
 - **Synced lyrics** from YouTube Music and LRCLIB, in the side panel or full
-  screen (<kbd>F</kbd>).
+  screen (<kbd>F</kbd>). The current line fills as it's sung, or is simply
+  highlighted if you prefer.
 - **A seek bar drawn from the lyrics.** Each sung line is a segment, repeated
   lines stand taller, so you can see the chorus coming and jump to it.
 - **Lyrics and the queue side by side** while you browse. Drag to reorder.
@@ -61,7 +62,8 @@
   or a playlist, album or your liked songs and it stays up to date. Offline,
   Encore plays the downloaded songs and skips the others in the queue.
 - **Native playback** in Rust, with seek, a disk cache and the next song
-  loaded ahead of time.
+  loaded ahead of time, and **gapless**: songs that run into each other on an
+  album play without a break.
 - **Shuffle, repeat and autoplay** that work the way you expect.
 - **Media keys and the system's media controls**: Now Playing on macOS, the
   media flyout on Windows, MPRIS on Linux.
