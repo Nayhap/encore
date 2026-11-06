@@ -120,6 +120,10 @@
   });
 
   $effect(() => {
+    localStorage.setItem("lyric-fill", ui.lyricFill ? "on" : "off");
+  });
+
+  $effect(() => {
     const tr = player.current;
     if (!tr) return;
     fadeHue(catalog.hue(tr.art, tr.id));

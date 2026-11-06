@@ -49,6 +49,13 @@
   {/if}
   <label class="row">
     <div>
+      <b>Fill lyrics as they're sung</b>
+      <p>{ui.lyricFill ? "The current line fills from left to right with the singing." : "The current line is highlighted as a whole."}</p>
+    </div>
+    <input type="checkbox" role="switch" bind:checked={ui.lyricFill} />
+  </label>
+  <label class="row">
+    <div>
       <b>Hide podcasts</b>
       <p>Leave podcast episodes out of Home, Explore, radio and Autoplay.</p>
     </div>

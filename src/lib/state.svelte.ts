@@ -413,6 +413,9 @@ class UI {
   shortcuts = $state(false);
   theme = $state<Theme>((localStorage.getItem("theme") as Theme) ?? "system");
   tint = $state(localStorage.getItem("tint") !== "off");
+  /** Settings → Appearance: fill the current lyric line as it is sung, or
+   *  just highlight it. */
+  lyricFill = $state(localStorage.getItem("lyric-fill") !== "off");
   /** Windows and Linux: use the OS title bar instead of Encore's buttons. */
   systemTitlebar = $state(localStorage.getItem("titlebar") === "system");
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
