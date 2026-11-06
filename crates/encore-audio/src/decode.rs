@@ -9,8 +9,15 @@
 //! An A–B loop (D26) is kept here, not by the player's clock: the audio
 //! pushed into the ring stops at B's frame and goes on with A's, so the wrap
 //! is exact and gapless. Positions follow a `Timeline` of marks.
+//!
+//! An MP4's edit list says how many frames the encoder put before the song
+//! (its delay) and how long the song is; the rest of the last packet is
+//! padding. Both are cut (`Trim`), so a song that runs into the next one on
+//! the album does so without the 50 ms or so of silence they add up to (D5).
+//! Song time 0 is the first frame after the delay.
 
 use std::fs::File;
+use std::io::SeekFrom;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock};
@@ -71,6 +78,116 @@ pub fn codec_name(id: symphonia::core::codecs::audio::AudioCodecId) -> &'static 
     }
 }
 
+/// What of a decoded stream is the song (gapless playback): `lead` frames
+/// of encoder delay come first, then `len` frames of the song (unknown when
+/// the file doesn't say), then padding. In frames at the source rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Trim {
+    lead: u64,
+    len: Option<u64>,
+}
+
+impl Trim {
+    /// Of a decoded buffer of `n` frames whose first frame is stream frame
+    /// `first`, the range that is the song.
+    fn keep(&self, first: u64, n: usize) -> std::ops::Range<usize> {
+        let from = self.lead.saturating_sub(first).min(n as u64) as usize;
+        let to = match self.len {
+            Some(len) => (self.lead + len).saturating_sub(first).min(n as u64) as usize,
+            None => n,
+        };
+        from..to.max(from)
+    }
+}
+
+/// The body of the `moov` box of an MP4 that starts with `ftyp`, reading
+/// only the top-level boxes before it (a few hundred bytes in YouTube's
+/// files, so the first sound doesn't wait for more of the download).
+fn read_moov(src: &mut dyn MediaSource) -> Option<Vec<u8>> {
+    let mut seen = 0usize;
+    for i in 0..4 {
+        let mut h = [0u8; 8];
+        src.read_exact(&mut h).ok()?;
+        let size = u32::from_be_bytes(h[..4].try_into().unwrap()) as usize;
+        let kind = &h[4..];
+        if (i == 0 && kind != b"ftyp") || size < 8 {
+            return None;
+        }
+        seen += size;
+        if seen > 64 * 1024 {
+            return None;
+        }
+        let mut body = vec![0u8; size - 8];
+        src.read_exact(&mut body).ok()?;
+        if kind == b"moov" {
+            return Some(body);
+        }
+        if kind == b"mdat" || kind == b"moof" {
+            return None;
+        }
+    }
+    None
+}
+
+/// The edit list of an MP4 (ISO BMFF) at the start of `src`, as a `Trim` in
+/// the media's timescale (converted to frames once the rate is known), and
+/// `src` back at its start. Only the plain case is read: `ftyp`, then a
+/// `moov` within the first 64 KiB whose one track has one edit that plays
+/// at normal speed, as YouTube's audio files have. Anything else is no trim,
+/// and the file plays as it did.
+fn mp4_trim(src: &mut dyn MediaSource) -> Option<(Trim, u32)> {
+    let moov = read_moov(src);
+    // The demuxer reads from the start, whatever was found.
+    if src.seek(SeekFrom::Start(0)).is_err() {
+        return None;
+    }
+    let moov = moov?;
+    let boxes = |b: &[u8]| -> Vec<([u8; 4], std::ops::Range<usize>)> {
+        let mut out = Vec::new();
+        let mut o = 0usize;
+        while o + 8 <= b.len() {
+            let size = u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+            let kind: [u8; 4] = b[o + 4..o + 8].try_into().unwrap();
+            if size < 8 || o + size > b.len() {
+                break;
+            }
+            out.push((kind, o + 8..o + size));
+            o += size;
+        }
+        out
+    };
+    let find = |b: &[u8], k: &[u8; 4]| boxes(b).into_iter().find(|(t, _)| t == k).map(|(_, r)| b[r].to_vec());
+    let traks: Vec<_> = boxes(&moov).into_iter().filter(|(t, _)| t == b"trak").collect();
+    if traks.len() != 1 {
+        return None;
+    }
+    let trak = &moov[traks[0].1.clone()];
+    // (version, timescale) of a full box with the mvhd/mdhd layout.
+    let timescale = |b: &[u8]| -> Option<u32> {
+        let at = if *b.first()? == 1 { 20 } else { 12 };
+        Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?)).filter(|t| *t > 0)
+    };
+    let movie_ts = timescale(&find(&moov, b"mvhd")?)?;
+    let media_ts = timescale(&find(&find(trak, b"mdia")?, b"mdhd")?)?;
+    let elst = find(&find(trak, b"edts")?, b"elst")?;
+    let v1 = *elst.first()? == 1;
+    if u32::from_be_bytes(elst.get(4..8)?.try_into().ok()?) != 1 {
+        return None;
+    }
+    let e = elst.get(8..)?;
+    let (dur, time, rate) = if v1 {
+        (u64::from_be_bytes(e.get(0..8)?.try_into().ok()?), i64::from_be_bytes(e.get(8..16)?.try_into().ok()?), e.get(16..18)?)
+    } else {
+        (u32::from_be_bytes(e.get(0..4)?.try_into().ok()?) as u64, i32::from_be_bytes(e.get(4..8)?.try_into().ok()?) as i64, e.get(8..10)?)
+    };
+    if time < 0 || rate != [0, 1] {
+        return None;
+    }
+    // The edit's length is in the movie's timescale; the delay in the media's.
+    let len = (dur > 0).then(|| (dur as u128 * media_ts as u128 / movie_ts as u128) as u64);
+    Some((Trim { lead: time as u64, len }, media_ts))
+}
+
 struct Opened {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
@@ -80,6 +197,33 @@ struct Opened {
     rate: u32,
     codec: &'static str,
     from_cache: bool,
+    /// Encoder delay and padding to cut, in frames at `rate`.
+    trim: Option<Trim>,
+}
+
+impl Opened {
+    /// The song's time as stream time: the delay comes first.
+    fn lead_secs(&self) -> f64 {
+        self.trim.map_or(0.0, |t| t.lead as f64 / self.rate as f64)
+    }
+
+    /// The stream frame `pts` stands for, at the source rate.
+    fn frame_of(&self, pts: Option<f64>) -> Option<u64> {
+        pts.map(|t| (t.max(0.0) * self.rate as f64).round() as u64)
+    }
+
+    /// The part of a decoded buffer of `n` frames starting at `pts` (stream
+    /// time) that is the song, and the stream time of its first frame.
+    fn song_part(&self, pts: Option<f64>, n: usize) -> (std::ops::Range<usize>, Option<f64>) {
+        match (self.trim, self.frame_of(pts)) {
+            (Some(t), Some(first)) => {
+                let r = t.keep(first, n);
+                let at = pts.map(|p| p + r.start as f64 / self.rate as f64);
+                (r, at)
+            }
+            _ => (0..n, pts),
+        }
+    }
 }
 
 fn open(spec: &SourceSpec, cache: Option<&AudioCache>) -> Result<Opened, String> {
@@ -94,6 +238,8 @@ fn open(spec: &SourceSpec, cache: Option<&AudioCache>) -> Result<Opened, String>
             None => Box::new(HttpSource::open(h.clone(), cache.cloned()).map_err(|e| e.to_string())?),
         },
     };
+    let mut src = src;
+    let edit = mp4_trim(&mut *src);
     let mss = MediaSourceStream::new(src, Default::default());
     let format = symphonia::default::get_probe()
         .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
@@ -104,8 +250,13 @@ fn open(spec: &SourceSpec, cache: Option<&AudioCache>) -> Result<Opened, String>
     let decoder = codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|e| format!("no decoder for this codec: {e}"))?;
-    let duration = match (track.time_base, track.duration) {
-        (Some(tb), Some(d)) => tb.calc_duration(d).map(|t| t.as_nanos() as f64 / 1e9),
+    let trim = edit.map(|(t, ts)| {
+        let at_rate = |v: u64| (v as u128 * rate as u128 / ts as u128) as u64;
+        Trim { lead: at_rate(t.lead), len: t.len.map(at_rate) }
+    });
+    let duration = match (trim.and_then(|t| t.len), track.time_base, track.duration) {
+        (Some(len), _, _) => Some(len as f64 / rate as f64),
+        (None, Some(tb), Some(d)) => tb.calc_duration(d).map(|t| t.as_nanos() as f64 / 1e9),
         _ => track.num_frames.map(|n| n as f64 / rate as f64),
     };
     Ok(Opened {
@@ -117,6 +268,7 @@ fn open(spec: &SourceSpec, cache: Option<&AudioCache>) -> Result<Opened, String>
         rate,
         codec: codec_name(params.codec),
         from_cache,
+        trim,
     })
 }
 
@@ -492,14 +644,20 @@ pub(crate) fn run_worker(
                 stereo.push(l);
                 stereo.push(r);
             }
-            let mut slice: &[f32] = &stereo;
+            // Encoder delay and padding are not the song (gapless).
+            let (keep, pts) = o.song_part(pts, n);
+            let n = keep.len();
+            let mut slice: &[f32] = &stereo[keep.start * 2..keep.end * 2];
+            if n == 0 {
+                continue;
+            }
             if let (Some(target), Some(start)) = (discard_until, pts) {
                 let end = start + n as f64 / o.rate as f64;
                 if end <= target {
                     continue;
                 }
                 let skip = (((target - start).max(0.0)) * o.rate as f64) as usize;
-                slice = &stereo[(skip * 2).min(stereo.len())..];
+                slice = &slice[(skip * 2).min(slice.len())..];
                 discard_until = None;
             } else if discard_until.is_some() && pts.is_none() {
                 discard_until = None;
@@ -556,8 +714,10 @@ fn reseek(o: &mut Opened, spec: &SourceSpec, cache: Option<&AudioCache>, secs: f
     }
 }
 
+/// Seek to song time `secs`. Returns the stream time to discard up to.
 fn seek(o: &mut Opened, secs: f64) -> Option<f64> {
-    let time = Time::try_from_secs_f64(secs.max(0.0))?;
+    let secs = secs.max(0.0) + o.lead_secs();
+    let time = Time::try_from_secs_f64(secs)?;
     match o.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(o.track_id) }) {
         Ok(_) => {
             o.decoder.reset();
@@ -591,15 +751,16 @@ pub fn decode_all(spec: &SourceSpec, start: f64) -> Result<(Vec<f32>, u32, &'sta
         let frames = buf.frames();
         tmp.resize(frames * ch, 0.0f32);
         buf.copy_to_slice_interleaved(&mut tmp[..]);
-        let mut skip = 0;
+        let (keep, pts) = o.song_part(pts, frames);
+        let mut skip = keep.start;
         if let (Some(t), Some(s)) = (discard, pts) {
-            if s + frames as f64 / o.rate as f64 <= t {
+            if s + keep.len() as f64 / o.rate as f64 <= t {
                 continue;
             }
-            skip = ((t - s).max(0.0) * o.rate as f64) as usize;
+            skip += ((t - s).max(0.0) * o.rate as f64) as usize;
             discard = None;
         }
-        for f in skip..frames {
+        for f in skip.min(keep.end)..keep.end {
             let l = tmp[f * ch];
             out.push(l);
             out.push(if ch > 1 { tmp[f * ch + 1] } else { l });
@@ -769,6 +930,38 @@ mod tests {
     }
 
     #[test]
+    fn trim_keeps_only_the_song() {
+        let t = Trim { lead: 1600, len: Some(10_000) };
+        assert_eq!(t.keep(0, 1024), 1024..1024, "all delay");
+        assert_eq!(t.keep(1024, 1024), 576..1024, "delay ends inside");
+        assert_eq!(t.keep(4096, 1024), 0..1024, "all song");
+        assert_eq!(t.keep(11_264, 1024), 0..336, "padding starts at frame 11,600");
+        assert_eq!(t.keep(12_288, 1024), 0..0, "all padding");
+        assert_eq!(Trim { lead: 0, len: None }.keep(0, 1024), 0..1024);
+    }
+
+    #[test]
+    fn an_mp4_plays_exactly_its_edit() {
+        // The fixture's edit list: 1,024 frames of delay, then 2 s (2,000
+        // in a timescale of 1,000) of a 440 Hz tone at 44.1 kHz.
+        let mut f = std::fs::File::open(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/tone-aac.m4a")).unwrap();
+        let (t, ts) = mp4_trim(&mut f).unwrap();
+        assert_eq!((t, ts), (Trim { lead: 1024, len: Some(88_200) }, 44_100));
+        assert_eq!(std::io::Seek::stream_position(&mut f).unwrap(), 0, "rewound for the demuxer");
+        let (pcm, _, _) = decode_all(&fixture("tone-aac.m4a"), 0.0).unwrap();
+        assert_eq!(pcm.len() / 2, 88_200, "neither delay nor padding");
+        let level = rms(&pcm);
+        assert!(rms(&pcm[..2 * 512]) > level * 0.8, "the tone from the first frame: {} of {level}", rms(&pcm[..2 * 512]));
+        assert!(rms(&pcm[pcm.len() - 2 * 512..]) > level * 0.8, "and to the last: {} of {level}", rms(&pcm[pcm.len() - 2 * 512..]));
+        // A seek counts song time, after the delay.
+        let (tail, _, _) = decode_all(&fixture("tone-aac.m4a"), 1.5).unwrap();
+        assert!((tail.len() as i64 / 2 - 22_050).abs() <= 2, "{} frames after 1.5 s", tail.len() / 2);
+        // Not an MP4: no trim.
+        let mut w = std::fs::File::open(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/tone-opus.webm")).unwrap();
+        assert!(mp4_trim(&mut w).is_none());
+    }
+
+    #[test]
     fn validates_whole_files_and_refuses_cut_ones() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         for (n, c) in [("tone-aac.m4a", "aac"), ("tone-opus.webm", "opus")] {
@@ -821,3 +1014,4 @@ mod tests {
         assert!((f - 440.0).abs() < 3.0, "freq {f}");
     }
 }
+
