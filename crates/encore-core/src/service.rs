@@ -166,6 +166,20 @@ pub trait LocalAudio: Send + Sync {
     fn collection(&self, account: &str, id: &ItemId) -> Option<Collection>;
 }
 
+/// How far a song is above YouTube's target loudness, in dB, from a
+/// `/player` answer: `playerConfig.audioConfig.loudnessDb`. Some clients
+/// (visionOS) leave that out and give the same figure as the song's own
+/// loudness and the target (`trackAbsoluteLoudnessLkfs` −
+/// `loudnessTargetLkfs`, −14 when not named), or only as
+/// `perceptualLoudnessDb`, which is the song's loudness too. Without this
+/// a song played unnormalised whenever such a client answered for it.
+pub fn loudness_db(player: &serde_json::Value) -> Option<f32> {
+    let cfg = &player["playerConfig"]["audioConfig"];
+    let num = |k: &str| cfg[k].as_f64().filter(|v| v.is_finite());
+    let target = num("loudnessTargetLkfs").unwrap_or(-14.0);
+    num("loudnessDb").or_else(|| num("trackAbsoluteLoudnessLkfs").or_else(|| num("perceptualLoudnessDb")).map(|l| l - target)).map(|l| l as f32)
+}
+
 /// The service's loudness of a song (`loudnessDb`), for normalisation.
 #[async_trait]
 pub trait LoudnessSource: Send + Sync {
@@ -464,5 +478,23 @@ mod tests {
     fn cookie_debug_hides_value() {
         let c = CookieRecord { name: "SAPISID".into(), value: "CANARYxyz".into(), domain: ".youtube.com".into(), path: "/".into(), secure: true, http_only: false, expires: None };
         assert!(!format!("{c:?}").contains("CANARY"));
+    }
+}
+
+#[cfg(test)]
+mod loudness_tests {
+    use super::loudness_db;
+    use serde_json::json;
+
+    #[test]
+    fn every_client_gives_the_same_loudness() {
+        let of = |cfg: serde_json::Value| loudness_db(&json!({ "playerConfig": { "audioConfig": cfg } }));
+        // The same song, as the TV client and as visionOS answered for it.
+        let tv = of(json!({ "enablePerFormatLoudness": true, "loudnessDb": 3.1400003, "perceptualLoudnessDb": -10.86 })).unwrap();
+        let vision = of(json!({ "loudnessTargetLkfs": -14, "perceptualLoudnessDb": -10.86, "trackAbsoluteLoudnessLkfs": -10.86 })).unwrap();
+        assert!((tv - 3.14).abs() < 0.001 && (vision - tv).abs() < 0.001);
+        assert!((of(json!({ "perceptualLoudnessDb": -17.25 })).unwrap() + 3.25).abs() < 0.001);
+        assert_eq!(of(json!({})), None);
+        assert_eq!(loudness_db(&json!({ "playabilityStatus": { "status": "OK" } })), None);
     }
 }

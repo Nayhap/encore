@@ -491,7 +491,20 @@ impl Player {
             };
             return Some((s, f.path));
         }
-        let (path, itag) = self.cache.as_ref()?.find_video(vid)?;
+        // A cached file plays without resolving only once its loudness is
+        // known. Files cached before 0.7.2 have none kept: they played at
+        // full level from the cache after playing normalised the first
+        // time. Online, such a song is resolved once more (which keeps its
+        // loudness; the audio still comes from the file).
+        let (s, path) = self.cached_source(vid)?;
+        (s.loudness_db.is_some() || self.cache.as_ref()?.loudness(vid).is_some() || !self.online()).then_some((s, path))
+    }
+
+    /// The playback cache's complete file for `vid`, with the loudness kept
+    /// beside it.
+    fn cached_source(&self, vid: &str) -> Option<(ResolvedStream, PathBuf)> {
+        let cache = self.cache.as_ref()?;
+        let (path, itag) = cache.find_video(vid)?;
         let s = ResolvedStream {
             video_id: vid.into(),
             url: Secret::new(String::new()),
@@ -502,13 +515,31 @@ impl Player {
             bitrate_kbps: None,
             content_length: std::fs::metadata(&path).ok().map(|m| m.len()),
             duration: None,
-            loudness_db: None,
+            loudness_db: cache.loudness(vid).flatten(),
             expires_at: None,
             range_safe: true,
             authenticated: false,
             available_at: None,
         };
         Some((s, path))
+    }
+
+    /// What a resolve said of the song's loudness is kept with the cache,
+    /// for the plays that come from its file. A resolve that failed for a
+    /// song the cache has whole plays that file, as it did before.
+    fn settle_cached(&self, vid: &str, res: Result<ResolvedStream, PlayFailure>) -> (Result<ResolvedStream, PlayFailure>, Option<PathBuf>) {
+        match res {
+            Ok(s) => {
+                if let Some(c) = &self.cache {
+                    c.set_loudness(vid, s.loudness_db);
+                }
+                (Ok(s), None)
+            }
+            Err(f) => match self.cached_source(vid) {
+                Some((s, p)) => (Ok(s), Some(p)),
+                None => (Err(f), None),
+            },
+        }
     }
 
     pub fn set_reporting(&self, on: bool) {
@@ -1178,7 +1209,7 @@ impl Player {
                         }
                         r => r,
                     };
-                    (res, None)
+                    me.settle_cached(&vid, res)
                 }
             };
             match &res {
@@ -1519,7 +1550,7 @@ impl Player {
                         return;
                     }
                 };
-                (res, None)
+                self.settle_cached(&vid, res)
             }
         };
         let ok = self.avail();

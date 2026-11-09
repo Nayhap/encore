@@ -766,7 +766,7 @@ impl NativeResolver {
             (None, None)
         };
         let url = formats::build_url(cand, sig.as_deref(), n.as_deref()).ok_or_else(|| Cause::Solver("the stream URL isn't a YouTube media address".into()))?;
-        let loudness = pr["playerConfig"]["audioConfig"]["loudnessDb"].as_f64().map(|l| l as f32);
+        let loudness = encore_core::service::loudness_db(&pr);
         let mut headers = Vec::new();
         if let Some(ua) = c.user_agent() {
             headers.push(("User-Agent".to_string(), ua.to_string()));
