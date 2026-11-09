@@ -60,12 +60,17 @@ pub fn open(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// The window's cookies as records. A webview gives a cookie's domain
+/// without its leading dot, so one for all of `youtube.com` reads like one
+/// for that host alone, and would never be sent to `music.youtube.com`. The
+/// login cookies are set for the whole of `youtube.com` and `google.com`,
+/// so those two get their dot back.
 fn to_records(cs: Vec<tauri::webview::Cookie<'static>>) -> Vec<CookieRecord> {
     cs.into_iter()
         .map(|c| CookieRecord {
             name: c.name().to_string(),
             value: c.value().to_string(),
-            domain: c.domain().map(|d| d.to_string()).unwrap_or_else(|| ".youtube.com".into()),
+            domain: cookie_domain(c.domain()),
             path: c.path().unwrap_or("/").to_string(),
             secure: c.secure().unwrap_or(true),
             http_only: c.http_only().unwrap_or(false),
@@ -74,10 +79,15 @@ fn to_records(cs: Vec<tauri::webview::Cookie<'static>>) -> Vec<CookieRecord> {
         .collect()
 }
 
+fn cookie_domain(d: Option<&str>) -> String {
+    match d.unwrap_or("youtube.com").trim_start_matches('.').to_ascii_lowercase().as_str() {
+        d @ ("youtube.com" | "google.com") => format!(".{d}"),
+        d => d.to_string(),
+    }
+}
+
 fn watch(app: AppHandle, w: tauri::WebviewWindow) {
     let t0 = Instant::now();
-    let music: url::Url = "https://music.youtube.com/".parse().unwrap();
-    let google: url::Url = "https://accounts.google.com/".parse().unwrap();
     loop {
         std::thread::sleep(Duration::from_millis(1000));
         if app.get_webview_window(LABEL).is_none() {
@@ -94,10 +104,11 @@ fn watch(app: AppHandle, w: tauri::WebviewWindow) {
         if !on_music {
             continue;
         }
-        let Ok(mut cs) = w.cookies_for_url(music.clone()) else { continue };
-        if let Ok(g) = w.cookies_for_url(google.clone()) {
-            cs.extend(g);
-        }
+        // Every cookie of the window, sorted out here: `cookies_for_url`
+        // answers by exact host on macOS, which leaves out the login
+        // cookies (they belong to `.youtube.com`), so the sign-in was
+        // never noticed and the window stayed open.
+        let Ok(cs) = w.cookies() else { continue };
         let mut jar = CookieJar::new(to_records(cs));
         jar.retain_needed();
         if !jar.has_login() {
@@ -119,5 +130,26 @@ fn watch(app: AppHandle, w: tauri::WebviewWindow) {
                 std::thread::sleep(Duration::from_secs(3));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_signed_in_window_is_recognised() {
+        // As the webviews give them: no leading dot on the domain.
+        let c = |name: &'static str, domain: &'static str| tauri::webview::Cookie::build((name, "v")).domain(domain).path("/").secure(true).build();
+        let cs = vec![c("SAPISID", "youtube.com"), c("__Secure-3PAPISID", ".youtube.com"), c("SID", "google.com"), c("YSC", "youtube.com"), c("NID", "www.google.com"), c("x", "example.com")];
+        let mut jar = CookieJar::new(to_records(cs));
+        jar.retain_needed();
+        assert!(jar.has_login());
+        assert!(jar.records().iter().all(|r| r.domain == ".youtube.com" || r.domain == ".google.com"));
+        assert_eq!(cookie_domain(Some("music.youtube.com")), "music.youtube.com");
+        // Signed out, the same window isn't.
+        let mut out = CookieJar::new(to_records(vec![c("YSC", "youtube.com"), c("VISITOR_INFO1_LIVE", "youtube.com")]));
+        out.retain_needed();
+        assert!(!out.has_login());
     }
 }
