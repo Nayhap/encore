@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "encore"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "encore-analysis"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "rustfft",
  "symphonia",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "encore-audio"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "cpal",
  "hex",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "encore-auth"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "encore-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "encore-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "hex",
@@ -1564,14 +1564,14 @@ dependencies = [
 
 [[package]]
 name = "encore-discord"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "encore-downloads"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "encore-audio",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "encore-lastfm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "encore-core",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "encore-lyrics"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "encore-core",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "encore-player"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "encore-audio",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "encore-resolver"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "encore-wiki"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "encore-core",
  "reqwest",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "encore-ytm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "encore-auth",
