@@ -11,6 +11,11 @@
 //! system purging caches) is noticed when it is looked up; the folder is
 //! read again on a miss at most every few minutes, for files another
 //! Encore (the CLI) put there.
+//!
+//! A song's loudness (D5) is kept beside its file, as `<videoId>.loud`: it
+//! comes with the stream's address, which a song played from the cache
+//! never asks for, so without it a cached song played louder than it did the
+//! first time.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -89,11 +94,14 @@ impl AudioCache {
     pub fn new(dir: impl Into<PathBuf>, limit: u64) -> std::io::Result<Self> {
         let dir = dir.into();
         make_dir(&dir)?;
-        // Crash cleanup: partial files are never valid media.
+        // Crash cleanup: partial files are never valid media, and a
+        // loudness note is of no use without its song's file.
         if let Ok(rd) = fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                if e.path().extension().is_some_and(|x| x == "part") {
-                    let _ = fs::remove_file(e.path());
+            let names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            let have: HashSet<&str> = names.iter().filter_map(|n| split_key(n.strip_suffix(".audio")?)).map(|k| k.0).collect();
+            for n in &names {
+                if n.ends_with(".part") || n.strip_suffix(".loud").is_some_and(|v| !have.contains(v)) {
+                    let _ = fs::remove_file(dir.join(n));
                 }
             }
         }
@@ -165,6 +173,49 @@ impl AudioCache {
         }
     }
 
+    fn loud_path(&self, vid: &str) -> PathBuf {
+        self.inner.dir.join(format!("{vid}.loud"))
+    }
+
+    /// Keep what the service said of a song's loudness (`None`: it gave
+    /// none), for when the song plays from its cached file.
+    pub fn set_loudness(&self, video_id: &str, db: Option<f32>) {
+        let Some(vid) = sanitize_key(video_id) else { return };
+        let text = db.filter(|d| d.is_finite()).map(|d| d.to_string()).unwrap_or_else(|| "none".into());
+        let p = self.loud_path(&vid);
+        if fs::read_to_string(&p).is_ok_and(|t| t == text) {
+            return;
+        }
+        if !self.inner.dir.is_dir() {
+            let _ = make_dir(&self.inner.dir);
+        }
+        let tmp = self.inner.dir.join(format!("{vid}.{}.loud.part", std::process::id()));
+        if fs::write(&tmp, text).is_ok() && fs::rename(&tmp, &p).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+
+    /// The loudness kept for a song: `None` when none was kept (a file
+    /// cached before Encore kept it), `Some(None)` when the service gave none.
+    pub fn loudness(&self, video_id: &str) -> Option<Option<f32>> {
+        let text = fs::read_to_string(self.loud_path(&sanitize_key(video_id)?)).ok()?;
+        match text.trim() {
+            "none" => Some(None),
+            t => t.parse::<f32>().ok().filter(|d| d.is_finite()).map(Some),
+        }
+    }
+
+    /// A file left the cache: its song's loudness goes with its last file.
+    fn removed(&self, key: &str) {
+        let mut ix = self.inner.index.lock();
+        ix.remove(key);
+        if let Some((vid, _)) = split_key(key)
+            && !ix.videos.contains_key(vid)
+        {
+            let _ = fs::remove_file(self.loud_path(vid));
+        }
+    }
+
     pub fn mark_open(&self, key: &str) {
         self.inner.open.lock().insert(key.to_string());
     }
@@ -224,7 +275,7 @@ impl AudioCache {
             }
             if fs::remove_file(&p).is_ok() {
                 total = total.saturating_sub(len);
-                self.inner.index.lock().remove(&key);
+                self.removed(&key);
             }
         }
     }
@@ -234,7 +285,7 @@ impl AudioCache {
         for (p, _, _) in self.entries() {
             let key = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
             if !open.contains(&key) && fs::remove_file(p).is_ok() {
-                self.inner.index.lock().remove(&key);
+                self.removed(&key);
             }
         }
     }
@@ -292,6 +343,34 @@ mod tests {
         c.clear();
         assert!(c.find_video("aaaaaaaaaaa").is_none());
         assert!(c.inner.index.lock().videos.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loudness_stays_with_the_file() {
+        let dir = std::env::temp_dir().join(format!("encore-cache-loud-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let c = AudioCache::new(&dir, 1 << 30).unwrap();
+        assert_eq!(c.loudness("aaaaaaaaaaa"), None);
+        c.set_loudness("aaaaaaaaaaa", Some(4.25));
+        c.set_loudness("bbbbbbbbbbb", None);
+        c.set_loudness("ccccccccccc", Some(-1.5));
+        assert_eq!(c.loudness("aaaaaaaaaaa"), Some(Some(4.25)));
+        assert_eq!(c.loudness("bbbbbbbbbbb"), Some(None));
+        for k in ["aaaaaaaaaaa-140", "bbbbbbbbbbb-251"] {
+            let part = c.part_path(k);
+            fs::write(&part, b"x").unwrap();
+            c.install(k, &part).unwrap();
+        }
+        // A new launch drops the note of a song that has no file.
+        let c = AudioCache::new(&dir, 1 << 30).unwrap();
+        assert_eq!(c.loudness("aaaaaaaaaaa"), Some(Some(4.25)));
+        assert_eq!(c.loudness("ccccccccccc"), None);
+        // And it goes with the file.
+        c.find_video("aaaaaaaaaaa").unwrap();
+        c.clear();
+        assert_eq!(c.loudness("aaaaaaaaaaa"), None);
+        assert_eq!(c.loudness("bbbbbbbbbbb"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

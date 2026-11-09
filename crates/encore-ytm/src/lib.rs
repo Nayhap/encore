@@ -798,9 +798,9 @@ impl MusicService for YtMusic {
     }
 }
 
-/// `playerConfig.audioConfig.loudnessDb` of a `/player` answer.
+/// The loudness of a `/player` answer.
 fn loudness_of(v: &Value) -> Option<f32> {
-    v.pointer("/playerConfig/audioConfig/loudnessDb").and_then(Value::as_f64).filter(|l| l.is_finite()).map(|l| l as f32)
+    encore_core::service::loudness_db(v)
 }
 
 /// For downloads (D23): the loudness YouTube measured, so a downloaded song
