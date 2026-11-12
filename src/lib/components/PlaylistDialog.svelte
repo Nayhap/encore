@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import { call, type BackendError, type Collection, type PlaylistEdit, type Privacy } from "$lib/backend";
   import { catalog } from "$lib/catalog.svelte";
-  import { nav, playlists, ui, type PlaylistSheet } from "$lib/state.svelte";
+  import { copyToPlaylist, nav, playlists, ui, type PlaylistSheet } from "$lib/state.svelte";
   import Icon from "./Icon.svelte";
 
   // Create or edit a playlist (D20). New playlists are private unless the
@@ -27,6 +27,7 @@
 
   const songs = sheet.trackIds ?? [];
   const firstSong = songs.length ? catalog.track(songs[0])?.title : null;
+  const copyLead = sheet.copyOf ? `A copy of “${sheet.sourceTitle}” with every song in it now. It won't follow later changes.` : null;
   const startsWith = songs.length === 1 && firstSong ? `Starts with “${firstSong}”.` : songs.length > 1 ? `Starts with ${songs.length} songs.` : null;
 
   const trimmed = $derived(title.trim());
@@ -46,7 +47,7 @@
   const opener = document.activeElement as HTMLElement | null;
   $effect(() => {
     titleEl?.focus();
-    if (editing) titleEl?.select();
+    if (editing || sheet.copyOf) titleEl?.select();
     return () => opener?.isConnected && opener.focus();
   });
 
@@ -85,6 +86,12 @@
   }
 
   async function create() {
+    // A copy is read and filled in the background (the player bar shows it).
+    if (sheet.copyOf) {
+      ui.sheet = null;
+      void copyToPlaylist(sheet.copyOf, trimmed, description.trim(), privacy);
+      return;
+    }
     const r = await call((a) => a.playlistCreate(trimmed, description.trim(), privacy, songs));
     if (r.outcome === "done" && r.id) {
       playlists.insert({ id: r.id, kind: "playlist", title: trimmed, subtitle: "Playlist", artists: [], year: null, art: null, playId: null });
@@ -125,8 +132,8 @@
 
 <div class="scrim" role="presentation" onmousedown={(e) => e.target === e.currentTarget && close()}>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="pl-title" tabindex="-1" bind:this={box} onkeydown={key}>
-    <h2 id="pl-title">{editing ? "Edit details" : "New playlist"}</h2>
-    {#if startsWith}<p class="lead">{startsWith}</p>{/if}
+    <h2 id="pl-title">{editing ? "Edit details" : sheet.copyOf ? "Save as playlist" : "New playlist"}</h2>
+    {#if copyLead ?? startsWith}<p class="lead">{copyLead ?? startsWith}</p>{/if}
     <form onsubmit={submit}>
       <label class="field">
         <span>Name</span>

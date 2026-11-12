@@ -159,6 +159,7 @@ const hist: { title: string; rows: T.HistoryRow[] }[] = [
 ];
 hist[0].rows = [M.tracks[3], M.tracks[14], M.tracks[0]].map((t) => row(t.id));
 let reportHistory = true;
+let normalise = true;
 function played(t: T.Track) {
   // The local play log counts every play (D30); history skips a private session's (D36).
   mockStatsPlayed(t);
@@ -722,6 +723,7 @@ export const mockApi: Api = {
     return delay({
       version: "mock",
       reportHistory,
+      normalise,
       notice: null,
       auth,
       player: snap(),
@@ -1101,6 +1103,9 @@ export const mockApi: Api = {
     if (!c) throw { code: "notFound", message: "YouTube Music has no other version of this.", retryable: false, action: null };
     await mockApi.playNext([c.track]);
     if (P.index != null && P.entries.length > 1) go(P.index + 1);
+  },
+  async setNormalise(on) {
+    normalise = on;
   },
   async setReportHistory(on) {
     reportHistory = on;

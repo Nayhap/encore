@@ -79,6 +79,7 @@ export const tauriApi: Api = {
   switchVersion: (uid) => u(commands.switchVersion(uid)) as any,
   playVersion: (t) => u(commands.playVersion(t)) as any,
   setReportHistory: (on) => u(commands.setReportHistory(on)) as any,
+  setNormalise: (on) => u(commands.setNormalise(on)) as any,
   authState: () => u(commands.authState()) as any,
   browserProfiles: () => u(commands.browserProfiles()),
   importBrowser: (p) => u(commands.importBrowser(p)) as any,

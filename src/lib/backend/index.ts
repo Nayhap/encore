@@ -109,6 +109,7 @@ export interface Api {
   /** Play the other version of a track now, keeping the queue. */
   playVersion(track: T.Track): Promise<void>;
   setReportHistory(on: boolean): Promise<void>;
+  setNormalise(on: boolean): Promise<void>;
   authState(): Promise<T.AuthState>;
   browserProfiles(): Promise<T.BrowserProfile[]>;
   importBrowser(profileId: string): Promise<T.AuthState>;

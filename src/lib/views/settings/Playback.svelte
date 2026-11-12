@@ -29,6 +29,14 @@
     }
   }
 
+  function setNormalise(on: boolean) {
+    ui.normalise = on;
+    call((a) => a.setNormalise(on)).catch((e) => {
+      ui.normalise = !on;
+      ui.say(`Could not change that: ${e.message}`);
+    });
+  }
+
   function setReport(on: boolean) {
     ui.reportHistory = on;
     call((a) => a.setReportHistory(on)).catch((e) => {
@@ -46,6 +54,13 @@
       <p>{autoplayCopy(player.autoplay, ui.online)}</p>
     </div>
     <input type="checkbox" role="switch" checked={player.autoplay} onchange={(e) => player.setAutoplay(e.currentTarget.checked)} />
+  </label>
+  <label class="row">
+    <div>
+      <b>Normalise volume</b>
+      <p>Turns loud songs down so every song plays at about the same level, as youtube.com does. Off, each song plays as loud as it was made, so some are louder than others. A change applies from the next song.</p>
+    </div>
+    <input type="checkbox" role="switch" checked={ui.normalise} onchange={(e) => setNormalise(e.currentTarget.checked)} />
   </label>
   <div class="row">
     <label class="grow" for="report-history">

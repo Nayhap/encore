@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Settings scope and keys in the store (D11).
 pub const SETTINGS: &str = "settings";
 pub const REPORT_HISTORY: &str = "report_history";
+pub const NORMALISE: &str = "normalise_volume";
 /// In-app updates (D24): install automatically (default on), the version
 /// the user skipped, when GitHub last answered a check, and the version
 /// whose "What's new" was last shown.
@@ -197,6 +198,7 @@ impl Core {
         let player = Player::new(ytm.clone(), resolver.clone(), auth_provider(it.clone()), Some(audio_cache.clone()))?;
         // On unless turned off (it only ever reports for a signed-in account).
         player.set_reporting(store.get::<bool>(SETTINGS, REPORT_HISTORY).ok().flatten().unwrap_or(true));
+        player.set_normalise(store.get::<bool>(SETTINGS, NORMALISE).ok().flatten().unwrap_or(true));
         let lyrics = Arc::new(LyricsService::new(ytm.clone(), Some(store.clone())));
         let downloads_dir = Paths::downloads();
         let art = Arc::new(crate::art::ArtCache::new(paths.cache.join("art"), store.clone(), downloads_dir.as_ref().map(|d| d.join("art"))));

@@ -395,6 +395,9 @@ export interface PlaylistSheet {
   privacy?: Privacy;
   /** Creating from "Add to playlist": the songs it starts with. */
   trackIds?: string[];
+  /** Creating a copy of a list ("Save as playlist…"): the list and its name. */
+  copyOf?: string;
+  sourceTitle?: string;
 }
 
 /** A yes/no question before something that can't be undone. */
@@ -424,6 +427,8 @@ class UI {
   confirm = $state<Confirm | null>(null);
   /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
   reportHistory = $state(true);
+  /** Settings → Playback → "Normalise volume". */
+  normalise = $state(true);
   /** Bumps when a play was reported, so History can refresh. */
   historyRev = $state(0);
   /** Encore can reach YouTube; Rust decides (D23). */
@@ -1138,6 +1143,7 @@ export async function connect() {
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  ui.normalise = b.normalise;
   ui.online = b.online;
   if (b.notice) ui.say(b.notice, "error");
   await downloads.refresh();
