@@ -85,6 +85,11 @@ export const commands = {
 	/**  Play the other version of a track that is not playing, keeping the queue. */
 	playVersion: (track: Track_Deserialize) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("play_version", { track })),
 	setReportHistory: (on: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("set_report_history", { on })),
+	/**
+	 *  Turn loud songs down to YouTube's level, or play every song as it was
+	 *  mastered (D5). Applies from the next song that loads.
+	 */
+	setNormalise: (on: boolean) => typedError<null, AppError_Serialize>(__TAURI_INVOKE("set_normalise", { on })),
 	authState: () => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("auth_state")),
 	browserProfiles: () => typedError<BrowserProfile[], AppError_Serialize>(__TAURI_INVOKE("browser_profiles")),
 	importBrowser: (profileId: string) => typedError<AuthState_Serialize, AppError_Serialize>(__TAURI_INVOKE("import_browser", { profileId })),
@@ -583,6 +588,8 @@ export type Bootstrap_Deserialize = {
 	engine: EngineStatus_Deserialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Settings → Playback → "Normalise volume" (D5). */
+	normalise: boolean,
 	/**  Something from startup the user should know (shown once). */
 	notice?: string | null,
 	/**  Encore can reach YouTube (D23). */
@@ -600,6 +607,8 @@ export type Bootstrap_Serialize = {
 	engine: EngineStatus_Serialize,
 	/**  Settings → Playback → "Send plays to YouTube history". */
 	reportHistory: boolean,
+	/**  Settings → Playback → "Normalise volume" (D5). */
+	normalise: boolean,
 	/**  Something from startup the user should know (shown once). */
 	notice: string | null,
 	/**  Encore can reach YouTube (D23). */

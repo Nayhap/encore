@@ -34,6 +34,8 @@ pub struct Bootstrap {
     pub engine: EngineStatus,
     /// Settings → Playback → "Send plays to YouTube history".
     pub report_history: bool,
+    /// Settings → Playback → "Normalise volume" (D5).
+    pub normalise: bool,
     /// Something from startup the user should know (shown once).
     pub notice: Option<String>,
     /// Encore can reach YouTube (D23).
@@ -83,6 +85,7 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
         queue: core.player.queue_snapshot(),
         engine: core.resolver.engine_status(),
         report_history: core.player.reporting(),
+        normalise: core.player.normalise(),
         notice: core.take_startup_notice(),
         online: core.connectivity.online(),
         update: app.state::<Arc<Updates>>().status(),
@@ -94,6 +97,16 @@ pub async fn bootstrap(app: AppHandle) -> Result<Bootstrap> {
 pub async fn set_report_history(core: S<'_>, on: bool) -> Result<()> {
     core.player.set_reporting(on);
     core.store.put(crate::core::SETTINGS, crate::core::REPORT_HISTORY, &on, None)?;
+    Ok(())
+}
+
+/// Turn loud songs down to YouTube's level, or play every song as it was
+/// mastered (D5). Applies from the next song that loads.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_normalise(core: S<'_>, on: bool) -> Result<()> {
+    core.player.set_normalise(on);
+    core.store.put(crate::core::SETTINGS, crate::core::NORMALISE, &on, None)?;
     Ok(())
 }
 

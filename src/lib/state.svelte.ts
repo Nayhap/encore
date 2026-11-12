@@ -427,6 +427,8 @@ class UI {
   confirm = $state<Confirm | null>(null);
   /** Settings → Playback; Rust owns the value (loaded at bootstrap). */
   reportHistory = $state(true);
+  /** Settings → Playback → "Normalise volume". */
+  normalise = $state(true);
   /** Bumps when a play was reported, so History can refresh. */
   historyRev = $state(0);
   /** Encore can reach YouTube; Rust decides (D23). */
@@ -1141,6 +1143,7 @@ export async function connect() {
   const b = await call((a) => a.bootstrap());
   account.state = b.auth;
   ui.reportHistory = b.reportHistory;
+  ui.normalise = b.normalise;
   ui.online = b.online;
   if (b.notice) ui.say(b.notice, "error");
   await downloads.refresh();

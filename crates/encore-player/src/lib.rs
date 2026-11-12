@@ -157,6 +157,8 @@ pub struct Player {
     cache: Option<AudioCache>,
     /// Report plays to the service's history (a user setting, D18).
     reporting: Arc<AtomicBool>,
+    /// Settings → Playback → "Normalise volume" (D5).
+    normalise: AtomicBool,
     /// Downloaded songs (D23).
     local: Mutex<Option<Arc<dyn LocalAudio>>>,
     online: Arc<AtomicBool>,
@@ -238,6 +240,7 @@ impl Player {
             preloaded_streams: Mutex::new(HashMap::new()),
             cache: cache_for_player,
             reporting: Arc::new(AtomicBool::new(false)),
+            normalise: AtomicBool::new(true),
             local: Mutex::new(None),
             online: Arc::new(AtomicBool::new(true)),
             link: Arc::new(AtomicU64::new(0)),
@@ -497,7 +500,7 @@ impl Player {
         // time. Online, such a song is resolved once more (which keeps its
         // loudness; the audio still comes from the file).
         let (s, path) = self.cached_source(vid)?;
-        (s.loudness_db.is_some() || self.cache.as_ref()?.loudness(vid).is_some() || !self.online()).then_some((s, path))
+        (!self.normalise() || s.loudness_db.is_some() || self.cache.as_ref()?.loudness(vid).is_some() || !self.online()).then_some((s, path))
     }
 
     /// The playback cache's complete file for `vid`, with the loudness kept
@@ -540,6 +543,25 @@ impl Player {
                 None => (Err(f), None),
             },
         }
+    }
+
+    /// Whether loud songs are turned down to YouTube's level (D5). A change
+    /// applies from the next song that loads.
+    pub fn set_normalise(&self, on: bool) {
+        self.normalise.store(on, Ordering::Relaxed);
+    }
+
+    pub fn normalise(&self) -> bool {
+        self.normalise.load(Ordering::Relaxed)
+    }
+
+    /// The gain for a song, in dB: down by what it is above the target,
+    /// never up; none with normalisation off.
+    fn gain_db(&self, stream: &ResolvedStream) -> f32 {
+        if !self.normalise() {
+            return 0.0;
+        }
+        stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0)
     }
 
     pub fn set_reporting(&self, on: bool) {
@@ -1224,7 +1246,7 @@ impl Player {
                 match res {
                     Ok(stream) => {
                         let load_id = promoted.unwrap_or_else(|| me.next_load.fetch_add(1, Ordering::Relaxed));
-                        let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
+                        let gain = me.gain_db(&stream);
                         let spec = match path {
                             Some(p) => SourceSpec::File(p),
                             None => me.http_spec(&stream),
@@ -1574,7 +1596,7 @@ impl Player {
             st.preload = Some((entry.uid.clone(), load_id));
             st.preload_local = path.is_some();
             self.prune_decks(&mut st);
-            let gain = stream.loudness_db.map(|l| -(l.max(0.0))).unwrap_or(0.0);
+            let gain = self.gain_db(&stream);
             let spec = match path {
                 Some(p) => SourceSpec::File(p),
                 None => self.http_spec(&stream),

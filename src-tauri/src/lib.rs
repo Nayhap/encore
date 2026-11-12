@@ -85,6 +85,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             switch_version,
             play_version,
             set_report_history,
+            set_normalise,
             auth_state,
             browser_profiles,
             import_browser,
