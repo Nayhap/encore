@@ -186,6 +186,14 @@
     color: var(--mute);
     font-size: 13.5px;
   }
+  /* Inline, so a long artist or album name wraps as running text from
+     the left edge. As a button's own box it wrapped inside itself, centred,
+     and dropped whole to the next line (seen in a narrow panel). */
+  .titles p button {
+    display: inline;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
   .titles p button:hover {
     color: var(--text);
     text-decoration: underline;
