@@ -43,7 +43,8 @@
   Brand channels are supported.
 - **Playlists you can manage**: create, rename, describe, make private,
   unlisted or public, reorder by dragging, and delete. "Add to playlist"
-  warns about duplicates and can start a new playlist.
+  warns about duplicates and can start a new playlist. **Save as playlist**
+  copies any list, including Liked Music, into a real playlist of yours.
 - **Your history**: plays count in your YouTube Music history and
   recommendations, as in the official app (you can turn this off), and a
   History page shows what you played, by day, and your listening stats for

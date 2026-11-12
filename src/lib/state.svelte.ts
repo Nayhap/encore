@@ -395,6 +395,9 @@ export interface PlaylistSheet {
   privacy?: Privacy;
   /** Creating from "Add to playlist": the songs it starts with. */
   trackIds?: string[];
+  /** Creating a copy of a list ("Save as playlist…"): the list and its name. */
+  copyOf?: string;
+  sourceTitle?: string;
 }
 
 /** A yes/no question before something that can't be undone. */
